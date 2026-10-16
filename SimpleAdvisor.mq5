@@ -246,12 +246,9 @@ int OnInit()
    g_panelH = HEAD_H + TF_COUNT * 2 * g_rowH + 8;
 
    //  The notice is the one line that must always be readable in full, so
-   //  widen the panel if a large font size would otherwise clip it.  The
-   //  estimate is deliberately generous: a monospaced face at the default
-   //  10-point size needs about 0.55 em per character, and MetaTrader sizes
-   //  fonts in points, so 0.75 em (rounded up) can only ever be too wide.
-   int noticeW = 10 + StringLen(IncompatibleNotice()) * CharW(InpFontSize + 1) + 10;
-   if(noticeW > g_panelW) g_panelW = noticeW;
+   //  the width that line needs is a floor for BOTH panels - the normal one
+   //  and the notice one - whatever the font size.
+   g_panelW = NoticeWidth();
 
    BuildPanel();
 
@@ -1105,6 +1102,17 @@ void MakeLabel(string name, int x, int y, string text, color clr,
 //  font size.  Used only to keep long text inside the panel box; it is
 //  rounded up so the estimate errs on the wide side.
 //+------------------------------------------------------------------+
+//  The width the header + notice need.  Both panels are at least this
+//  wide, so the notice can never be clipped - it is the one line that
+//  must always be readable in full, whatever the font size.
+//+------------------------------------------------------------------+
+int NoticeWidth()
+{
+   int w = 10 + StringLen(IncompatibleNotice()) * CharW(InpFontSize + 1) + 10;
+   if(w < PLAN_W_MIN) w = PLAN_W_MIN;
+   return(w);
+}
+
 //+------------------------------------------------------------------+
 //  Estimated width of one character, in pixels, for a given point size.
 //  MetaTrader sizes fonts in POINTS, so what that means in pixels depends
@@ -1205,7 +1213,7 @@ void DrawSupportedPanel()
    //  Size the panel to its content BEFORE drawing the background, so the
    //  trade plan can never be clipped on the right - and so the box hugs
    //  the content instead of leaving a wide empty edge when signals go.
-   int wantW = PLAN_W_MIN;
+   int wantW = NoticeWidth();
    if(InpShowPlan) wantW = (int)MathMax(wantW, PlanWidthNeed());
    g_panelW = wantW;
    g_panelH = HEAD_H + TF_COUNT * 2 * rowH + 8
@@ -1271,7 +1279,7 @@ void DrawSupportedPanel()
       }
    }
 
-   // ---- trade plan for the chart's own timeframe --------------------
+   // ---- the trade plan: one block per timeframe below the rows -------
    if(InpShowPlan) DrawPlanBlock(x, y);
    else            DeletePlanObjects();
 

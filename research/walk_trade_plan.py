@@ -25,11 +25,14 @@ from verify_plan_math import SYMBOLS, plan, point_value_per_lot   # noqa: E402
 
 HEAD_H, TF_COUNT, PLAN_SEP_H, PLAN_COL_A, PLAN_COL_B, PLAN_COL_C = 34, 3, 14, 150, 282, 414
 PLAN_W_MIN = 406
+# IncompatibleNotice() in the EA, verbatim
+NOTICE = "Incompatible chart. Switch to M5/M15/M30."
 PLAN_LBL_C = 8
 FONT = 9
 EM_EST = 0.55      # CharW(): what the EA budgets per character
 DPI = 96
-RENDER_CW = 9 * 96 / 72.0 * 0.55      # what the glyphs really occupy (6.6 px)
+RENDER_CW = 9 * 96 / 72.0 * 0.55      # what one glyph really occupies (6.6 px)
+CELL = RENDER_CW                      # the picture is one character per glyph
 
 MINUTES = {"M5": 5, "M15": 15, "M30": 30}
 HOLD, WAITING, ACTIVE = 0, 1, 2
@@ -49,7 +52,8 @@ class Panel:
 
     def __init__(self, symbol, spec, balance, tags=("M5", "M15", "M30"),
                  cur="USD", use_risk=True, use_min_lot=False, risk2=0.5, risk3=1.0,
-                 sl_atr=1.2, tp_atr=2.4, pend_atr=0.5, valid_bars=3, show_plan=True):
+                 sl_atr=1.2, tp_atr=2.4, pend_atr=0.5, valid_bars=3, show_plan=True,
+                 atr=None):
         self.symbol, self.spec, self.balance, self.cur = symbol, spec, balance, cur
         self.tags = tags
         self.use_risk, self.use_min_lot = use_risk, use_min_lot
@@ -64,7 +68,8 @@ class Panel:
         self.plans = {t: dict(state=HOLD, dir=0, score=0, market=False, lines=1,
                               head=t, kind="", note="", lbl={}, val={}, clr={})
                       for t in tags}
-        self.atr = {"M5": 0.28, "M15": 0.85, "M30": 1.70}
+        #  average ranges, in PRICE terms, for the symbol this panel is on
+        self.atr = atr or {"M5": 0.28, "M15": 0.85, "M30": 1.70}
         self.now = {"M5": "14:30", "M15": "14:45", "M30": "15:00"}
 
     def set_reading(self, tag, direction=0, score=0, trend="Sideways",
@@ -209,30 +214,39 @@ class Panel:
         row_h = FONT + 11
         self.panel_h = (HEAD_H + TF_COUNT * 2 * row_h + 8
                         + (PLAN_SEP_H + self.total_plan_lines() * row_h if self.show_plan else 0))
-        want = PLAN_W_MIN
+        # the real EA: NoticeWidth() is the floor for BOTH panels, then the
+        # plan's own measured need (when it is shown) can only add to it
+        want = max(PLAN_W_MIN,
+                   10 + len(NOTICE) * char_w(FONT + 1, DPI) + 10)
         if self.show_plan:
             want = max(want, self.plan_width_need())
         self.panel_w = want
 
-        w_cols = int((self.panel_w - 4) / CW)      # usable columns in the box
+        w_cols = int((self.panel_w - 4) / CELL)    # usable half-glyph columns
         grid = [[" "] * w_cols for _ in range(40)]
+        last_col = {}                              # rightmost column used per line
         placed = []                                # (row, x_end_px) for the edge check
 
         def put(text, x_px, line):
             if not text:
                 return
-            col = max(0, int(round(x_px / CW)))
+            col = max(0, int(round(x_px / CELL)))
+            #  keep labels and values visually apart: the real panel leaves a
+            #  few pixels between them, and whole-character rounding can
+            #  swallow that gap ("Trend:" + its value would read as one word)
+            col = max(col, last_col.get(line, -1) + 2)
             for k, ch in enumerate(text):
                 if col + k < w_cols:
                     grid[line][col + k] = ch
-            placed.append((line, x_px + len(text) * CW, text))
+            last_col[line] = col + len(text) - 1
+            placed.append((line, x_px, x_px + len(text) * RENDER_CW, text))
 
         separators = set()
 
         # ---- Group 1 -----------------------------------------------------
         put("SimpleEA", 10, 0)
         sym = "%s  %s" % (self.symbol, self.tags[0])
-        put(sym, self.panel_w - 10 - len(sym) * CW, 0)
+        put(sym, self.panel_w - 10 - len(sym) * RENDER_CW, 0)
         separators.add(1)
         line = 2
         for t in self.tags:
@@ -289,17 +303,95 @@ class Panel:
             print("  | %s |" % txt.ljust(w_cols))
         print("  +" + "-" * w_cols + "+")
         print("  panel: %d x %d px   (one character = %.1f px)"
-              % (self.panel_w, self.panel_h, CW))
+              % (self.panel_w, self.panel_h, CELL))
 
         # ---- the guarantee: nothing drawn may pass the right edge --------
         over = []
-        for line, x_end, txt in placed:
+        for line, x0, x_end, txt in placed:
             if x_end > self.panel_w - 3:
                 over.append((line, txt, x_end))
         for line, txt, w in over:
             print("  !! line %d ends at %.0f px in a %d px panel: %r"
                   % (line, w, self.panel_w, txt))
+        self.placed = placed
         return over
+
+
+# ---------------------------------------------------------------------
+#  The width sweep: CharW() budgets 0.55 em per character.  MetaTrader
+#  sizes fonts in points, so the pixel advance depends on the screen DPI,
+#  and different monospaced faces are not all 0.55 em wide.  This section
+#  re-measures the widest line of the widest case with REAL glyph
+#  advances, from a 72 dpi laptop screen to a 192 dpi monitor and font
+#  sizes 6..16, and reports what the budget costs.  It fails only if the
+#  default font (Consolas) would clip - a wider face is reported, since
+#  every pixel of slack is a pixel of panel the user asked not to waste.
+# ---------------------------------------------------------------------
+ADVANCES = {"Consolas (the default)": 0.5498,
+            "DejaVu Sans Mono": 0.6020,
+            "Courier New": 0.6000,
+            "Lucida Console": 0.6000}
+
+
+def sweep():
+    print("\n" + "=" * 96)
+    print("Width sweep - does the 0.55 em budget hold up across DPI and font size?")
+    print("=" * 96)
+    worst = {}
+    for name, adv in ADVANCES.items():
+        worst[name] = (0.0, None, 0.0)
+        for dpi in (72, 96, 120, 144, 192):
+            for size in range(6, 17):
+                # the widest line the panel ever draws, in this font size:
+                # case A (three active timeframes) is the widest of the eight
+                p = Panel("XAUUSD", SYMBOLS["XAUUSD-2d"], 800.0)
+                for t, r in (("M5",  dict(direction=-1, score=-3, trend="Going down", regime="Steady")),
+                             ("M15", dict(direction=1,  score=2,  trend="Going up",   regime="Mixed")),
+                             ("M30", dict(direction=-1, score=-2, trend="Going down", regime="Choppy"))):
+                    p.set_reading(t, **r)
+                p.price = 4285.70
+                p.update_plan()
+                # widths as the EA computes them, at THIS dpi and size
+                em_bud = char_w(size, dpi)
+                em_real = size * dpi / 72.0 * adv
+                need_bud = panel_need_at(p, em_bud)
+                need_real = panel_need_at(p, em_real)
+                if need_real > need_bud:
+                    f = (need_real / need_bud - 1.0) * 100.0
+                    if f > worst[name][0]:
+                        worst[name] = (f, (dpi, size), need_real - need_bud)
+        f, where, px = worst[name]
+        if px <= 0:
+            print("  %-22s budget always sufficient" % name)
+        else:
+            print("  %-22s widest overshoot %+6.2f px (%+.1f%%) at dpi %d, font %d"
+                  % (name, px, f, where[0], where[1]))
+    f, where, px = worst["Consolas (the default)"]
+    return px > 0.5
+
+
+def panel_need_at(p, em):
+    """PlanWidthNeed()/NoticeWidth() with a given pixel width per character."""
+    cA, cB, cC = PLAN_COL_A, PLAN_COL_B, PLAN_COL_C
+    vA, vB = cA + em * PLAN_LBL_C, cB + em * PLAN_LBL_C
+    wA = max([len(q["val"][(l, 0)]) for q in p.plans.values()
+              for l in range(q["lines"]) if (l, 0) in q["val"]] or [0])
+    cB = max(cB, vA + wA * em + em * 2)
+    vB = cB + em * PLAN_LBL_C
+    wB = max([len(q["val"][(l, 1)]) for q in p.plans.values()
+              for l in range(q["lines"]) if (l, 1) in q["val"]] or [0])
+    cC = max(cC, vB + wB * em + em * 2)
+    vC = cC + em * PLAN_LBL_C
+    need = max(PLAN_W_MIN, 10 + len(NOTICE) * em + 10,
+               44 + len("pending +3/3") * em + 10)
+    for q in p.plans.values():
+        if q["lines"] == 1:
+            if q["note"]:
+                need = max(need, cA + len(q["note"]) * em + 10)
+            continue
+        for (l, c), v in q["val"].items():
+            need = max(need, (vA, vB, vC)[c] + len(v) * em + 10)
+    return need
 
 
 def case(title, readings, symbol="XAUUSD", spec=None, balance=800.0, price=4285.70, **kw):
@@ -344,15 +436,18 @@ def main():
                  "M15": dict(direction=0, score=0),
                  "M30": dict(direction=0, score=0)},
                 symbol="EURUSD", spec=SYMBOLS["EURUSD-5d"], balance=800.0,
-                use_min_lot=True, price=1.08542)
+                use_min_lot=True, price=1.08542,
+                atr={"M5": 0.00055, "M15": 0.00090, "M30": 0.00140})
     bad += case("H)  InpShowPlan = false: Group 2 is not drawn at all",
                 {"M5":  dict(direction=1, score=3, trend="Going up", regime="Steady"),
                  "M15": dict(direction=0, score=0),
                  "M30": dict(direction=0, score=0)}, show_plan=False)
 
+    bad += [("sweep", 0.0, 0.0)] if sweep() else []
+
     print("\n" + "=" * 96)
     if bad:
-        print("FAILED: %d line(s) overflow" % len(bad))
+        print("FAILED: %d problem(s)" % len(bad))
         sys.exit(1)
     print("PASS: every case fits.  The panel measures Group 2's text and sizes")
     print("itself before drawing, and HOLD/waiting rows collapse to one line,")

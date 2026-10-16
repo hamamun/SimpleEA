@@ -222,8 +222,15 @@ this: when autotrading arrives, the executor reads one row and acts on that time
 
 **A HOLD or waiting timeframe takes a single line**, so the group is only as tall as it has
 content for — and the panel is only as wide as its widest line, measured before it is drawn.
-With no signals anywhere the group is three short lines; with `InpShowPlan=false` it is not drawn
+With no signals anywhere the group is three short lines and the box shrinks back to the width the
+header and the "Incompatible chart" notice need; with `InpShowPlan=false` the group is not drawn
 at all.
+
+The width budget is one character = 0.55 em at the terminal's own screen DPI, which is exactly
+what the default font (`InpFont = "Consolas"`) occupies — so the panel is neither clipped nor
+padded. A wider monospaced face (Courier New, Lucida Console, ~0.60 em) on a big font can make a
+long line touch the border: `research/walk_trade_plan.py` measures that across DPI 72–192 and
+sizes 6–16 and prints the answer at the end of its run.
 
 | Your question | How the panel answers it |
 |---|---|
@@ -364,6 +371,7 @@ python walk_timeframes.py       # prints what the chart shows at each timeframe 
 python horizon_study.py         # measured signal horizon -> research/HORIZON.md
 python verify_plan_math.py      # lot / points / money arithmetic, symbol by symbol
 python walk_trade_plan.py       # renders the panel (Group 1 + Group 2) for 8 states
+                                # (its output is saved as research/panel_layout.txt)
 python run3.py           # IS/OOS + Monte-Carlo null, 2026 sample
 python run2015.py        # same, independent 2015 era
 ```
