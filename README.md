@@ -23,9 +23,41 @@ so nothing from the first panel is lost:
   **Mixed** (no clear habit), or **Choppy** (keeps turning back on itself).
 - **Signal / Score** are the original read, unchanged: Going up = **BUY**, Going down =
   **SELL**, Sideways = **HOLD**, with the score that produced it beside it.
+- On any chart timeframe other than M5 / M15 / M30 the panel shows **no data at all** — just the
+  header line and a notice. See *Chart timeframe rule* below.
 
 The two are independent, so all nine pairings can appear — e.g. *Going up + Choppy* means
 "rising overall, but messily."
+
+### Chart timeframe rule
+
+This engine is calibrated for **M5, M15 and M30 only**, so the panel is only shown on those
+charts. Put the EA on **any other timeframe** (M1, M2, M4, H1, H4, D1, …) and it shows no data
+at all — just the header line, with the notice where the timeframe rows would have started:
+
+```
+ ┌─────────────────────────────────────────────────────────────┐
+ │  SimpleEA                                       XAUUSD  H1  │
+ ├─────────────────────────────────────────────────────────────┤
+ │  Incompatible chart. Switch to M5/M15/M30.                  │
+ └─────────────────────────────────────────────────────────────┘
+```
+
+Read as one line: **SimpleEA | Incompatible chart. Switch to M5/M15/M30.**
+
+While the chart is on a wrong timeframe **nothing is calculated**: no history is pulled, no
+indicator runs, and the M5/M15/M30 rows are not drawn at all — so there is no stale or
+out-of-context number on the screen that could be mistaken for a live read. The chart's own
+timeframe is named in the header, and the same line goes to the *Experts* journal:
+
+```
+SimpleEA: the H1 chart is not supported. This panel is calibrated for M5/M15/M30 only
+- switch the chart timeframe to see it.
+```
+
+Switch the chart back to M5, M15 or M30 and the full panel returns immediately, recalculated
+from current data — whether or not MetaTrader restarts the EA for the change. The whole rule is
+verified state by state in `research/verify_timeframe_gate.py`.
 
 **It contains no order-sending code.** It cannot place, modify or close a trade, so it is safe to
 leave on a live chart.
@@ -43,8 +75,10 @@ leave on a live chart.
 2. Copy `SimpleAdvisor.mq5` into that folder (a subfolder such as `Experts\SimpleEA\` is fine).
 3. Open **MetaEditor** (F4), open the file, press **F7** to compile. Expect `0 errors`.
 4. Back in the terminal, press **Ctrl+N** → Navigator → Expert Advisors → drag `SimpleAdvisor`
-   onto **any chart** (the chart's own timeframe does not matter — the panel always reads
-   M5, M15 and M30).
+   onto an **M5, M15 or M30 chart** (any symbol works; those three timeframes are the ones the
+   engine is calibrated for). On any other timeframe the panel deliberately shows only its header
+   and the *Incompatible chart* notice — drop it on an H1 chart and that is exactly what you will
+   see.
 5. Colours, position, and font are all inputs under *Panel appearance*.
 
 > If a row shows `waiting ...`, the terminal has not finished downloading history for that
@@ -226,7 +260,8 @@ performance claim.
 ```bash
 pip install numpy pandas
 cd research
-python verify_mql.py     # proves the MQL5 math == the validated reference engine
+python verify_mql.py            # proves the MQL5 math == the validated reference engine
+python verify_timeframe_gate.py # proves the M5/M15/M30-only chart rule, switch by switch
 python run3.py           # IS/OOS + Monte-Carlo null, 2026 sample
 python run2015.py        # same, independent 2015 era
 ```

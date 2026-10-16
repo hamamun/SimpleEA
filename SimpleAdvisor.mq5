@@ -54,6 +54,19 @@
 //|  a historical direction never changes after the fact.             |
 //|                                                                  |
 //|  -----------------------------------------------------------------|
+//|  CHART-TIMEFRAME RULE                                             |
+//|  -----------------------------------------------------------------|
+//|  The engine is calibrated for M5, M15 and M30 ONLY.  If the chart |
+//|  is put on any other timeframe, no data is shown: the panel       |
+//|  collapses to a single header line that says so -                 |
+//|                                                                  |
+//|     SimpleEA | Incompatible chart. Switch to M5/M15/M30.          |
+//|                                                                  |
+//|  Nothing is calculated at all while the chart is on a wrong       |
+//|  timeframe, so no stale or out-of-context number can be read off  |
+//|  the screen.  Switching the chart back to M5, M15 or M30 brings   |
+//|  the full panel straight back.                                    |
+//|  -----------------------------------------------------------------|
 //|  HONEST NOTE ON EXPECTATION                                       |
 //|  -----------------------------------------------------------------|
 //|  This panel is a structured, low-lag reading of trend, momentum   |
@@ -64,8 +77,8 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "1.11"
-#property description "Read-only multi-timeframe BUY/SELL/HOLD direction panel for M5 / M15 / M30 on any symbol."
+#property version   "1.12"
+#property description "Read-only multi-timeframe BUY/SELL/HOLD direction panel. M5 / M15 / M30 charts only; other timeframes show a header-only notice."
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -119,6 +132,13 @@ input double   InpHurstRevertM30 = 0.45;
 //==================================================================
 #define OBJ_PREFIX "SA_"
 #define TF_COUNT   3
+#define TF_TEXT    "M5/M15/M30"
+#define HEAD_H     34     // height of the header band (title + symbol line)
+
+//  The only chart timeframes this engine is calibrated for.  Anything else
+//  is refused outright - see the CHART-TIMEFRAME RULE block in the header
+//  and the "Incompatible chart" notice below.
+#define TIMEFRAME_OK(tf) ((tf) == PERIOD_M5 || (tf) == PERIOD_M15 || (tf) == PERIOD_M30)
 
 struct SRow
 {
@@ -140,9 +160,12 @@ struct SRow
 
 SRow g_rows[TF_COUNT];
 
-int g_panelW = 392;
-int g_panelH = 130;
-int g_rowH   = 20;
+int  g_panelW  = 406;   // wide enough for the header + the notice line
+int  g_panelH  = 130;   // height of the full panel (recomputed in OnInit)
+int  g_rowH    = 20;
+bool g_panelOK = false; // what is currently drawn: false = notice only
+
+ENUM_TIMEFRAMES g_drawnTf = (ENUM_TIMEFRAMES)0;  // timeframe the header was drawn for
 
 //==================================================================
 //  SETUP
@@ -185,14 +208,40 @@ int OnInit()
    g_rowH   = InpFontSize + 11;
    // Each timeframe takes TWO lines: Trend/Regime on the first,
    // Signal (BUY/SELL/HOLD)/Score on the second.
-   g_panelH = 34 + TF_COUNT * 2 * g_rowH + 8;
+   g_panelH = HEAD_H + TF_COUNT * 2 * g_rowH + 8;
+
+   //  The notice is the one line that must always be readable in full, so
+   //  widen the panel if a large font size would otherwise clip it.  The
+   //  estimate is deliberately generous: a monospaced face at the default
+   //  10-point size needs about 0.55 em per character, and MetaTrader sizes
+   //  fonts in points, so 0.75 em (rounded up) can only ever be too wide.
+   int noticeW = 10 + StringLen(IncompatibleNotice()) * CharW(InpFontSize + 1) + 10;
+   if(noticeW > g_panelW) g_panelW = noticeW;
 
    BuildPanel();
-   EvaluateAll();
+
+   if(!ChartSupported())
+   {
+      //  Wrong chart timeframe: the panel is the header + notice and
+      //  nothing else.  No history is pulled, no indicator is computed and
+      //  no timeframe row is drawn, so there is nothing on screen that
+      //  could be mistaken for a live read on this chart.
+      PrintFormat("SimpleEA: the %s chart is not supported. This panel is calibrated "
+                  "for %s only - switch the chart timeframe to see it.",
+                  ChartTimeframeText(), TF_TEXT);
+   }
+   else
+   {
+      EvaluateAll();
+   }
+
+   //  DrawPanel() is the only place that chooses a layout, so the correct
+   //  one is shown from the first moment, whichever chart this is.
    DrawPanel();
 
-   // A 2-second timer keeps the panel honest even on a dead tick stream;
-   // the heavy work only runs when a new bar actually closes.
+   //  The 2-second timer runs in both states.  On M5/M15/M30 the heavy work
+   //  only runs when a new bar actually closes; on any other chart it does
+   //  nothing at all except notice that the chart came back to M5/M15/M30.
    EventSetTimer(2);
    return(INIT_SUCCEEDED);
 }
@@ -207,6 +256,9 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   //  Goes through CheckNewBars() even on an unsupported chart, so that a
+   //  live timeframe change is caught whether or not MetaTrader re-started
+   //  the EA for it.  On a wrong chart that call costs one comparison.
    CheckNewBars();
 }
 
@@ -223,6 +275,25 @@ void OnTimer()
 //+------------------------------------------------------------------+
 void CheckNewBars()
 {
+   //  The safety net for a live timeframe change (MetaTrader normally
+   //  re-initialises the EA, but this makes the rule airtight): the moment
+   //  the chart leaves M5/M15/M30 the panel is replaced by the notice, and
+   //  the moment it comes back the full panel returns.
+   if(!ChartSupported())
+   {
+      //  Wrong chart timeframe.  Redraw only when there is something to
+      //  correct: the data panel has to be replaced by the notice, or the
+      //  notice is showing the wrong timeframe name because the chart moved
+      //  between two unsupported timeframes.  Otherwise this is one
+      //  comparison and nothing else - no history, no indicators.
+      if(g_panelOK || g_drawnTf != (ENUM_TIMEFRAMES)Period())
+      {
+         DrawPanel();
+         ChartRedraw(0);
+      }
+      return;
+   }
+
    bool need = false;
 
    for(int i = 0; i < TF_COUNT; i++)
@@ -233,6 +304,16 @@ void CheckNewBars()
          need = true;
          break;
       }
+   }
+
+   //  Coming back onto M5/M15/M30 after an unsupported timeframe: rebuild
+   //  from the current data instead of showing whatever was last computed.
+   if(!g_panelOK)
+   {
+      EvaluateAll();
+      DrawPanel();
+      ChartRedraw(0);
+      return;
    }
 
    if(need)
@@ -456,6 +537,21 @@ double HurstExponent(const double &close[], int i, int window)
 //==================================================================
 void EvaluateAll()
 {
+   //  Hard rule: on anything other than M5/M15/M30 there is nothing to
+   //  compute.  Every row is left untouched and marked "no data", so even
+   //  a bug elsewhere in the drawing code could not put a number on screen.
+   if(!ChartSupported())
+   {
+      for(int r = 0; r < TF_COUNT; r++)
+      {
+         g_rows[r].ok        = false;
+         g_rows[r].score     = 0;
+         g_rows[r].direction = 0;
+         g_rows[r].lastBar   = 0;
+      }
+      return;
+   }
+
    for(int r = 0; r < TF_COUNT; r++)
       EvaluateRow(r);
 }
@@ -511,6 +607,11 @@ void EvaluateRow(int idx)
    g_rows[idx].direction = dir;
    g_rows[idx].hurst     = H;
    g_rows[idx].er        = ER;
+
+   //  Remember the bar this reading came from, so CheckNewBars() can tell
+   //  a genuinely new closed bar from a tick on the bar it already scored
+   //  (without this the panel re-read all three timeframes on every tick).
+   g_rows[idx].lastBar   = LastClosedBarTime(_Symbol, g_rows[idx].tf);
 }
 
 //==================================================================
@@ -597,6 +698,30 @@ string ShortTimeframe(ENUM_TIMEFRAMES tf)
 }
 
 //+------------------------------------------------------------------+
+//  THE CHART-TIMEFRAME RULE
+//+------------------------------------------------------------------+
+//  True only while the chart the EA is running on is M5, M15 or M30.
+//  This is the single test the whole rule hangs on: the panel is built
+//  for those three timeframes only, and on any other chart every part
+//  of the program refuses to produce a reading.
+//+------------------------------------------------------------------+
+bool ChartSupported()
+{
+   return(TIMEFRAME_OK((ENUM_TIMEFRAMES)Period()));
+}
+
+//  Name of the current chart timeframe, spelled the way a trader says it
+//  ("H1", "M1", ...), for the notice and the journal line.  SHORT_TIMEFRAMES
+//  does not know the "current chart" pseudo-period, so map that first.
+//+------------------------------------------------------------------+
+string ChartTimeframeText()
+{
+   ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)Period();
+   if(tf == PERIOD_CURRENT) tf = (ENUM_TIMEFRAMES)_Period;
+   return(ShortTimeframe(tf));
+}
+
+//+------------------------------------------------------------------+
 void MakeLabel(string name, int x, int y, string text, color clr,
                int size, bool rightAnchor)
 {
@@ -622,6 +747,28 @@ void MakeLabel(string name, int x, int y, string text, color clr,
 }
 
 //+------------------------------------------------------------------+
+//  Estimated rendered width of one character, in pixels, for a given
+//  font size.  Used only to keep long text inside the panel box; it is
+//  rounded up so the estimate errs on the wide side.
+//+------------------------------------------------------------------+
+int CharW(int size)
+{
+   if(size < 6) size = 6;
+   return((int)MathCeil(size * 0.75));
+}
+
+//+------------------------------------------------------------------+
+//  Remove one panel object by short name.  Safe to call whether or not
+//  the object exists, so callers never have to check first.
+//+------------------------------------------------------------------+
+void DeleteObject(string name)
+{
+   string full = OBJ_PREFIX + name;
+   if(ObjectFind(0, full) >= 0)
+      ObjectDelete(0, full);
+}
+
+//+------------------------------------------------------------------+
 void MakeRect(string name, int x, int y, int w, int hh, color bg, color border)
 {
    string full = OBJ_PREFIX + name;
@@ -643,17 +790,48 @@ void MakeRect(string name, int x, int y, int w, int hh, color bg, color border)
 }
 
 //+------------------------------------------------------------------+
-//  Create the static parts once, so the panel object set is stable.
+//  The header line + notice shown when the chart timeframe is not
+//  supported.  Nothing else - no timeframe rows, no signal, no score.
+//+------------------------------------------------------------------+
+string IncompatibleNotice()
+{
+   return("Incompatible chart. Switch to " + TF_TEXT + ".");
+}
+
+//+------------------------------------------------------------------+
+//  Create the static frame once, so the panel object set is stable.
+//  NOTE: the title label deliberately belongs to DrawPanel(), so that an
+//  unsupported chart can never inherit it from a supported one.
 //+------------------------------------------------------------------+
 void BuildPanel()
 {
    int x = InpPanelX, y = InpPanelY;
    MakeRect("bg",  x, y, g_panelW, g_panelH, InpBgColor, clrDimGray);
-   MakeRect("sep", x + 4, y + 28, g_panelW - 8, 1, clrDimGray, clrDimGray);
+   MakeRect("sep", x + 4, y + HEAD_H - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
 }
 
 //+------------------------------------------------------------------+
+//  DrawPanel() never decides anything: it only shows whichever of the
+//  two panels the chart timeframe allows.  There is no path through the
+//  program on which the data panel can be drawn for a bare M1, H1, D1 ...
+//  chart, because this switch is the only way in.
+//+------------------------------------------------------------------+
 void DrawPanel()
+{
+   if(ChartSupported()) DrawSupportedPanel();
+   else                 DrawIncompatiblePanel();
+}
+
+//+------------------------------------------------------------------+
+//  Supported chart timeframe (M5 / M15 / M30) - the full panel:
+//
+//     SimpleEA                                      SYMBOL  M15
+//     --------------------------------------------------------------
+//     M5   Scalp       Trend: Going up     Regime: Steady
+//                      Signal: BUY         Score: +3 / 3
+//     ...
+//+------------------------------------------------------------------+
+void DrawSupportedPanel()
 {
    int x   = InpPanelX, y = InpPanelY;
    int pad = 10;
@@ -663,7 +841,7 @@ void DrawPanel()
    MakeLabel("title", x + pad, y + 7, "SimpleEA",
              InpTitleColor, InpFontSize + 1, false);
    MakeLabel("sym", x + g_panelW - pad, y + 8,
-             _Symbol + "  " + ShortTimeframe((ENUM_TIMEFRAMES)Period()),
+             _Symbol + "  " + ChartTimeframeText(),
              InpTitleColor, InpFontSize, true);
 
    // ---- two lines per timeframe -------------------------------------
@@ -675,7 +853,7 @@ void DrawPanel()
    //  Signal/Score = what the old panel used to show on its own.
    for(int i = 0; i < TF_COUNT; i++)
    {
-      int    ry  = y + 36 + i * 2 * rowH;
+      int    ry  = y + HEAD_H + 2 + i * 2 * rowH;
       string sfx = "_" + IntegerToString(i);
 
       MakeLabel("tf" + sfx,    x + pad,      ry, g_rows[i].tag,
@@ -717,6 +895,79 @@ void DrawPanel()
                    clrDimGray, InpFontSize, false);
       }
    }
+
+   // ---- retire the notice-only panel, if it was the last one shown ----
+   DeleteObject("notice");
+
+   g_panelOK = true;
+   g_drawnTf = (ENUM_TIMEFRAMES)Period();
+}
+
+//+------------------------------------------------------------------+
+//  Unsupported chart timeframe - THE NOTICE PANEL.
+//
+//     +-----------------------------------------------+
+//     |  SimpleEA                        XAUUSD  H1   |
+//     +-----------------------------------------------+
+//     |  Incompatible chart. Switch to M5/M15/M30.    |
+//     +-----------------------------------------------+
+//
+//  Read as one line:  SimpleEA | Incompatible chart. Switch to M5/M15/M30.
+//
+//  That is the whole panel - the header line the user always sees, plus
+//  the notice where the M5/M15/M30 rows would have started.  No rows, no
+//  Trend, no Regime, no Signal, no Score: the engine is calibrated for
+//  those three timeframes only, so a reading taken on any other chart
+//  would be meaningless and is withheld completely.  The box is sized to
+//  those two lines and the object set is trimmed to match, so nothing
+//  from the data panel can linger underneath it.
+//+------------------------------------------------------------------+
+void DrawIncompatiblePanel()
+{
+   int x   = InpPanelX, y = InpPanelY;
+   int pad = 10;
+
+   //  Keep the header exactly where it sits in the full panel and put the
+   //  notice on the line where the first timeframe row would have started,
+   //  so an unsupported chart reads as the panel collapsing to its header
+   //  rather than as a different widget appearing.
+   int noticeH = HEAD_H + 2 + (InpFontSize + 1) + 6;
+
+   MakeRect("bg", x, y, g_panelW, noticeH, InpBgColor, clrDimGray);
+
+   //  The separator belongs to the full panel only.
+   DeleteObject("sep");
+
+   MakeLabel("title", x + pad, y + 7, "SimpleEA",
+             InpTitleColor, InpFontSize + 1, false);
+   //  Deliberately the real chart timeframe: the header states the fact,
+   //  the line underneath states what to do about it.
+   MakeLabel("sym", x + g_panelW - pad, y + 8,
+             _Symbol + "  " + ChartTimeframeText(),
+             InpTitleColor, InpFontSize, true);
+
+   MakeLabel("notice", x + pad, y + HEAD_H + 2,
+             IncompatibleNotice(), InpSellColor, InpFontSize + 1, false);
+
+   //  Remove every row object the full panel uses, so a single leftover
+   //  cannot show through on an incompatible chart.
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      string sfx = "_" + IntegerToString(i);
+      DeleteObject("tf"        + sfx);
+      DeleteObject("style"     + sfx);
+      DeleteObject("trendCap"  + sfx);
+      DeleteObject("regimeCap" + sfx);
+      DeleteObject("signalCap" + sfx);
+      DeleteObject("scoreCap"  + sfx);
+      DeleteObject("dir"       + sfx);
+      DeleteObject("regimeVal" + sfx);
+      DeleteObject("signal"    + sfx);
+      DeleteObject("score"     + sfx);
+   }
+
+   g_panelOK = false;
+   g_drawnTf = (ENUM_TIMEFRAMES)Period();
 }
 
 //+------------------------------------------------------------------+
