@@ -1,19 +1,31 @@
-# SimpleAdvisor — multi-timeframe direction panel (MT5)
+# SimpleEA — multi-timeframe direction panel (MT5)
 
-A very simple, read-only Expert Advisor that shows **BUY / SELL / HOLD** for **M5 (scalping)**,
-**M15 (short-term)** and **M30 (intraday)** on **any symbol**.
+A very simple, read-only Expert Advisor that shows, in plain words, what price is doing on
+**M5 (scalping)**, **M15 (short-term)** and **M30 (intraday)** on **any symbol**. Each
+timeframe gets two lines — the plain words first, then the original trading read underneath,
+so nothing from the first panel is lost:
 
 ```
- ┌──────────────────────────────────┐
- │  SimpleAdvisor      XAUUSD  M5   │
- ├──────────────────────────────────┤
- │  M5   Scalp        BUY   +3 / 3  │
- │  M15  Short-term   HOLD  +1 / 3  │
- │  M30  Intraday     SELL  -2 / 3  │
- │  Regime  M5 random  M15 trend  M30 range │
- │  M5 H=0.46  M15 H=0.58  M30 H=0.44       │
- └──────────────────────────────────┘
+ ┌─────────────────────────────────────────────────────────────┐
+ │  SimpleEA                                       XAUUSD  M5  │
+ ├─────────────────────────────────────────────────────────────┤
+ │  M5   Scalp       Trend: Going up     Regime: Steady        │
+ │                   Signal: BUY         Score: +3 / 3         │
+ │  M15  Short-term  Trend: Sideways     Regime: Mixed         │
+ │                   Signal: HOLD        Score: +1 / 3         │
+ │  M30  Intraday    Trend: Going down   Regime: Choppy        │
+ │                   Signal: SELL        Score: -2 / 3         │
+ └─────────────────────────────────────────────────────────────┘
 ```
+
+- **Trend** (which way it is going) can only be: **Going up**, **Going down**, or **Sideways**.
+- **Regime** (how it is moving) can only be: **Steady** (keeps going the same way),
+  **Mixed** (no clear habit), or **Choppy** (keeps turning back on itself).
+- **Signal / Score** are the original read, unchanged: Going up = **BUY**, Going down =
+  **SELL**, Sideways = **HOLD**, with the score that produced it beside it.
+
+The two are independent, so all nine pairings can appear — e.g. *Going up + Choppy* means
+"rising overall, but messily."
 
 **It contains no order-sending code.** It cannot place, modify or close a trade, so it is safe to
 leave on a live chart.
@@ -107,6 +119,12 @@ HOLD  otherwise
 Kaufman's **Efficiency Ratio** is a dead-market gate: if ER is below `InpERDead` (default 0.10)
 the instrument is not travelling anywhere, so the row is forced to `HOLD` regardless of score.
 
+On the chart those three outcomes are spelled out as **Going up** / **Going down** /
+**Sideways**, and the Hurst read above is spelled out as **Steady** / **Mixed** / **Choppy**.
+Only the words changed — the calculation behind them is untouched. (The panel does not show a
+"volatile" word: the engine judges *how* moves behave, not *how big* they are, so it would be
+dishonest to label one.)
+
 **Every calculation uses closed bars only**, so the panel never repaints and a historical
 reading never changes after the fact.
 
@@ -118,7 +136,6 @@ reading never changes after the fact.
 |---|---|---|---|
 | Panel | `InpPanelX/Y` | 12 / 24 | position in pixels |
 | | `InpFontSize` | 9 | font size |
-| | `InpShowRegime` | true | show the Hurst footer line |
 | Thresholds | `InpBuyScore` | 2 | score ≥ this ⇒ BUY |
 | | `InpSellScore` | −2 | score ≤ this ⇒ SELL |
 | | `InpBarsToLoad` | 700 | closed bars pulled per timeframe |
@@ -228,19 +245,19 @@ Data sources (free, not committed — the raw CSVs are ~17 MB):
 
 **Phase 1 — done.** Panel with trend + momentum + regime, non-repainting, read-only.
 
-**Phase 2 — alerts.** Fire a popup/push notification when a row flips to BUY or SELL, so you
-only look at the chart when something changes. Cheap to add, zero risk.
+> **Cancelled / out of scope:** popup and push alerts will not be added to this project. Do not
+> implement or propose them; the remaining work below is the roadmap.
 
-**Phase 3 — journal (do this before anything else).** Log every flip to CSV with the timestamp,
+**Phase 2 — journal (do this before anything else).** Log every flip to CSV with the timestamp,
 timeframe, direction, score, regime, entry price and the outcome after 1R. **The critical point:
 every number in §4 came from a third-party data feed.** Your broker's spread, swap, session
 hours and execution differ. Until you have your own journal showing a real edge *after spread on
 your account and your symbol*, you do not have evidence — you have someone else's backtest.
 
-**Phase 4 — risk layer, still manual.** ATR-based SL/TP and position sizing so each trade risks a
+**Phase 3 — risk layer, still manual.** ATR-based SL/TP and position sizing so each trade risks a
 fixed fraction of the account. Keep approve-by-hand.
 
-**Phase 5 — automation, on higher timeframes.** Only after Phase 3 shows a genuine edge. Prefer
+**Phase 4 — automation, on higher timeframes.** Only after Phase 2 shows a genuine edge. Prefer
 M30/H1+ where the efficiency ratio and cost-to-edge ratio are more favourable, and reconsider
 M5 entirely unless you are on a raw-spread account where the cost can drop to ~0.1–0.3 pip.
 

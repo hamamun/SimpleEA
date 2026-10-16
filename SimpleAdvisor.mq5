@@ -2,8 +2,12 @@
 //|                                              SimpleAdvisor.mq5   |
 //|                     A very simple multi-timeframe direction panel |
 //|                                                                  |
-//|  Shows BUY / SELL / HOLD for M5 (scalping), M15 (short-term) and  |
-//|  M30 (intraday) on ANY symbol.                                    |
+//|  Shows in plain words, for M5 (scalping), M15 (short-term) and    |
+//|  M30 (intraday) on ANY symbol:                                   |
+//|     Trend  = which way it is going (Going up / Going down /      |
+//|              Sideways), and                                      |
+//|     Regime = how it is moving (Steady / Mixed / Choppy),         |
+//|  plus the original Signal (BUY / SELL / HOLD) and Score.         |
 //|                                                                  |
 //|  READ-ONLY.  This program contains no OrderSend / CTrade / trade  |
 //|  calls of any kind.  It cannot place, modify or close an order.   |
@@ -59,8 +63,8 @@
 //|  spread.  The regime column is the part that carries real         |
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
-#property copyright "SimpleAdvisor"
-#property version   "1.00"
+#property copyright "SimpleEA"
+#property version   "1.11"
 #property description "Read-only multi-timeframe BUY/SELL/HOLD direction panel for M5 / M15 / M30 on any symbol."
 
 #ifndef M_PI
@@ -77,10 +81,9 @@ input int      InpFontSize    = 9;           // Font size
 input string   InpFont        = "Consolas";  // Font (monospaced aligns best)
 input color    InpBgColor     = C'18,18,24'; // Panel background
 input color    InpTitleColor  = clrWhite;    // Title colour
-input color    InpBuyColor    = clrLime;     // BUY colour
-input color    InpSellColor   = clrTomato;   // SELL colour
-input color    InpHoldColor   = clrSilver;   // HOLD colour
-input bool     InpShowRegime  = true;        // Show the regime footer line
+input color    InpBuyColor    = clrLime;     // "Going up" colour
+input color    InpSellColor   = clrTomato;   // "Going down" colour
+input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 
 input group "=== Signal thresholds ==="
 input int      InpBuyScore    = 2;           // Score >= this  => BUY
@@ -137,7 +140,7 @@ struct SRow
 
 SRow g_rows[TF_COUNT];
 
-int g_panelW = 252;
+int g_panelW = 392;
 int g_panelH = 130;
 int g_rowH   = 20;
 
@@ -174,13 +177,15 @@ int OnInit()
 
    if(InpL1_M5 < InpL2_M5 || InpL1_M15 < InpL2_M15 || InpL1_M30 < InpL2_M30)
    {
-      Print("SimpleAdvisor: the long trend period must be greater than the short one. ",
+      Print("SimpleEA: the long trend period must be greater than the short one. ",
             "Set L1 > L2 for every timeframe.");
       return(INIT_PARAMETERS_INCORRECT);
    }
 
    g_rowH   = InpFontSize + 11;
-   g_panelH = 34 + TF_COUNT * g_rowH + (InpShowRegime ? g_rowH + 16 : 8);
+   // Each timeframe takes TWO lines: Trend/Regime on the first,
+   // Signal (BUY/SELL/HOLD)/Score on the second.
+   g_panelH = 34 + TF_COUNT * 2 * g_rowH + 8;
 
    BuildPanel();
    EvaluateAll();
@@ -511,14 +516,40 @@ void EvaluateRow(int idx)
 //==================================================================
 //  PANEL
 //==================================================================
+//  Plain words for the "Regime" side of the panel: HOW price is moving.
+//     Steady  - moves tend to keep going the same way
+//     Mixed   - no clear habit, nothing to trust either way
+//     Choppy  - moves tend to turn back on themselves
+//+------------------------------------------------------------------+
 string RegimeText(int idx)
 {
    double H = g_rows[idx].hurst;
-   if(H > g_rows[idx].hTrend)  return("trend");
-   if(H < g_rows[idx].hRevert) return("range");
-   return("random");
+   if(H > g_rows[idx].hTrend)  return("Steady");
+   if(H < g_rows[idx].hRevert) return("Choppy");
+   return("Mixed");
 }
 
+//+------------------------------------------------------------------+
+color RegimeColor(int idx)
+{
+   double H = g_rows[idx].hurst;
+   if(H > g_rows[idx].hTrend)  return(clrDeepSkyBlue);
+   if(H < g_rows[idx].hRevert) return(clrOrange);
+   return(clrSilver);
+}
+
+//  Plain words for the "Trend" side of the panel: WHICH WAY price is going.
+//+------------------------------------------------------------------+
+string PlainTrendText(int dir)
+{
+   if(dir > 0) return("Going up");
+   if(dir < 0) return("Going down");
+   return("Sideways");
+}
+
+//  The trading word for the same read, shown on the second line of each row
+//  so nothing from the original panel is lost:
+//     Going up = BUY,  Going down = SELL,  Sideways = HOLD.
 //+------------------------------------------------------------------+
 string DirectionText(int dir)
 {
@@ -629,16 +660,22 @@ void DrawPanel()
    int rowH = g_rowH;
 
    // ---- header ----------------------------------------------------
-   MakeLabel("title", x + pad, y + 7, "SimpleAdvisor",
+   MakeLabel("title", x + pad, y + 7, "SimpleEA",
              InpTitleColor, InpFontSize + 1, false);
    MakeLabel("sym", x + g_panelW - pad, y + 8,
              _Symbol + "  " + ShortTimeframe((ENUM_TIMEFRAMES)Period()),
              InpTitleColor, InpFontSize, true);
 
-   // ---- one row per timeframe -------------------------------------
+   // ---- two lines per timeframe -------------------------------------
+   //  Line 1 (plain words, every value NAMED so nothing is ambiguous):
+   //     Trend: Going up      Regime: Steady
+   //  Line 2 (the original trading read, kept from the first panel):
+   //     Signal: BUY          Score: +3 / 3
+   //  Trend = which way it is going, Regime = how it is moving,
+   //  Signal/Score = what the old panel used to show on its own.
    for(int i = 0; i < TF_COUNT; i++)
    {
-      int    ry  = y + 36 + i * rowH;
+      int    ry  = y + 36 + i * 2 * rowH;
       string sfx = "_" + IntegerToString(i);
 
       MakeLabel("tf" + sfx,    x + pad,      ry, g_rows[i].tag,
@@ -646,39 +683,39 @@ void DrawPanel()
       MakeLabel("style" + sfx, x + pad + 34, ry, g_rows[i].style,
                 clrGray, InpFontSize, false);
 
+      MakeLabel("trendCap" + sfx,  x + 150, ry, "Trend:",
+                clrGray, InpFontSize, false);
+      MakeLabel("regimeCap" + sfx, x + 282, ry, "Regime:",
+                clrGray, InpFontSize, false);
+      MakeLabel("signalCap" + sfx, x + 150, ry + rowH, "Signal:",
+                clrGray, InpFontSize, false);
+      MakeLabel("scoreCap" + sfx,  x + 282, ry + rowH, "Score:",
+                clrGray, InpFontSize, false);
+
       if(g_rows[i].ok)
       {
-         MakeLabel("dir" + sfx, x + 168, ry, DirectionText(g_rows[i].direction),
+         MakeLabel("dir" + sfx, x + 192, ry, PlainTrendText(g_rows[i].direction),
                    DirectionColor(g_rows[i].direction), InpFontSize + 1, false);
-         MakeLabel("score" + sfx, x + g_panelW - pad, ry,
+         MakeLabel("regimeVal" + sfx, x + 330, ry, RegimeText(i),
+                   RegimeColor(i), InpFontSize + 1, false);
+         MakeLabel("signal" + sfx, x + 192, ry + rowH,
+                   DirectionText(g_rows[i].direction),
+                   DirectionColor(g_rows[i].direction), InpFontSize + 1, false);
+         MakeLabel("score" + sfx, x + 330, ry + rowH,
                    StringFormat("%+d / 3", g_rows[i].score),
-                   DirectionColor(g_rows[i].direction), InpFontSize, true);
+                   DirectionColor(g_rows[i].direction), InpFontSize + 1, false);
       }
       else
       {
-         MakeLabel("dir" + sfx,   x + 168, ry, "waiting",
+         MakeLabel("dir" + sfx,       x + 192, ry, "Waiting",
                    clrDimGray, InpFontSize, false);
-         MakeLabel("score" + sfx, x + g_panelW - pad, ry, "...",
-                   clrDimGray, InpFontSize, true);
+         MakeLabel("regimeVal" + sfx, x + 330, ry, "...",
+                   clrDimGray, InpFontSize, false);
+         MakeLabel("signal" + sfx,    x + 192, ry + rowH, "...",
+                   clrDimGray, InpFontSize, false);
+         MakeLabel("score" + sfx,     x + 330, ry + rowH, "...",
+                   clrDimGray, InpFontSize, false);
       }
-   }
-
-   // ---- optional regime footer ------------------------------------
-   if(InpShowRegime)
-   {
-      int    fy  = y + 36 + TF_COUNT * rowH;
-      string reg = "Regime";
-
-      for(int i = 0; i < TF_COUNT; i++)
-         reg += StringFormat("  %s %s", g_rows[i].tag, RegimeText(i));
-
-      MakeLabel("regime", x + pad, fy, reg, clrDarkGray, InpFontSize - 1, false);
-
-      string det = "";
-      for(int i = 0; i < TF_COUNT; i++)
-         det += StringFormat("%s H=%.2f  ", g_rows[i].tag, g_rows[i].hurst);
-
-      MakeLabel("detail", x + pad, fy + 12, det, clrDimGray, InpFontSize - 2, false);
    }
 }
 
