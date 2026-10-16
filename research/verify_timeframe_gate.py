@@ -53,6 +53,11 @@ NOTICE = "Incompatible chart. Switch to " + TF_TEXT + "."
 ROW_OBJECTS = ["tf", "style", "trendCap", "regimeCap", "signalCap", "scoreCap",
                "dir", "regimeVal", "signal", "score"]
 
+#  Illustration only: what the stand-in engine returns for each row.
+READINGS = {"M5":  (1, 3, "Steady"),
+            "M15": (0, 1, "Mixed"),
+            "M30": (-1, -2, "Choppy")}
+
 
 def timeframe_ok(tf):
     """TIMEFRAME_OK() in SimpleAdvisor.mq5."""
@@ -75,7 +80,7 @@ class SimpleEA:
         self.objects = {}                 # name -> ("label", text, y) | ("rect", w, h)
         self.panel_ok = False             # g_panelOK
         self.drawn_tf = None              # g_drawnTf
-        self.rows = [{"tag": t, "ok": False, "score": 0, "dir": 0}
+        self.rows = [{"tag": t, "ok": False, "score": 0, "dir": 0, "regime": ""}
                      for t in ("M5", "M15", "M30")]
         self.engine_calls = 0             # counts EvaluateRow() entries
         self.timer_on = False
@@ -123,8 +128,11 @@ class SimpleEA:
         self.build_panel()
 
         if not self.chart_supported():
-            self.log.append("journal: %s chart is not supported"
-                            % self.chart_timeframe_text())
+            #  The exact line OnInit() writes to the Experts journal.
+            self.log.append("SimpleEA: the %s chart is not supported. This panel "
+                            "is calibrated for %s only - switch the chart "
+                            "timeframe to see it."
+                            % (self.chart_timeframe_text(), TF_TEXT))
         else:
             self.evaluate_all()
 
@@ -175,9 +183,11 @@ class SimpleEA:
     def evaluate_row(self, r):
         # Stands in for the real engine (Precision Trend + ROC + Hurst + ER,
         # verified separately in verify_mql.py).  Counted, so the tests can
-        # prove it is never entered on an unsupported chart.
+        # prove it is never entered on an unsupported chart.  The readings
+        # themselves are fixed illustrations, one per timeframe.
         self.engine_calls += 1
-        r.update(ok=True, score=3, dir=1)
+        dir_, score, regime = READINGS[r["tag"]]
+        r.update(ok=True, score=score, dir=dir_, regime=regime)
 
     # ---- drawing ------------------------------------------------------
     def build_panel(self):

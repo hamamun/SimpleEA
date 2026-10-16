@@ -56,8 +56,12 @@ SimpleEA: the H1 chart is not supported. This panel is calibrated for M5/M15/M30
 ```
 
 Switch the chart back to M5, M15 or M30 and the full panel returns immediately, recalculated
-from current data — whether or not MetaTrader restarts the EA for the change. The whole rule is
-verified state by state in `research/verify_timeframe_gate.py`.
+from current data — whether or not MetaTrader restarts the EA for the change.
+
+To see the whole thing without opening MetaTrader, `research/walk_timeframes.py` attaches the EA,
+changes the chart timeframe through H1 → M15 → M1 → D1 → H4 → M30 and prints what is on the chart
+at every step. The rule itself is verified state by state in
+`research/verify_timeframe_gate.py`.
 
 **It contains no order-sending code.** It cannot place, modify or close a trade, so it is safe to
 leave on a live chart.
@@ -262,6 +266,7 @@ pip install numpy pandas
 cd research
 python verify_mql.py            # proves the MQL5 math == the validated reference engine
 python verify_timeframe_gate.py # proves the M5/M15/M30-only chart rule, switch by switch
+python walk_timeframes.py       # prints what the chart shows at each timeframe switch
 python run3.py           # IS/OOS + Monte-Carlo null, 2026 sample
 python run2015.py        # same, independent 2015 era
 ```
