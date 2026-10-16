@@ -190,6 +190,17 @@ Raising `InpHurstTrend` makes the panel more selective (more HOLD, fewer calls).
 
 ---
 
+### How far ahead is a reading good for?
+
+See **[research/HORIZON.md](research/HORIZON.md)** for the measured answer, with the harness
+(`research/horizon_study.py`, `research/first_passage.py`) included. In one line: a reading
+applies from the close of the bar it is computed on, stays on the panel a median of **2–3 bars**
+(M5 ~10 min, M15 ~45 min, M30 ~90 min), and where a forward edge exists at all it only appears
+at **6–16+ bars** — longer than the reading survives. On M5 the median net move while the
+reading is on screen (0.0–0.7 pips) does not even cover a retail spread.
+
+---
+
 ## 4. Validation — read this before trusting the panel
 
 Everything below was measured on real bar data, and the harness that produced it is included in
