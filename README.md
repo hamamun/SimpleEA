@@ -23,8 +23,10 @@ so nothing from the first panel is lost:
   **Mixed** (no clear habit), or **Choppy** (keeps turning back on itself).
 - **Signal / Score** are the original read, unchanged: Going up = **BUY**, Going down =
   **SELL**, Sideways = **HOLD**, with the score that produced it beside it.
+- Below the three rows, a **second group** gives one trade plan per timeframe — entry, lot, stop,
+  target and validity — in the same style. See *Trade plan* below.
 - On any chart timeframe other than M5 / M15 / M30 the panel shows **no data at all** — just the
-  header line and a notice. See *Chart timeframe rule* below.
+  header line and a notice, and no trade plan. See *Chart timeframe rule* below.
 
 The two are independent, so all nine pairings can appear — e.g. *Going up + Choppy* means
 "rising overall, but messily."
@@ -190,80 +192,86 @@ Raising `InpHurstTrend` makes the panel more selective (more HOLD, fewer calls).
 
 ---
 
-### Trade plan (advice only — the EA still never sends an order)
+### Trade plan — the second group (advice only, the EA still never sends an order)
 
-Below the three timeframe rows the panel prints what a trade would look like on the **chart's own
-timeframe**. Every number comes from your broker's own contract data (contract size, tick value,
-lot step, minimum stop distance) and your live balance — nothing is hard-coded, so it is correct
-for gold, FX, indices, cent accounts and non-USD accounts alike.
+Below the three timeframe rows, separated by a single line, comes a **second group with one block
+per timeframe**. Same two-column style as the group above it, and no heading line — the `M5` /
+`M15` / `M30` at the start of each block says what it is. The point of the per-timeframe shape is
+this: when autotrading arrives, the executor reads one row and acts on that timeframe.
 
 ```
- ┌─────────────────────────────────────────────────────────────────────┐
- │  SimpleEA                                             XAUUSD  M5   │
- ├─────────────────────────────────────────────────────────────────────┤
- │  M5   Scalp       Trend: Going down   Regime: Steady                │
- │                   Signal: SELL        Score: -3 / 3                 │
- │  M15  Short-term  Trend: Going up     Regime: Mixed                 │
- │                   Signal: BUY         Score: +2 / 3                 │
- │  M30  Intraday    Trend: Going down   Regime: Choppy                │
- │                   Signal: SELL        Score: -2 / 3                 │
- ├─────────────────────────────────────────────────────────────────────┤
- │  Trade plan:                   XAUUSD  M5   SELL   score -3/3       │
- │  Entry  : MARKET 4285.70   (3 of 3 - go to market)                  │
- │  Alt    : sell stop 4285.56   (follow the move instead)             │
- │  Stop   : 4286.04   34 pts   risk 7.82 USD                          │
- │  Target : 4285.03   67 pts   reward 15.41 USD   R:R 1:1.97          │
- │  Lot    : 0.23   (1.00% of 800.00 USD)                              │
- │  Valid  : 3 bars (15 min) - until 14:30, or if the panel flips      │
- └─────────────────────────────────────────────────────────────────────┘
+ ┌──────────────────────────────────────────────────────────────────────────────┐
+ │  SimpleEA                                                        XAUUSD  M5  │
+ ├──────────────────────────────────────────────────────────────────────────────┤
+ │  M5   Scalp        Trend: Going down      Regime: Steady                     │
+ │                    Signal: SELL           Score: -3 / 3                      │
+ │  M15  Short-term   Trend: Going up        Regime: Mixed                      │
+ │                    Signal: BUY            Score: +2 / 3                      │
+ │  M30  Intraday     Trend: Going down      Regime: Choppy                     │
+ │                    Signal: SELL           Score: -2 / 3                      │
+ ├──────────────────────────────────────────────────────────────────────────────┤
+ │  M5   market -3/3   Entry:  4285.70        Lot:     0.23                     │
+ │                     Stop:   4286.04 34pts  Target:  4285.03 67pts            │
+ │                     Risk:   7.82 USD       Reward:  15.41 USD  Valid: 3 bars │
+ │  M15  pending +2/3  Entry:  4285.27        Lot:     0.03                     │
+ │                     Stop:   4284.68 102pts Target:  4287.74 204pts           │
+ │                     Risk:   3.06 USD       Reward:  6.12 USD   Valid: 3 bars │
+ │  M30  HOLD          nothing to place                                         │
+ └──────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**A HOLD or waiting timeframe takes a single line**, so the group is only as tall as it has
+content for — and the panel is only as wide as its widest line, measured before it is drawn.
+With no signals anywhere the group is three short lines; with `InpShowPlan=false` it is not drawn
+at all.
 
 | Your question | How the panel answers it |
 |---|---|
-| **1. Entry point** | Market entry = the current ask/bid for your direction. The `Alt` line gives the other side (a stop order) if you would rather follow the move than wait for it. |
-| **2. Lot size** | From balance and score — see the three sizing modes below. Snapped to your broker's lot step, never below its minimum, never above its maximum. |
-| **3. Take profit** | `InpTPATR` × ATR (default 2.4), printed as a **price, points and money**. |
-| **4. Stop loss** | `InpSLATR` × ATR (default 1.2), printed the same way, widened automatically if your broker demands a minimum stop distance. |
-| **5. Validity** | `InpValidBars` bars from the close of the signal bar (default 3 = the measured median, see below), printed as a clock time. |
-
-**Market or pending is decided by the score, not by you:**
-
-* **score 3/3** — all three components agree → **MARKET** entry.
-* **score 2/3** — only two agree → **PENDING** limit order, one `InpPendATR` step better, so you
-  only fill if price comes back to you.
+| **1. Entry point** | `Entry:` is the price to use — the current ask/bid for that direction (market) or the pending price one `InpPendATR` step better. **The EA decides which, per timeframe, from the score**: `market -3/3` = all three components agree, go now; `pending +2/3` = only two agree, so the entry waits for a better price. |
+| **2. Lot size** | `Lot:` — from balance, score and that timeframe's own stop distance, snapped to your broker's lot step and clamped to its minimum and maximum. |
+| **3. Take profit** | `Target:` — price **and points**, with the same amount in account currency on the `Reward:` cell. |
+| **4. Stop loss** | `Stop:` — price **and points**, with the money on the `Risk:` cell. Widened automatically (and marked `(min)`) if your broker demands a minimum stop distance. |
+| **5. Validity** | `Valid:` — `InpValidBars` bars from the close of that timeframe's signal bar (default 3 = the measured median, see below). |
 
 **Three sizing modes** (`InpUseRisk` / `InpUseMinLot`):
 
 | Mode | What it does |
 |---|---|
-| Risk (**default**, `InpUseRisk=true`) | Risks `InpRiskScore2` % of balance at score 2 and `InpRiskScore3` % at score 3 (defaults 0.5 / 1.0). The lot is whatever risks that much at the chosen stop — so a wider stop automatically means a smaller lot. |
+| Risk (**default**, `InpUseRisk=true`) | Risks `InpRiskScore2` % of balance at score 2 and `InpRiskScore3` % at score 3 (defaults 0.5 / 1.0). The lot is whatever risks that much at that timeframe's stop — a wider stop automatically means a smaller lot. |
 | Risk-off (`InpUseRisk=false`) | Ignores the stop distance entirely: a balance ladder — one 0.01 lot per `InpBalPer001` of balance (default 1,000), multiplied by `InpScore3Factor` (1.5) when all three components agree. |
 | Min lot (`InpUseMinLot=true`) | Always advises your symbol's smallest allowed lot, whatever the risk says. This overrides the other two. |
+
+Two honest touches: if the smallest lot risks **more** than your target percentage, the `Lot:` cell
+says so (`0.01 (min, 3.36 USD)`) instead of quietly over-risking; and every level is snapped onto
+the broker's point grid first, so the printed points, prices and money are three views of exactly
+the same level.
+
+**No order is ever sent.** The EA contains no `OrderSend`, no `CTrade`, no trade calls of any
+kind — this group only prints numbers for you to type in yourself.
 
 New inputs, all under *Trade plan*:
 
 | Input | Default | Meaning |
 |---|---|---|
-| `InpShowPlan` | true | Show the plan block at all |
+| `InpShowPlan` | true | Draw the second group at all |
 | `InpUseRisk` | true | Size by risk % of balance (false = balance ladder) |
 | `InpUseMinLot` | false | Always advise the symbol's minimum lot |
 | `InpRiskScore2` / `InpRiskScore3` | 0.5 / 1.0 | Risk % at score 2 and score 3 |
 | `InpBalPer001` | 1000 | Risk-off mode: balance per 0.01 lot |
 | `InpScore3Factor` | 1.5 | Risk-off mode: multiplier at score 3 |
-| `InpATRPeriod` | 14 | ATR period, closed bars, chart timeframe |
+| `InpATRPeriod` | 14 | ATR period, closed bars, each timeframe's own |
 | `InpSLATR` / `InpTPATR` | 1.2 / 2.4 | Stop and target, in ATR |
 | `InpPendATR` | 0.5 | How far the pending entry sits from the market |
 | `InpValidBars` | 3 | How many bars the reading is worth acting on |
 
-Two honest touches: if the smallest lot risks **more** than your target percentage, the panel says
-so on the line instead of quietly over-risking; and R:R is whatever the actual levels give
-(rounding a 2.0 ratio to the point grid can make it 1.97), not the ratio you asked for.
+Everything is read from your broker's own contract data (tick value, tick size, lot step,
+minimum/maximum lot, minimum stop distance, account balance and currency), so the block is correct
+on 2- and 3-digit gold, FX, indices, cent accounts and non-USD accounts alike.
 
-**No order is ever sent.** The EA still contains no `OrderSend`, no `CTrade`, no trade calls of
-any kind — the plan block only prints numbers for you to type in yourself.
-
-The arithmetic is checked symbol by symbol in `research/verify_plan_math.py` (gold 2- and 3-digit,
-EURUSD, USDJPY with its currency conversion, and an index CFD with a minimum stop distance).
+The arithmetic is checked symbol by symbol in `research/verify_plan_math.py`, and
+`research/walk_trade_plan.py` renders the whole panel for eight states — all timeframes active,
+one active, none, a loading timeframe, a small account, a very large balance, min-lot mode, and
+the plan switched off — failing if any line would overflow.
 
 ### How far ahead is a reading good for?
 
@@ -355,6 +363,7 @@ python verify_timeframe_gate.py # proves the M5/M15/M30-only chart rule, switch 
 python walk_timeframes.py       # prints what the chart shows at each timeframe switch
 python horizon_study.py         # measured signal horizon -> research/HORIZON.md
 python verify_plan_math.py      # lot / points / money arithmetic, symbol by symbol
+python walk_trade_plan.py       # renders the panel (Group 1 + Group 2) for 8 states
 python run3.py           # IS/OOS + Monte-Carlo null, 2026 sample
 python run2015.py        # same, independent 2015 era
 ```

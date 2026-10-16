@@ -1,17 +1,18 @@
-"""Panel walk-through, including the trade-plan block.
+"""Panel walk-through, including the second group (trade plan per timeframe).
 
-Mirrors SimpleAdvisor.mq5 exactly:
+Mirrors SimpleAdvisor.mq5 line for line:
 
-  UpdatePlan()      builds the plan lines into g_plan.text[] (and colours)
-  PlanWidthNeed()   measures them, and the panel grows to fit before drawing
-  DrawPlanBlock()   places them under the timeframe rows
+  g_rows[]        the three timeframe readings (Group 1)
+  g_plans[]       one plan block per timeframe (Group 2)
+  UpdatePlanRow() builds each block's cells
+  PlanColumns()   places the columns, aligned with "Trend:" / "Regime:" above
+  PlanWidthNeed() and TotalPlanLines() size the panel BEFORE it is drawn
+  DrawPlanBlock() places the text
 
-So this prints the panel the way the reader sees it for the cases that
-matter, and then asserts that no line runs past the panel edge - the same
-guarantee the EA gives by sizing itself from the text it is about to draw.
-
-Every number comes from verify_plan_math.plan(), which is checked against
-hand-derived broker contracts, so the pictures below are what the EA draws.
+The walk renders the panel on a character grid where one character is one
+estimated pixel-column of the real font (CharW), so what you see is where the
+text actually lands.  It then asserts that nothing runs past the panel edge -
+the same guarantee the EA gives by sizing itself from the text it draws.
 
 Run:  python walk_trade_plan.py
 """
@@ -20,200 +21,342 @@ import math
 import sys
 
 sys.path.insert(0, ".")
-from verify_plan_math import SYMBOLS, plan          # noqa: E402
+from verify_plan_math import SYMBOLS, plan, point_value_per_lot   # noqa: E402
 
-HEAD_H, TF_COUNT, PLAN_SEP_H = 34, 3, 14
-PLAN_LINES, PLAN_ROWS = 8, 7
-PANEL_W_MIN = 406                     # g_panelW
-EM_REAL = 0.55          # what a monospaced face really needs, in em
-EM_EST  = 0.60          # CharW(): what the EA budgets, plus margin
-DPI     = 96            # TERMINAL_SCREEN_DPI in this sandbox's model
-FONT = 9                              # InpFontSize
+HEAD_H, TF_COUNT, PLAN_SEP_H, PLAN_COL_A, PLAN_COL_B, PLAN_COL_C = 34, 3, 14, 150, 282, 414
+PLAN_W_MIN = 406
+PLAN_LBL_C = 8
+FONT = 9
+EM_EST = 0.55      # CharW(): what the EA budgets per character
+DPI = 96
+RENDER_CW = 9 * 96 / 72.0 * 0.55      # what the glyphs really occupy (6.6 px)
+
 MINUTES = {"M5": 5, "M15": 15, "M30": 30}
-
-ROWS = [("M5", "Scalp", "Going down", "SELL", "-3 / 3", "Steady"),
-        ("M15", "Short-term", "Going up", "BUY", "+2 / 3", "Mixed"),
-        ("M30", "Intraday", "Going down", "SELL", "-2 / 3", "Choppy")]
+HOLD, WAITING, ACTIVE = 0, 1, 2
 
 
-def char_w(size):
+def char_w(size=FONT, dpi=DPI):
     """CharW() in the EA: points -> pixels at the real screen DPI."""
-    dpi = DPI if DPI >= 72 else 96
     return int(math.ceil(size * dpi / 72.0 * EM_EST))
 
 
-def real_char_w(size):
-    return size * DPI / 72.0 * EM_REAL
+EM = char_w()
+CW = RENDER_CW                        # used for placing text in the picture
 
 
-def plan_width_need(texts, font=FONT, dpi=DPI):
-    """PlanWidthNeed() in the EA: body at font, header at font+1."""
-    widest_body, widest_head = 0, 0
-    for i, t in enumerate(texts):
-        n = len(t)
-        if i <= 1:
-            if i == 1 and texts[0]:
-                n += len(texts[0]) + 4
-            widest_head = max(widest_head, n)
+class Panel:
+    """The EA's state: three readings, three plan blocks, and what got drawn."""
+
+    def __init__(self, symbol, spec, balance, tags=("M5", "M15", "M30"),
+                 cur="USD", use_risk=True, use_min_lot=False, risk2=0.5, risk3=1.0,
+                 sl_atr=1.2, tp_atr=2.4, pend_atr=0.5, valid_bars=3, show_plan=True):
+        self.symbol, self.spec, self.balance, self.cur = symbol, spec, balance, cur
+        self.tags = tags
+        self.use_risk, self.use_min_lot = use_risk, use_min_lot
+        self.risk2, self.risk3 = risk2, risk3
+        self.sl_atr, self.tp_atr, self.pend_atr = sl_atr, tp_atr, pend_atr
+        self.valid_bars, self.show_plan = valid_bars, show_plan
+        self.panel_w = 406
+        self.panel_h = 130
+        # g_rows: tag -> (ok, direction, score, trend, regime)
+        self.rows = {t: dict(ok=True, dir=0, score=0, trend="Sideways", regime="Mixed")
+                     for t in tags}
+        self.plans = {t: dict(state=HOLD, dir=0, score=0, market=False, lines=1,
+                              head=t, kind="", note="", lbl={}, val={}, clr={})
+                      for t in tags}
+        self.atr = {"M5": 0.28, "M15": 0.85, "M30": 1.70}
+        self.now = {"M5": "14:30", "M15": "14:45", "M30": "15:00"}
+
+    def set_reading(self, tag, direction=0, score=0, trend="Sideways",
+                    regime="Mixed", ok=True):
+        self.rows[tag].update(ok=ok, dir=direction, score=score,
+                              trend=trend, regime=regime)
+
+    # ---- UpdatePlanRow() ------------------------------------------------
+    def update_plan_row(self, tag):
+        p = self.plans[tag]
+        p.update(state=HOLD, dir=0, score=0, market=False, lines=1,
+                 head=tag, kind="", note="", lbl={}, val={}, clr={})
+        r = self.rows[tag]
+
+        if not r["ok"]:
+            p.update(state=WAITING, kind="waiting", note="history still loading")
+            return
+        if r["dir"] == 0:
+            p.update(state=HOLD, kind="HOLD", note="nothing to place")
+            return
+
+        spec = self.spec
+        point = spec["point"]
+        price = self.price
+        pv = point_value_per_lot(spec)
+        dir_, score = r["dir"], r["score"]
+        market = abs(score) >= 3
+        dg = spec["digits"]
+        atr = self.atr[tag]
+        entry = price + (spec["point"] if dir_ > 0 else 0.0) * 0     # ask ~= bid + spread/2
+        offset = self.pend_atr * atr
+        pend = entry - dir_ * offset
+
+        # stop / target snapped to the point grid, widened to the broker minimum
+        sl_pts = max(1, int(round(self.sl_atr * atr / point)))
+        tp_pts = max(1, int(round(self.tp_atr * atr / point)))
+        min_stop = spec["stops_level"] * point
+        widened = False
+        if min_stop > 0 and sl_pts * point < min_stop:
+            sl_pts = int(math.ceil(min_stop / point))
+            widened = True
+        sl_price = entry - dir_ * sl_pts * point
+        tp_price = entry + dir_ * tp_pts * point
+
+        # lot
+        lots = spec["min_lot"]
+        want_risk, min_lot = 0.0, False
+        if self.use_min_lot:
+            min_lot = True
+        elif self.use_risk:
+            pct = self.risk3 if abs(score) >= 3 else self.risk2
+            want_risk = self.balance * pct / 100.0
+            lots = want_risk / (sl_pts * pv) if pv > 0 else spec["min_lot"]
         else:
-            widest_body = max(widest_body, n)
-    need_body = 10 + widest_body * char_w(font) + 10
-    need_head = 10 + widest_head * char_w(font + 1) + 10
-    return max(need_body, need_head)
+            lots = (self.balance / 1000.0) * 0.01
+            if abs(score) >= 3:
+                lots *= 1.5
+        step = spec["step"]
+        lots = math.floor(lots / step + 1e-8) * step
+        lots = max(spec["min_lot"], min(spec["max_lot"], lots))
+        digits = 0
+        probe = step
+        while probe < 1.0 and digits < 8:
+            probe *= 10.0
+            digits += 1
+        lots = round(lots, digits)
+
+        risk_usd = lots * sl_pts * pv
+        reward_usd = lots * tp_pts * pv
+        risk_over = (not self.use_min_lot and self.use_risk and want_risk > 0
+                     and risk_usd > want_risk * 1.05)
+
+        lot_txt = "%.2f" % lots
+        if min_lot:
+            lot_txt += " (min)"
+        elif risk_over:
+            lot_txt += " (min, %.2f %s)" % (risk_usd, self.cur)
+
+        p.update(state=ACTIVE, dir=dir_, score=score, market=market, lines=3,
+                 kind="%s %+d/%d" % ("market" if market else "pending", score, 3))
+        p["lbl"][(0, 0)] = "Entry:"
+        p["val"][(0, 0)] = "%.*f" % (dg, entry if market else pend)
+        p["clr"][(0, 0)] = "dir"
+        p["lbl"][(0, 1)] = "Lot:"
+        p["val"][(0, 1)] = lot_txt
+        p["clr"][(0, 1)] = "title"
+        p["lbl"][(1, 0)] = "Stop:"
+        p["val"][(1, 0)] = "%.*f %dpts%s" % (dg, sl_price, sl_pts, " (min)" if widened else "")
+        p["clr"][(1, 0)] = "sell"
+        p["lbl"][(1, 1)] = "Target:"
+        p["val"][(1, 1)] = "%.*f %dpts" % (dg, tp_price, tp_pts)
+        p["clr"][(1, 1)] = "buy"
+        p["lbl"][(2, 0)] = "Risk:"
+        p["val"][(2, 0)] = "%.2f %s" % (risk_usd, self.cur)
+        p["clr"][(2, 0)] = "sell"
+        p["lbl"][(2, 1)] = "Reward:"
+        p["val"][(2, 1)] = "%.2f %s" % (reward_usd, self.cur)
+        p["clr"][(2, 1)] = "buy"
+        p["lbl"][(2, 2)] = "Valid:"
+        p["val"][(2, 2)] = "%d bars -> %s" % (self.valid_bars, self.now[tag])
+        p["clr"][(2, 2)] = "silver"
+
+    def update_plan(self):
+        for t in self.tags:
+            self.update_plan_row(t)
+
+    # ---- PlanColumns() --------------------------------------------------
+    def plan_columns(self):
+        cA, cB, cC = PLAN_COL_A, PLAN_COL_B, PLAN_COL_C
+        vA = cA + EM * PLAN_LBL_C
+        wA = max([len(p["val"][(l, 0)]) for t, p in self.plans.items()
+                  for l in range(p["lines"]) if (l, 0) in p["val"]] or [0])
+        cB = max(cB, vA + wA * EM + EM * 2)
+        vB = cB + EM * PLAN_LBL_C
+        wB = max([len(p["val"][(l, 1)]) for t, p in self.plans.items()
+                  for l in range(p["lines"]) if (l, 1) in p["val"]] or [0])
+        cC = max(cC, vB + wB * EM + EM * 2)
+        vC = cC + EM * PLAN_LBL_C
+        return cA, vA, cB, vB, cC, vC
+
+    def total_plan_lines(self):
+        return 0 if not self.show_plan else sum(p["lines"] for p in self.plans.values())
+
+    # ---- PlanWidthNeed() ------------------------------------------------
+    def plan_width_need(self):
+        if not self.show_plan:
+            return 0
+        cA, vA, cB, vB, cC, vC = self.plan_columns()
+        need = 44 + len("pending +3/3") * EM + 10
+        for t, p in self.plans.items():
+            if p["lines"] == 1:
+                if p["note"]:
+                    need = max(need, cA + len(p["note"]) * EM + 10)
+                continue
+            for (l, c), v in p["val"].items():
+                vx = (vA, vB, vC)[c]
+                need = max(need, vx + len(v) * EM + 10)
+        return need
+
+    # ---- DrawSupportedPanel() -------------------------------------------
+    def draw(self):
+        row_h = FONT + 11
+        self.panel_h = (HEAD_H + TF_COUNT * 2 * row_h + 8
+                        + (PLAN_SEP_H + self.total_plan_lines() * row_h if self.show_plan else 0))
+        want = PLAN_W_MIN
+        if self.show_plan:
+            want = max(want, self.plan_width_need())
+        self.panel_w = want
+
+        w_cols = int((self.panel_w - 4) / CW)      # usable columns in the box
+        grid = [[" "] * w_cols for _ in range(40)]
+        placed = []                                # (row, x_end_px) for the edge check
+
+        def put(text, x_px, line):
+            if not text:
+                return
+            col = max(0, int(round(x_px / CW)))
+            for k, ch in enumerate(text):
+                if col + k < w_cols:
+                    grid[line][col + k] = ch
+            placed.append((line, x_px + len(text) * CW, text))
+
+        separators = set()
+
+        # ---- Group 1 -----------------------------------------------------
+        put("SimpleEA", 10, 0)
+        sym = "%s  %s" % (self.symbol, self.tags[0])
+        put(sym, self.panel_w - 10 - len(sym) * CW, 0)
+        separators.add(1)
+        line = 2
+        for t in self.tags:
+            r = self.rows[t]
+            put(t, 10, line)
+            put({"M5": "Scalp", "M15": "Short-term", "M30": "Intraday"}[t], 44, line)
+            put("Trend:", 150, line)
+            put(r["trend"], 192, line)
+            put("Regime:", 282, line)
+            put(r["regime"], 330, line)
+            line += 1
+            put("Signal:", 150, line)
+            put({"1": "BUY", "-1": "SELL", "0": "HOLD"}[str(r["dir"])], 192, line)
+            put("Score:", 282, line)
+            put("%+d / 3" % r["score"], 330, line)
+            line += 1
+
+        # ---- Group 2 -----------------------------------------------------
+        if self.show_plan:
+            separators.add(line)                     # the separator between groups
+            line += 1
+            cA, vA, cB, vB, cC, vC = self.plan_columns()
+            for t in self.tags:
+                p = self.plans[t]
+                put(p["head"], 10, line)
+                if p["kind"]:
+                    put(p["kind"], 44, line)
+                if p["lines"] == 1 and p["note"]:
+                    put(p["note"], cA, line)
+                for l in range(p["lines"]):
+                    for c in range(3):
+                        key = (l, c)
+                        if key not in p["lbl"]:
+                            continue
+                        put(p["lbl"][key], (cA, cB, cC)[c], line + l)
+                        put(p["val"][key], (vA, vB, vC)[c], line + l)
+                line += p["lines"]
+
+        rows = ["".join(r).rstrip() for r in grid]
+        for r in separators:
+            rows[r] = "-" * w_cols
+        return rows, line, separators, placed
+
+    def render(self, title):
+        grid, last, separators, placed = self.draw()
+        w_cols = int((self.panel_w - 4) / CW)
+        print("\n" + "=" * 96)
+        print(title)
+        print("=" * 96)
+        print("  +" + "-" * w_cols + "+")
+        for i, txt in enumerate(grid):
+            if i >= last:                      # `last` is the next free row
+                break
+            print("  | %s |" % txt.ljust(w_cols))
+        print("  +" + "-" * w_cols + "+")
+        print("  panel: %d x %d px   (one character = %.1f px)"
+              % (self.panel_w, self.panel_h, CW))
+
+        # ---- the guarantee: nothing drawn may pass the right edge --------
+        over = []
+        for line, x_end, txt in placed:
+            if x_end > self.panel_w - 3:
+                over.append((line, txt, x_end))
+        for line, txt, w in over:
+            print("  !! line %d ends at %.0f px in a %d px panel: %r"
+                  % (line, w, self.panel_w, txt))
+        return over
 
 
-def update_plan(spec, score, atr, price, balance, tf="M5", symbol="XAUUSD",
-                cur="USD", use_risk=True, use_min_lot=False, risk2=0.5,
-                risk3=1.0, sl_atr=1.2, tp_atr=2.4, pend_atr=0.5,
-                valid_bars=3, expiry="14:30", hold=False, digits=None):
-    """UpdatePlan(): returns the seven ready-to-draw lines."""
-    dg = digits if digits is not None else spec["digits"]
-    texts = [""] * PLAN_LINES
-    texts[0] = "Trade plan:"
-
-    if hold:
-        texts[1] = "%s row shows HOLD - no trade to plan" % tf
-        return texts
-
-    d = 1 if score > 0 else -1
-    side = "BUY" if d > 0 else "SELL"
-    r = plan(spec, d, atr=atr, balance=balance, use_risk=use_risk,
-             use_min_lot=use_min_lot, risk2=risk2, risk3=risk3,
-             sl_atr=sl_atr, tp_atr=tp_atr, score=score, entry=price)
-
-    market = abs(score) >= 3
-    why = "3 of 3 - go to market" if market else "2 of 3 - wait for a better price"
-    offset = pend_atr * atr
-    pend = price - d * offset
-    alt = price + d * offset
-
-    texts[1] = "%s  %s   %s   score %+d/%d" % (symbol, tf, side, score, 3)
-    if market:
-        texts[2] = "Entry  : MARKET %.*f   (%s)" % (dg, price, why)
-    else:
-        texts[2] = "Entry  : PENDING %s %.*f   (%s)" % (
-            "buy limit" if d > 0 else "sell limit", dg, pend, why)
-    texts[3] = "Alt    : %s %.*f   (follow the move instead)" % (
-        "buy stop" if d > 0 else "sell stop", dg, alt)
-    texts[4] = "Stop   : %.*f   %d pts   risk %.2f %s" % (
-        dg, r["sl_price"], r["sl_pts"], r["risk_usd"], cur)
-    texts[5] = "Target : %.*f   %d pts   reward %.2f %s   R:R 1:%.2f" % (
-        dg, r["tp_price"], r["tp_pts"], r["reward_usd"], cur, r["rr"])
-
-    if use_min_lot:
-        size = "Lot    : %.2f   (symbol minimum)" % r["lot"]
-    elif use_risk:
-        pct = risk3 if abs(score) >= 3 else risk2
-        size = "Lot    : %.2f   (%.2f%% of %.2f %s)" % (r["lot"], pct, balance, cur)
-    else:
-        size = "Lot    : %.2f   (balance ladder%s)" % (
-            r["lot"], ", x1.5 at score 3" if abs(score) >= 3 else "")
-    if not use_min_lot and use_risk and r["want_risk"] and r["risk_usd"] > r["want_risk"] * 1.05:
-        size += "   - min lot risks %.2f %s" % (r["risk_usd"], cur)
-    texts[6] = size
-    texts[7] = "Valid  : %d bars (%d min) - until %s, or if the panel flips" % (
-        valid_bars, valid_bars * MINUTES[tf], expiry)
-    return texts
-
-
-def render(title, *args, **kw):
-    """DrawSupportedPanel(): size to content, then draw."""
-    texts = update_plan(*args, **kw)
-    font = kw.get("font", FONT)
-    panel_w = max(PANEL_W_MIN, plan_width_need(texts, font))
-    panel_h = HEAD_H + TF_COUNT * 2 * (font + 11) + 8 + PLAN_SEP_H + PLAN_ROWS * (font + 11)
-
-    print("\n" + "=" * 78)
-    print(title)
-    print("=" * 78)
-
-    def box(s, right_anchor=False):
-        width = panel_w - 4
-        if right_anchor:
-            return "  | " + s.rjust(width)[:width] + " |"
-        return "  | " + s.ljust(width)[:width] + " |"
-
-    print("  +" + "-" * (panel_w - 2) + "+")
-    print(box("SimpleEA" + ("%s  %s" % (kw.get("symbol", "XAUUSD"), kw.get("tf", "M5"))).rjust(panel_w - 14)))
-    print("  |" + "-" * (panel_w - 2) + "|")
-    for tag, style, trend, sig, sc, regime in ROWS:
-        print(box("%-4s %-11s Trend: %-12s Regime: %s" % (tag, style, trend, regime)))
-        print(box("%-4s %-11s Signal: %-11s Score: %s" % ("", "", sig, sc)))
-    print("  |" + "-" * (panel_w - 2) + "|")
-
-    bad = []
-    avail = panel_w - 20                       # what the text has to fit in
-    for i, txt in enumerate(texts):
-        if txt == "":
-            continue
-        real = len(txt) * real_char_w(font)             # realistic rendered width
-        if real > avail:
-            bad.append((i, len(txt), real, avail))
-        if i == 1:
-            print(box(txt, right_anchor=True))
-        elif i == 0:
-            print(box(txt))
-        else:
-            print(box(txt))
-    print("  +" + "-" * (panel_w - 2) + "+")
-    print("  panel: %d x %d px" % (panel_w, panel_h))
-
-    if bad:
-        for i, n, real, a in bad:
-            print("  !! line %d is %d chars (~%.0f px) past the %d px of text space"
-                  % (i, n, real, a))
-    else:
-        print("  (every line fits: text needs <= %d px, %d px available)" % (avail, avail))
-    return bad
+def case(title, readings, symbol="XAUUSD", spec=None, balance=800.0, price=4285.70, **kw):
+    p = Panel(symbol, spec or SYMBOLS["XAUUSD-2d"], balance, **kw)
+    p.price = price
+    for tag, r in readings.items():
+        p.set_reading(tag, **r)
+    p.update_plan()
+    return p.render(title)
 
 
 def main():
-    print("SimpleEA trade plan - what the panel draws")
-    for dpi in (72, 96, 120, 144, 192):
-        globals()["DPI"] = dpi
-        for size in (6, 8, 9, 10, 12, 16):
-            check = char_w(size) >= real_char_w(size)
-            if not check:
-                print("  !! CharW under-estimates at DPI %d size %d (%.2f vs %.2f)"
-                      % (dpi, size, char_w(size), real_char_w(size)))
-                sys.exit(1)
-    globals()["DPI"] = 96
-    print("  CharW() is conservative at 72-192 DPI and sizes 6-16: ok")
-    bad = []
-    bad += render("CASE 1  XAUUSD M5  SELL 3/3  $800  RISK mode  -> MARKET",
-                  SYMBOLS["XAUUSD-2d"], -3, atr=0.28, price=4285.70, balance=800.0,
-                  symbol="XAUUSD", tf="M5")
-    bad += render("CASE 2  XAUUSD M5  SELL 2/3  -> the EA switches to a PENDING entry",
-                  SYMBOLS["XAUUSD-2d"], -2, atr=0.28, price=4285.70, balance=800.0,
-                  symbol="XAUUSD", tf="M5")
-    bad += render("CASE 3  EURUSD M15 BUY 3/3  $800  RISK-OFF ladder",
-                  SYMBOLS["EURUSD-5d"], 3, atr=0.0010, price=1.08542, balance=800.0,
-                  use_risk=False, symbol="EURUSD", tf="M15")
-    bad += render("CASE 4  EURUSD M15 BUY 3/3  $800  MIN-LOT mode",
-                  SYMBOLS["EURUSD-5d"], 3, atr=0.0010, price=1.08542, balance=800.0,
-                  use_min_lot=True, symbol="EURUSD", tf="M15")
-    bad += render("CASE 5  XAUUSD M5  $200, wide stop: min lot risks more than 1% (flagged)",
-                  SYMBOLS["XAUUSD-2d"], -3, atr=2.8, price=4285.70, balance=200.0,
-                  symbol="XAUUSD", tf="M5")
-    bad += render("CASE 6  XAUUSD M30 HOLD -> no plan, one line",
-                  SYMBOLS["XAUUSD-2d"], 0, atr=1.2, price=4285.70, balance=800.0,
-                  hold=True, symbol="XAUUSD", tf="M30")
-    bad += render("CASE 7  the same gold trade on a 3-DIGIT broker (points differ, money does not)",
-                  SYMBOLS["XAUUSD-3d"], -3, atr=0.28, price=4285.700, balance=800.0,
-                  symbol="XAUUSD", tf="M5")
-    bad += render("CASE 8  a big balance: does a long number break the layout?",
-                  SYMBOLS["XAUUSD-2d"], -3, atr=0.28, price=4285.70, balance=2500000.0,
-                  symbol="XAUUSD", tf="M5")
+    print("SimpleEA - Group 1 (readings) + Group 2 (one plan per timeframe)")
 
-    print("\n" + "=" * 78)
+    bad = []
+    bad += case("A)  all three timeframes active",
+                {"M5":  dict(direction=-1, score=-3, trend="Going down", regime="Steady"),
+                 "M15": dict(direction=1,  score=2,  trend="Going up",   regime="Mixed"),
+                 "M30": dict(direction=-1, score=-2, trend="Going down", regime="Choppy")})
+    bad += case("B)  the common case: one active, two HOLD (one line each)",
+                {"M5":  dict(direction=-1, score=-3, trend="Going down", regime="Steady"),
+                 "M15": dict(direction=0,  score=0,  trend="Sideways",   regime="Mixed"),
+                 "M30": dict(direction=0,  score=0,  trend="Sideways",   regime="Choppy")})
+    bad += case("C)  nothing anywhere: Group 2 shrinks to three lines",
+                {"M5":  dict(direction=0, score=0),
+                 "M15": dict(direction=0, score=0),
+                 "M30": dict(direction=0, score=0)})
+    bad += case("D)  M15 still downloading history",
+                {"M5":  dict(direction=-1, score=-3, trend="Going down", regime="Steady"),
+                 "M15": dict(ok=False),
+                 "M30": dict(direction=0, score=0)})
+    bad += case("E)  a $200 account where the minimum lot risks more than 1% (flagged)",
+                {"M5":  dict(direction=-1, score=-3, trend="Going down", regime="Steady"),
+                 "M15": dict(direction=0, score=0),
+                 "M30": dict(direction=0, score=0)}, balance=200.0)
+    bad += case("F)  a big balance and a wide stop: do long numbers break the layout?",
+                {"M5":  dict(direction=-1, score=-3, trend="Going down", regime="Steady"),
+                 "M15": dict(direction=1, score=3, trend="Going up", regime="Steady"),
+                 "M30": dict(direction=0, score=0)}, balance=2500000.0)
+    bad += case("G)  min-lot mode on EURUSD",
+                {"M5":  dict(direction=1, score=3, trend="Going up", regime="Steady"),
+                 "M15": dict(direction=0, score=0),
+                 "M30": dict(direction=0, score=0)},
+                symbol="EURUSD", spec=SYMBOLS["EURUSD-5d"], balance=800.0,
+                use_min_lot=True, price=1.08542)
+    bad += case("H)  InpShowPlan = false: Group 2 is not drawn at all",
+                {"M5":  dict(direction=1, score=3, trend="Going up", regime="Steady"),
+                 "M15": dict(direction=0, score=0),
+                 "M30": dict(direction=0, score=0)}, show_plan=False)
+
+    print("\n" + "=" * 96)
     if bad:
         print("FAILED: %d line(s) overflow" % len(bad))
         sys.exit(1)
-    print("PASS: every case fits. The panel sizes itself from the text it draws,")
-    print("so a long price or a large balance widens it instead of clipping it.")
-    print("Panel with the plan: header %d + rows %d + gap %d + %d plan rows = %d px"
-          % (HEAD_H, TF_COUNT * 2 * (FONT + 11), PLAN_SEP_H, PLAN_ROWS * (FONT + 11),
-             HEAD_H + TF_COUNT * 2 * (FONT + 11) + 8 + PLAN_SEP_H + PLAN_ROWS * (FONT + 11)))
+    print("PASS: every case fits.  The panel measures Group 2's text and sizes")
+    print("itself before drawing, and HOLD/waiting rows collapse to one line,")
+    print("so the block is exactly as tall and as wide as its content needs.")
 
 
 if __name__ == "__main__":

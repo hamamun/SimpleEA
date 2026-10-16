@@ -65,10 +65,13 @@
 //|  -----------------------------------------------------------------|
 //|  TRADE PLAN (advice only - NO ORDER IS EVER SENT)                 |
 //|  -----------------------------------------------------------------|
-//|  Under the three timeframe rows the panel prints, for the chart's |
-//|  own timeframe, what a trade would look like: where to enter       |
-//|  (market or pending), what lot size, target and stop in points and |
-//|  in account currency, and how long the reading is worth acting on. |
+//|  Under the three timeframe rows, separated by one line, comes a     |
+//|  SECOND GROUP with one block per timeframe - M5, M15, M30 - in the  |
+//|  same two-column style as the first: where to enter (market or      |
+//|  pending, decided by the score), the lot size, the stop and the     |
+//|  target in price, points and account currency, and how many bars    |
+//|  the reading is worth acting on.  A HOLD or waiting timeframe takes |
+//|  a single line, so the group is only as tall as it has content for. |
 //|                                                                  |
 //|  Nothing is calculated at all while the chart is on a wrong       |
 //|  timeframe, so no stale or out-of-context number can be read off  |
@@ -156,8 +159,12 @@ input double   InpHurstRevertM30 = 0.45;
 #define TF_COUNT   3
 #define TF_TEXT    "M5/M15/M30"
 #define HEAD_H     34     // height of the header band (title + symbol line)
-#define PLAN_LINES 8      // text slots in the trade-plan block
-#define PLAN_ROWS  7      // rows drawn (slot 0 and 1 share the heading row)
+#define PLAN_W_MIN 406    // panel width with no plan showing
+#define PLAN_LINES 3      // lines an ACTIVE timeframe uses (1 for HOLD)
+#define PLAN_COL_A 150    // first cell column: aligns with "Trend:" above
+#define PLAN_COL_B 282    // second cell column: aligns with "Regime:" above
+#define PLAN_COL_C 414    // third cell column: used by the "Valid" cell
+#define PLAN_LBL_C 8      // widest label in a column, in characters
 #define PLAN_SEP_H 14     // gap between the last timeframe row and the plan
 
 //  The only chart timeframes this engine is calibrated for.  Anything else
@@ -233,8 +240,10 @@ int OnInit()
    g_rowH   = InpFontSize + 11;
    // Each timeframe takes TWO lines: Trend/Regime on the first,
    // Signal (BUY/SELL/HOLD)/Score on the second.
-   g_panelH = HEAD_H + TF_COUNT * 2 * g_rowH + 8
-              + (InpShowPlan ? (PLAN_SEP_H + PLAN_ROWS * g_rowH) : 0);
+   //  height is only provisional here: DrawSupportedPanel() recomputes it
+   //  because the second group's height depends on how many timeframes
+   //  actually have a signal.
+   g_panelH = HEAD_H + TF_COUNT * 2 * g_rowH + 8;
 
    //  The notice is the one line that must always be readable in full, so
    //  widen the panel if a large font size would otherwise clip it.  The
@@ -666,34 +675,26 @@ void EvaluateRow(int idx)
 //   is one InpPendATR step beyond the market, which is the only place in
 //   this block where a choice - not a measurement - is being made.)
 //+------------------------------------------------------------------+
-struct STradePlan
+//  ONE PLAN PER TIMEFRAME.  The second group is three blocks, one for M5,
+//  one for M15, one for M30 - because when autotrading arrives the panel
+//  has to be able to say "buy M5, sell M30" and the executor acts per row.
+struct SPlanRow
 {
-   bool           has;        // a signal exists on the chart timeframe
-   int            row;        // which of the three rows is the chart timeframe
-   int            dir;        // +1 buy, -1 sell
-   int            score;
-   ENUM_TIMEFRAMES tf;
-   double         atr;
-   double         entry;      // market entry (ask for a buy, bid for a sell)
-   double         pend;       // pending-entry price (better than market)
-   double         slPrice, tpPrice;
-   double         slDist, tpDist;
-   int            slPts, tpPts;
-   double         pv;         // account currency per 1 point per 1.0 lot
-   double         lot;
-   double         riskUSD, rewardUSD, rr;
-   double         wantRiskUSD;
-   bool           riskOver;   // min lot forced the risk above the target
-   bool           minLot;     // advising the symbol minimum lot
-   bool           stopLevelHit;
-   datetime       until;
-   string         why;        // plain words: why market or pending
-   // ---- ready to draw: one row per line of the block -------------------
-   string         text[PLAN_LINES];
-   color          clr[PLAN_LINES];
+   int    state;                  // 0 HOLD, 1 waiting for data, 2 active
+   int    dir;                    // +1 buy, -1 sell
+   int    score;
+   bool   market;                 // true = market entry, false = pending
+   int    lines;                  // lines this block occupies: 1 or PLAN_LINES
+   string head;                   // "M5" / "M15" / "M30"
+   string kind;                   // "market -3/3" / "pending +2/3" / "HOLD" / "waiting"
+   string note;                   // one-liners for the inactive states
+   // ---- ready to draw: label + value per cell -------------------------
+   string lbl[PLAN_LINES][3];
+   string val[PLAN_LINES][3];
+   color  clr[PLAN_LINES][3];
 };
 
-STradePlan g_plan;
+SPlanRow g_plans[TF_COUNT];
 
 //+------------------------------------------------------------------+
 //  Value of ONE POINT of one lot, in the account currency.  Taken from
@@ -782,187 +783,189 @@ int RowForChartTF()
 }
 
 //+------------------------------------------------------------------+
-//  Build the plan for the chart timeframe.  Called only when the chart
-//  timeframe is supported - on any other chart there is no plan at all.
+//  Clear one timeframe's plan block.
 //+------------------------------------------------------------------+
-void UpdatePlan()
+void ClearPlanRow(int i)
 {
-   int row = RowForChartTF();
-   g_plan.has = false;
-   for(int i = 0; i < PLAN_LINES; i++)
+   g_plans[i].state  = 0;
+   g_plans[i].dir    = 0;
+   g_plans[i].score  = 0;
+   g_plans[i].market = false;
+   g_plans[i].lines  = 1;
+   g_plans[i].head   = g_rows[i].tag;
+   g_plans[i].kind   = "";
+   g_plans[i].note   = "";
+
+   for(int l = 0; l < PLAN_LINES; l++)
+      for(int c = 0; c < 3; c++)
+      {
+         g_plans[i].lbl[l][c] = "";
+         g_plans[i].val[l][c] = "";
+         g_plans[i].clr[l][c] = clrGray;
+      }
+}
+
+//+------------------------------------------------------------------+
+//  Build the plan for ONE timeframe: M5, M15 or M30.  Everything is
+//  read from the terminal (price, contract value, account balance) and
+//  from that timeframe's own ATR, so each block stands alone - which is
+//  what the future executor will need.
+//+------------------------------------------------------------------+
+void UpdatePlanRow(int i)
+{
+   ClearPlanRow(i);
+
+   if(!g_rows[i].ok)
    {
-      g_plan.text[i] = "";
-      g_plan.clr[i]  = clrGray;
+      g_plans[i].state = 1;
+      g_plans[i].kind  = "waiting";
+      g_plans[i].note  = "history still loading";
+      return;
    }
-   g_plan.row = (row >= 0) ? row : 0;
-   if(!InpShowPlan || !ChartSupported() || row < 0) return;
-
-   string cur  = AccountInfoString(ACCOUNT_CURRENCY);
-   int    dg   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-
-   // ---- the "no plan" case: one line, in plain words -------------------
-   if(!g_rows[row].ok || g_rows[row].direction == 0)
+   if(g_rows[i].direction == 0)
    {
-      g_plan.text[0] = "Trade plan:";
-      g_plan.clr [0] = clrGray;
-      g_plan.text[1] = StringFormat("%s row shows %s - no trade to plan",
-                                    g_rows[row].tag,
-                                    g_rows[row].ok ? "HOLD" : "no data yet");
-      g_plan.clr [1] = clrDimGray;
-      for(int k = 2; k < PLAN_LINES; k++) g_plan.text[k] = "";
-      return;                                // no plan: nothing to compute
+      g_plans[i].state = 0;
+      g_plans[i].kind  = "HOLD";
+      g_plans[i].note  = "nothing to place";
+      return;
    }
 
-   // ---- there is a signal: compute the whole plan ----------------------
-   double atr = ATRClosed(g_rows[row].tf, InpATRPeriod);
+   double atr   = ATRClosed(g_rows[i].tf, InpATRPeriod);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double pv    = PointValuePerLot();
-   if(atr <= 0.0 || point <= 0.0 || bid <= 0.0 || ask <= 0.0) return;
+   if(atr <= 0.0 || point <= 0.0 || bid <= 0.0 || ask <= 0.0)
+   {
+      g_plans[i].state = 1;
+      g_plans[i].kind  = "waiting";
+      g_plans[i].note  = "no price data yet";
+      return;
+   }
 
-   g_plan.has   = true;
-   g_plan.tf    = g_rows[row].tf;
-   g_plan.dir   = g_rows[row].direction;
-   g_plan.score = g_rows[row].score;
-   g_plan.atr   = atr;
-   g_plan.pv    = pv;
-   g_plan.entry = (g_plan.dir > 0) ? ask : bid;
+   int    dir    = g_rows[i].direction;
+   int    score  = g_rows[i].score;
+   bool   market = (MathAbs(score) >= 3);          // 3 of 3 -> trade now
+   double entry  = (dir > 0) ? ask : bid;
+   double offset = InpPendATR * atr;
+   double pend   = (dir > 0) ? (entry - offset) : (entry + offset);
 
-   // ---- 3 + 4. stop and target, snapped onto the point grid ------------
-   g_plan.slPts = (int)MathMax(1.0, MathRound(InpSLATR * atr / point));
-   g_plan.tpPts = (int)MathMax(1.0, MathRound(InpTPATR * atr / point));
+   // ---- stop and target, snapped onto the broker's point grid ------
+   int slPts = (int)MathMax(1.0, MathRound(InpSLATR * atr / point));
+   int tpPts = (int)MathMax(1.0, MathRound(InpTPATR * atr / point));
 
    double minStop = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
-   if(minStop > 0.0 && (double)g_plan.slPts * point < minStop)
+   bool   widened = false;
+   if(minStop > 0.0 && (double)slPts * point < minStop)
    {
-      g_plan.slPts = (int)MathCeil(minStop / point);
-      g_plan.stopLevelHit = true;
+      slPts   = (int)MathCeil(minStop / point);
+      widened = true;
    }
 
-   g_plan.slDist = (double)g_plan.slPts * point;
-   g_plan.tpDist = (double)g_plan.tpPts * point;
-   if(g_plan.dir > 0)
-   {
-      g_plan.slPrice = g_plan.entry - g_plan.slDist;
-      g_plan.tpPrice = g_plan.entry + g_plan.tpDist;
-   }
-   else
-   {
-      g_plan.slPrice = g_plan.entry + g_plan.slDist;
-      g_plan.tpPrice = g_plan.entry - g_plan.tpDist;
-   }
+   double slPrice = (dir > 0) ? (entry - (double)slPts * point)
+                              : (entry + (double)slPts * point);
+   double tpPrice = (dir > 0) ? (entry + (double)tpPts * point)
+                              : (entry - (double)tpPts * point);
 
-   // ---- 2. lot size ----------------------------------------------------
+   // ---- lot size ---------------------------------------------------
    double balance  = AccountInfoDouble(ACCOUNT_BALANCE);
    double lots     = SymbolMinLot();
    double wantRisk = 0.0;
+   bool   minLot   = false;
 
    if(InpUseMinLot)
    {
-      g_plan.minLot = true;
-      lots = SymbolMinLot();
+      minLot = true;
+      lots   = SymbolMinLot();
    }
    else if(InpUseRisk)
    {
-      double pct = (MathAbs(g_plan.score) >= 3) ? InpRiskScore3 : InpRiskScore2;
+      double pct = (MathAbs(score) >= 3) ? InpRiskScore3 : InpRiskScore2;
       wantRisk   = balance * pct / 100.0;
-      if(pv > 0.0 && g_plan.slPts > 0)
-         lots = wantRisk / ((double)g_plan.slPts * pv);
+      if(pv > 0.0 && slPts > 0)
+         lots = wantRisk / ((double)slPts * pv);
    }
    else
    {
       double step = (InpBalPer001 > 0.0) ? InpBalPer001 : 1000.0;
       lots = (balance / step) * 0.01;
-      if(MathAbs(g_plan.score) >= 3) lots *= InpScore3Factor;
+      if(MathAbs(score) >= 3) lots *= InpScore3Factor;
    }
 
-   g_plan.lot       = NormalizeLots(lots);
-   g_plan.riskUSD   = (pv > 0.0) ? g_plan.lot * (double)g_plan.slPts * pv : 0.0;
-   g_plan.rewardUSD = (pv > 0.0) ? g_plan.lot * (double)g_plan.tpPts * pv : 0.0;
-   g_plan.rr        = (g_plan.riskUSD > 0.0) ? g_plan.rewardUSD / g_plan.riskUSD : 0.0;
-   g_plan.wantRiskUSD = wantRisk;
-   if(!InpUseMinLot && InpUseRisk && wantRisk > 0.0 && g_plan.riskUSD > wantRisk * 1.05)
-      g_plan.riskOver = true;
+   double lot       = NormalizeLots(lots);
+   double riskUSD   = (pv > 0.0) ? lot * (double)slPts * pv : 0.0;
+   double rewardUSD = (pv > 0.0) ? lot * (double)tpPts * pv : 0.0;
+   bool   riskOver  = (!InpUseMinLot && InpUseRisk && wantRisk > 0.0 &&
+                       riskUSD > wantRisk * 1.05);
 
-   // ---- 5. how long the reading is worth acting on ---------------------
-   datetime sigBar = LastClosedBarTime(_Symbol, g_plan.tf);
+   // ---- how long this reading is worth acting on -------------------
+   datetime until  = 0;
+   datetime sigBar = LastClosedBarTime(_Symbol, g_rows[i].tf);
    if(sigBar > 0)
-      g_plan.until = sigBar + (datetime)((InpValidBars + 1) * PeriodSeconds(g_plan.tf));
+      until = sigBar + (datetime)((InpValidBars + 1) * PeriodSeconds(g_rows[i].tf));
 
-   // ---- 1. market or pending, decided by the score ---------------------
-   bool   market = (MathAbs(g_plan.score) >= 3);
-   double offset = InpPendATR * atr;
-   g_plan.pend = (g_plan.dir > 0) ? (g_plan.entry - offset) : (g_plan.entry + offset);
-   double alt  = (g_plan.dir > 0) ? (g_plan.entry + offset) : (g_plan.entry - offset);
-   g_plan.why  = market ? "3 of 3 - go to market"
-                        : "2 of 3 - wait for a better price";
+   // ---- fill the cells ---------------------------------------------
+   string cur  = AccountInfoString(ACCOUNT_CURRENCY);
+   int    dg   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   color  dirC = (dir > 0) ? InpBuyColor : InpSellColor;
 
-   string side = (g_plan.dir > 0) ? "BUY" : "SELL";
-   color  dirC = (g_plan.dir > 0) ? InpBuyColor : InpSellColor;
+   g_plans[i].state  = 2;
+   g_plans[i].dir    = dir;
+   g_plans[i].score  = score;
+   g_plans[i].market = market;
+   g_plans[i].lines  = PLAN_LINES;
+   g_plans[i].kind   = StringFormat("%s %+d/%d",
+                                    market ? "market" : "pending", score, 3);
 
-   // ---- the lines, ready to draw ---------------------------------------
-   g_plan.text[0] = "Trade plan:";
-   g_plan.clr [0] = clrGray;
+   g_plans[i].lbl[0][0] = "Entry:";
+   g_plans[i].val[0][0] = DoubleToString(market ? entry : pend, dg);
+   g_plans[i].clr[0][0] = dirC;
 
-   g_plan.text[1] = StringFormat("%s  %s   %s   score %+d/%d",
-                                 _Symbol, g_rows[row].tag, side, g_plan.score, 3);
-   g_plan.clr [1] = dirC;
+   string lotTxt = DoubleToString(lot, 2);
+   if(minLot)        lotTxt += " (min)";
+   else if(riskOver) lotTxt += StringFormat(" (min, %s %s)",
+                                            DoubleToString(riskUSD, 2), cur);
+   g_plans[i].lbl[0][1] = "Lot:";
+   g_plans[i].val[0][1] = lotTxt;
+   g_plans[i].clr[0][1] = InpTitleColor;
 
-   if(market)
-      g_plan.text[2] = StringFormat("Entry  : MARKET %s   (%s)",
-                                    DoubleToString(g_plan.entry, dg), g_plan.why);
-   else
-      g_plan.text[2] = StringFormat("Entry  : PENDING %s %s   (%s)",
-                                    (g_plan.dir > 0) ? "buy limit" : "sell limit",
-                                    DoubleToString(g_plan.pend, dg), g_plan.why);
-   g_plan.clr [2] = dirC;
+   g_plans[i].lbl[1][0] = "Stop:";
+   g_plans[i].val[1][0] = StringFormat("%s %dpts%s", DoubleToString(slPrice, dg), slPts,
+                                       widened ? " (min)" : "");
+   g_plans[i].clr[1][0] = InpSellColor;
 
-   g_plan.text[3] = StringFormat("Alt    : %s %s   (follow the move instead)",
-                                 (g_plan.dir > 0) ? "buy stop" : "sell stop",
-                                 DoubleToString(alt, dg));
-   g_plan.clr [3] = clrGray;
+   g_plans[i].lbl[1][1] = "Target:";
+   g_plans[i].val[1][1] = StringFormat("%s %dpts", DoubleToString(tpPrice, dg), tpPts);
+   g_plans[i].clr[1][1] = InpBuyColor;
 
-   string stopTxt = StringFormat("Stop   : %s   %d pts   risk %s %s",
-                                 DoubleToString(g_plan.slPrice, dg), g_plan.slPts,
-                                 DoubleToString(g_plan.riskUSD, 2), cur);
-   if(g_plan.stopLevelHit) stopTxt += "  (broker minimum)";
-   g_plan.text[4] = stopTxt;
-   g_plan.clr [4] = InpSellColor;
+   g_plans[i].lbl[2][0] = "Risk:";
+   g_plans[i].val[2][0] = StringFormat("%s %s", DoubleToString(riskUSD, 2), cur);
+   g_plans[i].clr[2][0] = InpSellColor;
 
-   g_plan.text[5] = StringFormat("Target : %s   %d pts   reward %s %s   R:R 1:%.2f",
-                                 DoubleToString(g_plan.tpPrice, dg), g_plan.tpPts,
-                                 DoubleToString(g_plan.rewardUSD, 2), cur, g_plan.rr);
-   g_plan.clr [5] = InpBuyColor;
+   g_plans[i].lbl[2][1] = "Reward:";
+   g_plans[i].val[2][1] = StringFormat("%s %s", DoubleToString(rewardUSD, 2), cur);
+   g_plans[i].clr[2][1] = InpBuyColor;
 
-   string sizeTxt;
-   if(g_plan.minLot)
-      sizeTxt = StringFormat("Lot    : %s   (symbol minimum)", DoubleToString(g_plan.lot, 2));
-   else if(InpUseRisk)
-      sizeTxt = StringFormat("Lot    : %s   (%.2f%% of %.2f %s)",
-                             DoubleToString(g_plan.lot, 2),
-                             (MathAbs(g_plan.score) >= 3) ? InpRiskScore3 : InpRiskScore2,
-                             balance, cur);
-   else
-      sizeTxt = StringFormat("Lot    : %s   (balance ladder%s)",
-                             DoubleToString(g_plan.lot, 2),
-                             (MathAbs(g_plan.score) >= 3) ? ", x1.5 at score 3" : "");
-   if(g_plan.riskOver)
-      sizeTxt += StringFormat("   - min lot risks %s %s",
-                              DoubleToString(g_plan.riskUSD, 2), cur);
-   g_plan.text[6] = sizeTxt;
-   g_plan.clr [6] = InpTitleColor;
+   g_plans[i].lbl[2][2] = "Valid:";
+   g_plans[i].val[2][2] = (until > 0)
+      ? StringFormat("%d bars -> %s", InpValidBars, TimeToString(until, TIME_MINUTES))
+      : StringFormat("%d bars", InpValidBars);
+   g_plans[i].clr[2][2] = clrSilver;
+}
 
-   // ---- 5. until ---------------------------------------------------
-   if(g_plan.until > 0)
-      g_plan.text[7] = StringFormat("Valid  : %d bars (%d min) - until %s, or if the panel flips",
-                                    InpValidBars,
-                                    InpValidBars * (int)(PeriodSeconds(g_plan.tf) / 60),
-                                    TimeToString(g_plan.until, TIME_MINUTES));
-   else
-      g_plan.text[7] = StringFormat("Valid  : %d bars - or until the panel flips",
-                                    InpValidBars);
-   g_plan.clr [7] = clrSilver;
+//+------------------------------------------------------------------+
+//  Rebuild all three plan blocks.  Called whenever the panel is
+//  redrawn, right after the timeframe rows have been evaluated.  On an
+//  unsupported chart timeframe there are no plans at all.
+//+------------------------------------------------------------------+
+void UpdatePlan()
+{
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      ClearPlanRow(i);
+      if(!InpShowPlan || !ChartSupported()) continue;
+      UpdatePlanRow(i);
+   }
 }
 
 //==================================================================
@@ -1107,7 +1110,8 @@ void MakeLabel(string name, int x, int y, string text, color clr,
 //  MetaTrader sizes fonts in POINTS, so what that means in pixels depends
 //  on the screen DPI - the terminal reports it, so this uses the real
 //  value instead of assuming 96.  A monospaced face needs about 0.55 em
-//  per character; 0.60 is used, so the estimate always errs wide.
+//  per character, and the result is rounded UP, so the estimate is never
+//  smaller than the real glyph advance.
 //+------------------------------------------------------------------+
 int CharW(int size)
 {
@@ -1115,7 +1119,7 @@ int CharW(int size)
    int dpi = (int)TerminalInfoInteger(TERMINAL_SCREEN_DPI);
    if(dpi < 72) dpi = 96;
    double em = (double)size * (double)dpi / 72.0;
-   return((int)MathCeil(em * 0.60));
+   return((int)MathCeil(em * 0.55));
 }
 
 //+------------------------------------------------------------------+
@@ -1199,15 +1203,13 @@ void DrawSupportedPanel()
    int rowH = g_rowH;
 
    //  Size the panel to its content BEFORE drawing the background, so the
-   //  trade plan can never be clipped on the right.  The rows need 96 px
-   //  to their widest value, the header needs its two ends.
-   if(InpShowPlan)
-   {
-      int need = PlanWidthNeed();
-      if(need > g_panelW) g_panelW = need;
-   }
+   //  trade plan can never be clipped on the right - and so the box hugs
+   //  the content instead of leaving a wide empty edge when signals go.
+   int wantW = PLAN_W_MIN;
+   if(InpShowPlan) wantW = (int)MathMax(wantW, PlanWidthNeed());
+   g_panelW = wantW;
    g_panelH = HEAD_H + TF_COUNT * 2 * rowH + 8
-              + (InpShowPlan ? (PLAN_SEP_H + PLAN_ROWS * rowH) : 0);
+              + (InpShowPlan ? (PLAN_SEP_H + TotalPlanLines() * rowH) : 0);
    MakeRect("bg", x, y, g_panelW, g_panelH, InpBgColor, clrDimGray);
 
    // ---- header ----------------------------------------------------
@@ -1281,73 +1283,159 @@ void DrawSupportedPanel()
 }
 
 //+------------------------------------------------------------------+
-//  How much width the plan block needs, in pixels.  The panel is sized
-//  from this before anything is drawn, so no line can ever run past the
+//  Column geometry for the plan blocks.  The labels sit at the same x
+//  positions as the "Trend:" / "Regime:" labels of the row above, so the
+//  two groups line up; a column is pushed right only when the values in
+//  the column before it are unusually wide.
+//+------------------------------------------------------------------+
+void PlanColumns(int &cA, int &vA, int &cB, int &vB, int &cC, int &vC)
+{
+   int em = CharW(InpFontSize);
+
+   cA = PLAN_COL_A;
+   vA = cA + em * PLAN_LBL_C;
+
+   int wA = 0;
+   for(int i = 0; i < TF_COUNT; i++)
+      for(int l = 0; l < g_plans[i].lines; l++)
+         if(g_plans[i].lbl[l][0] != "")
+            wA = (int)MathMax(wA, StringLen(g_plans[i].val[l][0]) * em);
+
+   cB = (int)MathMax(PLAN_COL_B, vA + wA + em * 2);
+   vB = cB + em * PLAN_LBL_C;
+
+   int wB = 0;
+   for(int i = 0; i < TF_COUNT; i++)
+      for(int l = 0; l < g_plans[i].lines; l++)
+         if(g_plans[i].lbl[l][1] != "")
+            wB = (int)MathMax(wB, StringLen(g_plans[i].val[l][1]) * em);
+
+   cC = (int)MathMax(PLAN_COL_C, vB + wB + em * 2);
+   vC = cC + em * PLAN_LBL_C;
+}
+
+//+------------------------------------------------------------------+
+//  How many lines the second group needs: 3 per active timeframe, 1 for
+//  a HOLD or waiting one.  The panel height follows this, so the block
+//  is never taller than it has content for.
+//+------------------------------------------------------------------+
+int TotalPlanLines()
+{
+   if(!InpShowPlan) return(0);
+
+   int n = 0;
+   for(int i = 0; i < TF_COUNT; i++)
+      n += g_plans[i].lines;
+   return(n);
+}
+
+//+------------------------------------------------------------------+
+//  How much width the second group needs, in pixels.  The panel is
+//  sized from this before anything is drawn, so no line can run past the
 //  right edge - whatever the price digits or the balance happen to be.
 //+------------------------------------------------------------------+
 int PlanWidthNeed()
 {
-   if(!InpShowPlan) return(0);
+   if(!InpShowPlan || !ChartSupported()) return(0);
 
-   int widestBody = 0;      // lines 2..6, drawn at InpFontSize
-   int widestHead = 0;      // line 0 ends and line 1 right-aligns on one row
-   for(int i = 0; i < PLAN_LINES; i++)
+   int cA, vA, cB, vB, cC, vC;
+   PlanColumns(cA, vA, cB, vB, cC, vC);
+   int em = CharW(InpFontSize);
+
+   //  timeframe tag at x+10 and the kind ("pending +3/3") at x+44
+   int need = 44 + StringLen("pending +3/3") * em + 10;
+
+   for(int i = 0; i < TF_COUNT; i++)
    {
-      int n = StringLen(g_plan.text[i]);
-      if(i <= 1)
+      if(g_plans[i].lines == 1)
       {
-         //  "Trade plan:" from the left and the signal from the right share
-         //  the row, so they are measured together
-         if(i == 1 && g_plan.text[0] != "") n += StringLen(g_plan.text[0]) + 4;
-         if(n > widestHead) widestHead = n;
+         if(g_plans[i].note != "")
+            need = (int)MathMax(need, cA + StringLen(g_plans[i].note) * em + 10);
+         continue;
       }
-      else if(n > widestBody) widestBody = n;
+      for(int l = 0; l < PLAN_LINES; l++)
+         for(int c = 0; c < 3; c++)
+         {
+            if(g_plans[i].lbl[l][c] == "") continue;
+            int vx = (c == 0) ? vA : ((c == 1) ? vB : vC);
+            need = (int)MathMax(need, vx + StringLen(g_plans[i].val[l][c]) * em + 10);
+         }
    }
-
-   int needBody = 10 + widestBody * CharW(InpFontSize) + 10;
-   int needHead = 10 + widestHead * CharW(InpFontSize + 1) + 10;
-   return(MathMax(needBody, needHead));
+   return(need);
 }
 
 //+------------------------------------------------------------------+
-//  Place the plan lines that UpdatePlan() prepared.  Six lines, one per
-//  question, under the timeframe rows:
+//  Draw the second group: one block per timeframe, separated from the
+//  first group by a single line.  There is no heading line - the
+//  timeframe tag at the start of each block says what it is.
 //
-//    Trade plan:            XAUUSD  M5   SELL   score -3/3
-//    Entry  : MARKET 4285.70   (3 of 3 agree - go to market)
-//    Alt    : sell stop 4285.56   (follow the move instead)
-//    Stop   : 4286.04   34 pts   risk 7.82 USD
-//    Target : 4285.03   67 pts   reward 15.41 USD   R:R 1:1.97
-//    Lot    : 0.23   (1.00% of 800.00 USD)
+//    M5   market -3/3   Entry: 4285.70        Lot: 0.23
+//                       Stop: 4286.04 34pts   Target: 4285.03 67pts
+//                       Risk: 7.82 USD        Reward: 15.41 USD   Valid: 3 bars -> 14:30
+//    M15  HOLD          nothing to place
+//
 //+------------------------------------------------------------------+
 void DrawPlanBlock(int x, int y)
 {
-   int row = RowForChartTF();
-   if(row < 0) return;                      // only ever drawn on M5/M15/M30
+   if(RowForChartTF() < 0) return;              // only on M5/M15/M30 charts
 
-   int pad  = 10;
    int rowH = g_rowH;
-   int py   = y + HEAD_H + 2 + TF_COUNT * 2 * rowH + PLAN_SEP_H;
+   int gy   = y + HEAD_H + 2 + TF_COUNT * 2 * rowH + PLAN_SEP_H;
 
-   MakeRect("planSep", x + 4, py - 8, g_panelW - 8, 1, clrDimGray, clrDimGray);
+   //  the separator between the two groups
+   MakeRect("planSep", x + 4, gy - 8, g_panelW - 8, 1, clrDimGray, clrDimGray);
 
-   for(int i = 0; i < PLAN_LINES; i++)
+   int cA, vA, cB, vB, cC, vC;
+   PlanColumns(cA, vA, cB, vB, cC, vC);
+
+   int line = 0;
+   for(int i = 0; i < TF_COUNT; i++)
    {
-      string name = "plan" + IntegerToString(i);
-      if(g_plan.text[i] == "")
-      {
-         DeleteObject(name);
-         continue;
-      }
-      if(i == 1)
-      {
-         //  heading: "Trade plan:" on the left, the signal on the right
-         MakeLabel(name, x + g_panelW - pad, py, g_plan.text[i],
-                   g_plan.clr[i], InpFontSize + 1, true);
-      }
+      int    ry  = gy + line * rowH;
+      string sfx = "_" + IntegerToString(i);
+
+      // ---- timeframe tag and the entry decision --------------------
+      MakeLabel("planHead" + sfx, x + 10, ry, g_plans[i].head,
+                clrWhite, InpFontSize, false);
+
+      color kc = clrDimGray;
+      if(g_plans[i].state == 2)
+         kc = (g_plans[i].dir > 0) ? InpBuyColor : InpSellColor;
+      if(g_plans[i].kind != "")
+         MakeLabel("planKind" + sfx, x + 44, ry, g_plans[i].kind, kc, InpFontSize, false);
       else
-         MakeLabel(name, x + pad, py + (i - 1) * rowH, g_plan.text[i],
-                   g_plan.clr[i], InpFontSize, false);
+         DeleteObject("planKind" + sfx);
+
+      // ---- one-liner for a HOLD or waiting block -------------------
+      string nn = "planNote" + sfx;
+      if(g_plans[i].lines == 1 && g_plans[i].note != "")
+         MakeLabel(nn, x + cA, ry, g_plans[i].note, clrDimGray, InpFontSize, false);
+      else
+         DeleteObject(nn);
+
+      // ---- the cells ------------------------------------------------
+      for(int l = 0; l < PLAN_LINES; l++)
+      {
+         for(int c = 0; c < 3; c++)
+         {
+            string ln = "planCell" + sfx + "_" + IntegerToString(l) + "_" + IntegerToString(c);
+            if(l >= g_plans[i].lines || g_plans[i].lbl[l][c] == "")
+            {
+               DeleteObject(ln + "L");
+               DeleteObject(ln + "V");
+               continue;
+            }
+            int cx = (c == 0) ? cA : ((c == 1) ? cB : cC);
+            int vx = (c == 0) ? vA : ((c == 1) ? vB : vC);
+
+            MakeLabel(ln + "L", x + cx, ry + l * rowH,
+                      g_plans[i].lbl[l][c], clrGray, InpFontSize, false);
+            MakeLabel(ln + "V", x + vx, ry + l * rowH,
+                      g_plans[i].val[l][c], g_plans[i].clr[l][c], InpFontSize, false);
+         }
+      }
+
+      line += g_plans[i].lines;
    }
 }
 
@@ -1355,8 +1443,20 @@ void DrawPlanBlock(int x, int y)
 void DeletePlanObjects()
 {
    DeleteObject("planSep");
-   for(int k = 0; k < PLAN_LINES; k++)
-      DeleteObject("plan" + IntegerToString(k));
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      string sfx = "_" + IntegerToString(i);
+      DeleteObject("planHead" + sfx);
+      DeleteObject("planKind" + sfx);
+      DeleteObject("planNote" + sfx);
+      for(int l = 0; l < PLAN_LINES; l++)
+         for(int c = 0; c < 3; c++)
+         {
+            string ln = "planCell" + sfx + "_" + IntegerToString(l) + "_" + IntegerToString(c);
+            DeleteObject(ln + "L");
+            DeleteObject(ln + "V");
+         }
+   }
 }
 
 //+------------------------------------------------------------------+
