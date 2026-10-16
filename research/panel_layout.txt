@@ -1,0 +1,198 @@
+SimpleAdvisor - what the panel will look like
+=============================================
+
+This is the output of walk_trade_plan.py: it lays the panel out on a
+character grid where one character is one pixel-column of the real font,
+so what you see below is where the text actually lands.
+
+  Group 1 (top)   : the readings - unchanged from the current version.
+  the line        : ONE separator line only.  There is no 'Trade plan'
+                    heading.
+  Group 2 (bottom): one plan per timeframe.  A HOLD or loading timeframe
+                    takes a single line, so the group is only as tall as
+                    the signals it actually has, and the box is only as
+                    wide as its longest line.
+
+The last section sweeps the terminal's DPI (72..192) and the font size
+(6..16) to check the width budget the EA uses for its characters.
+
+SimpleEA - Group 1 (readings) + Group 2 (one plan per timeframe)
+
+================================================================================================
+A)  all three timeframes active
+================================================================================================
+  +--------------------------------------------------------------------------------------------------+
+  |   SimpleEA                                                                              XAUUSD  M5 |
+  | -------------------------------------------------------------------------------------------------- |
+  |   M5   Scalp           Trend: Going down   Regime: Steady                                          |
+  |                        Signal: SELL        Score: -3 / 3                                           |
+  |   M15  Short-term      Trend: Going up     Regime: Mixed                                           |
+  |                        Signal: BUY         Score: +2 / 3                                           |
+  |   M30  Intraday        Trend: Going down   Regime: Choppy                                          |
+  |                        Signal: SELL        Score: -2 / 3                                           |
+  | -------------------------------------------------------------------------------------------------- |
+  |   M5   market -3/3     Entry:  4285.70          Lot:     0.23                                      |
+  |                        Stop:   4286.04 34pts    Target:  4285.03 67pts                             |
+  |                        Risk:   7.82 USD         Reward:  15.41 USD        Valid:  3 bars -> 14:30  |
+  |   M15  pending +2/3    Entry:  4285.27          Lot:     0.03                                      |
+  |                        Stop:   4284.68 102pts   Target:  4287.74 204pts                            |
+  |                        Risk:   3.06 USD         Reward:  6.12 USD         Valid:  3 bars -> 14:45  |
+  |   M30  pending -2/3    Entry:  4286.55          Lot:     0.01                                      |
+  |                        Stop:   4287.74 204pts   Target:  4281.62 408pts                            |
+  |                        Risk:   2.04 USD         Reward:  4.08 USD         Valid:  3 bars -> 15:00  |
+  +--------------------------------------------------------------------------------------------------+
+  panel: 657 x 356 px   (one character = 6.6 px)
+
+================================================================================================
+B)  the common case: one active, two HOLD (one line each)
+================================================================================================
+  +------------------------------------------------------------------------------------------------+
+  |   SimpleEA                                                                            XAUUSD  M5 |
+  | ------------------------------------------------------------------------------------------------ |
+  |   M5   Scalp           Trend: Going down   Regime: Steady                                        |
+  |                        Signal: SELL        Score: -3 / 3                                         |
+  |   M15  Short-term      Trend: Sideways     Regime: Mixed                                         |
+  |                        Signal: HOLD        Score: +0 / 3                                         |
+  |   M30  Intraday        Trend: Sideways     Regime: Choppy                                        |
+  |                        Signal: HOLD        Score: +0 / 3                                         |
+  | ------------------------------------------------------------------------------------------------ |
+  |   M5   market -3/3     Entry:  4285.70         Lot:     0.23                                     |
+  |                        Stop:   4286.04 34pts   Target:  4285.03 67pts                            |
+  |                        Risk:   7.82 USD        Reward:  15.41 USD       Valid:  3 bars -> 14:30  |
+  |   M15  HOLD            nothing to place                                                          |
+  |   M30  HOLD            nothing to place                                                          |
+  +------------------------------------------------------------------------------------------------+
+  panel: 643 x 276 px   (one character = 6.6 px)
+
+================================================================================================
+C)  nothing anywhere: Group 2 shrinks to three lines
+================================================================================================
+  +------------------------------------------------------------+
+  |   SimpleEA                                        XAUUSD  M5 |
+  | ------------------------------------------------------------ |
+  |   M5   Scalp           Trend: Sideways     Regime: Mixed     |
+  |                        Signal: HOLD        Score: +0 / 3     |
+  |   M15  Short-term      Trend: Sideways     Regime: Mixed     |
+  |                        Signal: HOLD        Score: +0 / 3     |
+  |   M30  Intraday        Trend: Sideways     Regime: Mixed     |
+  |                        Signal: HOLD        Score: +0 / 3     |
+  | ------------------------------------------------------------ |
+  |   M5   HOLD            nothing to place                      |
+  |   M15  HOLD            nothing to place                      |
+  |   M30  HOLD            nothing to place                      |
+  +------------------------------------------------------------+
+  panel: 406 x 236 px   (one character = 6.6 px)
+
+================================================================================================
+D)  M15 still downloading history
+================================================================================================
+  +------------------------------------------------------------------------------------------------+
+  |   SimpleEA                                                                            XAUUSD  M5 |
+  | ------------------------------------------------------------------------------------------------ |
+  |   M5   Scalp           Trend: Going down   Regime: Steady                                        |
+  |                        Signal: SELL        Score: -3 / 3                                         |
+  |   M15  Short-term      Trend: Sideways     Regime: Mixed                                         |
+  |                        Signal: HOLD        Score: +0 / 3                                         |
+  |   M30  Intraday        Trend: Sideways     Regime: Mixed                                         |
+  |                        Signal: HOLD        Score: +0 / 3                                         |
+  | ------------------------------------------------------------------------------------------------ |
+  |   M5   market -3/3     Entry:  4285.70         Lot:     0.23                                     |
+  |                        Stop:   4286.04 34pts   Target:  4285.03 67pts                            |
+  |                        Risk:   7.82 USD        Reward:  15.41 USD       Valid:  3 bars -> 14:30  |
+  |   M15  waiting         history still loading                                                     |
+  |   M30  HOLD            nothing to place                                                          |
+  +------------------------------------------------------------------------------------------------+
+  panel: 643 x 276 px   (one character = 6.6 px)
+
+================================================================================================
+E)  a $200 account where the minimum lot risks more than 1% (flagged)
+================================================================================================
+  +------------------------------------------------------------------------------------------------+
+  |   SimpleEA                                                                            XAUUSD  M5 |
+  | ------------------------------------------------------------------------------------------------ |
+  |   M5   Scalp           Trend: Going down   Regime: Steady                                        |
+  |                        Signal: SELL        Score: -3 / 3                                         |
+  |   M15  Short-term      Trend: Sideways     Regime: Mixed                                         |
+  |                        Signal: HOLD        Score: +0 / 3                                         |
+  |   M30  Intraday        Trend: Sideways     Regime: Mixed                                         |
+  |                        Signal: HOLD        Score: +0 / 3                                         |
+  | ------------------------------------------------------------------------------------------------ |
+  |   M5   market -3/3     Entry:  4285.70         Lot:     0.05                                     |
+  |                        Stop:   4286.04 34pts   Target:  4285.03 67pts                            |
+  |                        Risk:   1.70 USD        Reward:  3.35 USD        Valid:  3 bars -> 14:30  |
+  |   M15  HOLD            nothing to place                                                          |
+  |   M30  HOLD            nothing to place                                                          |
+  +------------------------------------------------------------------------------------------------+
+  panel: 643 x 276 px   (one character = 6.6 px)
+
+================================================================================================
+F)  a big balance and a wide stop: do long numbers break the layout?
+================================================================================================
+  +--------------------------------------------------------------------------------------------------+
+  |   SimpleEA                                                                              XAUUSD  M5 |
+  | -------------------------------------------------------------------------------------------------- |
+  |   M5   Scalp           Trend: Going down   Regime: Steady                                          |
+  |                        Signal: SELL        Score: -3 / 3                                           |
+  |   M15  Short-term      Trend: Going up     Regime: Steady                                          |
+  |                        Signal: BUY         Score: +3 / 3                                           |
+  |   M30  Intraday        Trend: Sideways     Regime: Mixed                                           |
+  |                        Signal: HOLD        Score: +0 / 3                                           |
+  | -------------------------------------------------------------------------------------------------- |
+  |   M5   market -3/3     Entry:  4285.70          Lot:     100.00                                    |
+  |                        Stop:   4286.04 34pts    Target:  4285.03 67pts                             |
+  |                        Risk:   3400.00 USD      Reward:  6700.00 USD      Valid:  3 bars -> 14:30  |
+  |   M15  market +3/3     Entry:  4285.70          Lot:     100.00                                    |
+  |                        Stop:   4284.68 102pts   Target:  4287.74 204pts                            |
+  |                        Risk:   10200.00 USD     Reward:  20400.00 USD     Valid:  3 bars -> 14:45  |
+  |   M30  HOLD            nothing to place                                                            |
+  +--------------------------------------------------------------------------------------------------+
+  panel: 657 x 316 px   (one character = 6.6 px)
+
+================================================================================================
+G)  min-lot mode on EURUSD
+================================================================================================
+  +-------------------------------------------------------------------------------------------------+
+  |   SimpleEA                                                                             EURUSD  M5 |
+  | ------------------------------------------------------------------------------------------------- |
+  |   M5   Scalp           Trend: Going up     Regime: Steady                                         |
+  |                        Signal: BUY         Score: +3 / 3                                          |
+  |   M15  Short-term      Trend: Sideways     Regime: Mixed                                          |
+  |                        Signal: HOLD        Score: +0 / 3                                          |
+  |   M30  Intraday        Trend: Sideways     Regime: Mixed                                          |
+  |                        Signal: HOLD        Score: +0 / 3                                          |
+  | ------------------------------------------------------------------------------------------------- |
+  |   M5   market +3/3     Entry:  1.08542         Lot:     0.01 (min)                                |
+  |                        Stop:   1.08476 66pts   Target:  1.08674 132pts                            |
+  |                        Risk:   0.66 USD        Reward:  1.32 USD         Valid:  3 bars -> 14:30  |
+  |   M15  HOLD            nothing to place                                                           |
+  |   M30  HOLD            nothing to place                                                           |
+  +-------------------------------------------------------------------------------------------------+
+  panel: 650 x 276 px   (one character = 6.6 px)
+
+================================================================================================
+H)  InpShowPlan = false: Group 2 is not drawn at all
+================================================================================================
+  +------------------------------------------------------------+
+  |   SimpleEA                                        XAUUSD  M5 |
+  | ------------------------------------------------------------ |
+  |   M5   Scalp           Trend: Going up     Regime: Steady    |
+  |                        Signal: BUY         Score: +3 / 3     |
+  |   M15  Short-term      Trend: Sideways     Regime: Mixed     |
+  |                        Signal: HOLD        Score: +0 / 3     |
+  |   M30  Intraday        Trend: Sideways     Regime: Mixed     |
+  |                        Signal: HOLD        Score: +0 / 3     |
+  +------------------------------------------------------------+
+  panel: 406 x 162 px   (one character = 6.6 px)
+
+================================================================================================
+Width sweep - does the 0.55 em budget hold up across DPI and font size?
+================================================================================================
+  Consolas (the default) budget always sufficient
+  DejaVu Sans Mono       widest overshoot +147.68 px (+8.6%) at dpi 192, font 15
+  Courier New            widest overshoot +142.00 px (+8.2%) at dpi 192, font 15
+  Lucida Console         widest overshoot +142.00 px (+8.2%) at dpi 192, font 15
+
+================================================================================================
+PASS: every case fits.  The panel measures Group 2's text and sizes
+itself before drawing, and HOLD/waiting rows collapse to one line,
+so the block is exactly as tall and as wide as its content needs.

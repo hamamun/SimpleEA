@@ -54,6 +54,30 @@
 //|  a historical direction never changes after the fact.             |
 //|                                                                  |
 //|  -----------------------------------------------------------------|
+//|  CHART-TIMEFRAME RULE                                             |
+//|  -----------------------------------------------------------------|
+//|  The engine is calibrated for M5, M15 and M30 ONLY.  If the chart |
+//|  is put on any other timeframe, no data is shown: the panel       |
+//|  collapses to a single header line that says so -                 |
+//|                                                                  |
+//|     SimpleEA | Incompatible chart. Switch to M5/M15/M30.          |
+//|                                                                   |
+//|  -----------------------------------------------------------------|
+//|  TRADE PLAN (advice only - NO ORDER IS EVER SENT)                 |
+//|  -----------------------------------------------------------------|
+//|  Under the three timeframe rows, separated by one line, comes a     |
+//|  SECOND GROUP with one block per timeframe - M5, M15, M30 - in the  |
+//|  same two-column style as the first: where to enter (market or      |
+//|  pending, decided by the score), the lot size, the stop and the     |
+//|  target in price, points and account currency, and how many bars    |
+//|  the reading is worth acting on.  A HOLD or waiting timeframe takes |
+//|  a single line, so the group is only as tall as it has content for. |
+//|                                                                  |
+//|  Nothing is calculated at all while the chart is on a wrong       |
+//|  timeframe, so no stale or out-of-context number can be read off  |
+//|  the screen.  Switching the chart back to M5, M15 or M30 brings   |
+//|  the full panel straight back.                                    |
+//|  -----------------------------------------------------------------|
 //|  HONEST NOTE ON EXPECTATION                                       |
 //|  -----------------------------------------------------------------|
 //|  This panel is a structured, low-lag reading of trend, momentum   |
@@ -64,8 +88,8 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "1.11"
-#property description "Read-only multi-timeframe BUY/SELL/HOLD direction panel for M5 / M15 / M30 on any symbol."
+#property version   "1.13"
+#property description "Read-only multi-timeframe BUY/SELL/HOLD direction panel. M5 / M15 / M30 charts only; other timeframes show a header-only notice."
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -89,6 +113,20 @@ input group "=== Signal thresholds ==="
 input int      InpBuyScore    = 2;           // Score >= this  => BUY
 input int      InpSellScore   = -2;          // Score <= this  => SELL
 input int      InpBarsToLoad  = 700;         // Closed bars pulled per timeframe
+
+input group "=== Trade plan (advice only - the EA never sends an order) ==="
+input bool     InpShowPlan     = true;       // Show the trade plan block
+input bool     InpUseRisk      = true;       // Size by RISK % of balance (false = balance+score ladder)
+input bool     InpUseMinLot    = false;      // Always advise the symbol's minimum lot
+input double   InpRiskScore2   = 0.5;        // Risk % when score is 2 (risk mode)
+input double   InpRiskScore3   = 1.0;        // Risk % when score is 3 (risk mode)
+input double   InpBalPer001    = 1000.0;     // Risk-off mode: balance per 0.01 lot
+input double   InpScore3Factor = 1.5;        // Risk-off mode: lot multiplier at score 3
+input int      InpATRPeriod    = 14;         // ATR period (closed bars, chart timeframe)
+input double   InpSLATR        = 1.2;        // Stop loss   = this many ATR
+input double   InpTPATR        = 2.4;        // Take profit = this many ATR
+input double   InpPendATR      = 0.5;        // Pending entry offset = this many ATR
+input int      InpValidBars    = 3;          // Signal validity in bars (see research/HORIZON.md)
 
 input group "=== Shared engine settings ==="
 input int      InpHurstWindow = 256;         // Hurst estimate window (bars)
@@ -119,6 +157,20 @@ input double   InpHurstRevertM30 = 0.45;
 //==================================================================
 #define OBJ_PREFIX "SA_"
 #define TF_COUNT   3
+#define TF_TEXT    "M5/M15/M30"
+#define HEAD_H     34     // height of the header band (title + symbol line)
+#define PLAN_W_MIN 406    // panel width with no plan showing
+#define PLAN_LINES 3      // lines an ACTIVE timeframe uses (1 for HOLD)
+#define PLAN_COL_A 150    // first cell column: aligns with "Trend:" above
+#define PLAN_COL_B 282    // second cell column: aligns with "Regime:" above
+#define PLAN_COL_C 414    // third cell column: used by the "Valid" cell
+#define PLAN_LBL_C 8      // widest label in a column, in characters
+#define PLAN_SEP_H 14     // gap between the last timeframe row and the plan
+
+//  The only chart timeframes this engine is calibrated for.  Anything else
+//  is refused outright - see the CHART-TIMEFRAME RULE block in the header
+//  and the "Incompatible chart" notice below.
+#define TIMEFRAME_OK(tf) ((tf) == PERIOD_M5 || (tf) == PERIOD_M15 || (tf) == PERIOD_M30)
 
 struct SRow
 {
@@ -140,9 +192,12 @@ struct SRow
 
 SRow g_rows[TF_COUNT];
 
-int g_panelW = 392;
-int g_panelH = 130;
-int g_rowH   = 20;
+int  g_panelW  = 406;   // wide enough for the header + the notice line
+int  g_panelH  = 130;   // height of the full panel (recomputed in OnInit)
+int  g_rowH    = 20;
+bool g_panelOK = false; // what is currently drawn: false = notice only
+
+ENUM_TIMEFRAMES g_drawnTf = (ENUM_TIMEFRAMES)0;  // timeframe the header was drawn for
 
 //==================================================================
 //  SETUP
@@ -185,14 +240,41 @@ int OnInit()
    g_rowH   = InpFontSize + 11;
    // Each timeframe takes TWO lines: Trend/Regime on the first,
    // Signal (BUY/SELL/HOLD)/Score on the second.
-   g_panelH = 34 + TF_COUNT * 2 * g_rowH + 8;
+   //  height is only provisional here: DrawSupportedPanel() recomputes it
+   //  because the second group's height depends on how many timeframes
+   //  actually have a signal.
+   g_panelH = HEAD_H + TF_COUNT * 2 * g_rowH + 8;
+
+   //  The notice is the one line that must always be readable in full, so
+   //  the width that line needs is a floor for BOTH panels - the normal one
+   //  and the notice one - whatever the font size.
+   g_panelW = NoticeWidth();
 
    BuildPanel();
-   EvaluateAll();
+
+   if(!ChartSupported())
+   {
+      //  Wrong chart timeframe: the panel is the header + notice and
+      //  nothing else.  No history is pulled, no indicator is computed and
+      //  no timeframe row is drawn, so there is nothing on screen that
+      //  could be mistaken for a live read on this chart.
+      PrintFormat("SimpleEA: the %s chart is not supported. This panel is calibrated "
+                  "for %s only - switch the chart timeframe to see it.",
+                  ChartTimeframeText(), TF_TEXT);
+   }
+   else
+   {
+      EvaluateAll();
+      UpdatePlan();
+   }
+
+   //  DrawPanel() is the only place that chooses a layout, so the correct
+   //  one is shown from the first moment, whichever chart this is.
    DrawPanel();
 
-   // A 2-second timer keeps the panel honest even on a dead tick stream;
-   // the heavy work only runs when a new bar actually closes.
+   //  The 2-second timer runs in both states.  On M5/M15/M30 the heavy work
+   //  only runs when a new bar actually closes; on any other chart it does
+   //  nothing at all except notice that the chart came back to M5/M15/M30.
    EventSetTimer(2);
    return(INIT_SUCCEEDED);
 }
@@ -207,6 +289,9 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   //  Goes through CheckNewBars() even on an unsupported chart, so that a
+   //  live timeframe change is caught whether or not MetaTrader re-started
+   //  the EA for it.  On a wrong chart that call costs one comparison.
    CheckNewBars();
 }
 
@@ -223,6 +308,25 @@ void OnTimer()
 //+------------------------------------------------------------------+
 void CheckNewBars()
 {
+   //  The safety net for a live timeframe change (MetaTrader normally
+   //  re-initialises the EA, but this makes the rule airtight): the moment
+   //  the chart leaves M5/M15/M30 the panel is replaced by the notice, and
+   //  the moment it comes back the full panel returns.
+   if(!ChartSupported())
+   {
+      //  Wrong chart timeframe.  Redraw only when there is something to
+      //  correct: the data panel has to be replaced by the notice, or the
+      //  notice is showing the wrong timeframe name because the chart moved
+      //  between two unsupported timeframes.  Otherwise this is one
+      //  comparison and nothing else - no history, no indicators.
+      if(g_panelOK || g_drawnTf != (ENUM_TIMEFRAMES)Period())
+      {
+         DrawPanel();
+         ChartRedraw(0);
+      }
+      return;
+   }
+
    bool need = false;
 
    for(int i = 0; i < TF_COUNT; i++)
@@ -235,9 +339,21 @@ void CheckNewBars()
       }
    }
 
+   //  Coming back onto M5/M15/M30 after an unsupported timeframe: rebuild
+   //  from the current data instead of showing whatever was last computed.
+   if(!g_panelOK)
+   {
+      EvaluateAll();
+      UpdatePlan();
+      DrawPanel();
+      ChartRedraw(0);
+      return;
+   }
+
    if(need)
    {
       EvaluateAll();
+      UpdatePlan();
       DrawPanel();
       ChartRedraw(0);
    }
@@ -456,6 +572,21 @@ double HurstExponent(const double &close[], int i, int window)
 //==================================================================
 void EvaluateAll()
 {
+   //  Hard rule: on anything other than M5/M15/M30 there is nothing to
+   //  compute.  Every row is left untouched and marked "no data", so even
+   //  a bug elsewhere in the drawing code could not put a number on screen.
+   if(!ChartSupported())
+   {
+      for(int r = 0; r < TF_COUNT; r++)
+      {
+         g_rows[r].ok        = false;
+         g_rows[r].score     = 0;
+         g_rows[r].direction = 0;
+         g_rows[r].lastBar   = 0;
+      }
+      return;
+   }
+
    for(int r = 0; r < TF_COUNT; r++)
       EvaluateRow(r);
 }
@@ -511,6 +642,327 @@ void EvaluateRow(int idx)
    g_rows[idx].direction = dir;
    g_rows[idx].hurst     = H;
    g_rows[idx].er        = ER;
+
+   //  Remember the bar this reading came from, so CheckNewBars() can tell
+   //  a genuinely new closed bar from a tick on the bar it already scored
+   //  (without this the panel re-read all three timeframes on every tick).
+   g_rows[idx].lastBar   = LastClosedBarTime(_Symbol, g_rows[idx].tf);
+}
+
+//==================================================================
+//  TRADE PLAN  (ADVICE ONLY - NO ORDER IS EVER SENT)
+//==================================================================
+//  Everything below is arithmetic that the terminal itself supplies:
+//  the broker's contract size, tick value, lot step and stop level, plus
+//  the account balance.  Nothing here is a prediction, and nothing here
+//  sends, modifies or closes an order - the panel only writes the numbers
+//  on the chart so they can be typed into the trade dialog by hand.
+//
+//  The five questions it answers, per signal:
+//     1. WHERE  - market entry, or a pending order if the score is only 2
+//     2. HOW MUCH - lot size, from balance and score
+//     3. TARGET - take profit in points and in account currency
+//     4. STOP   - stop loss   in points and in account currency
+//     5. UNTIL  - how long the reading is worth acting on
+//
+//  Entry type is decided by the score, not by the user:
+//     score 3/3  -> all three components agree -> MARKET entry
+//     score 2/3  -> two of three agree        -> PENDING (wait for a better price)
+//  (Measured behaviour of both is in research/HORIZON.md; the pending price
+//   is one InpPendATR step beyond the market, which is the only place in
+//   this block where a choice - not a measurement - is being made.)
+//+------------------------------------------------------------------+
+//  ONE PLAN PER TIMEFRAME.  The second group is three blocks, one for M5,
+//  one for M15, one for M30 - because when autotrading arrives the panel
+//  has to be able to say "buy M5, sell M30" and the executor acts per row.
+struct SPlanRow
+{
+   int    state;                  // 0 HOLD, 1 waiting for data, 2 active
+   int    dir;                    // +1 buy, -1 sell
+   int    score;
+   bool   market;                 // true = market entry, false = pending
+   int    lines;                  // lines this block occupies: 1 or PLAN_LINES
+   string head;                   // "M5" / "M15" / "M30"
+   string kind;                   // "market -3/3" / "pending +2/3" / "HOLD" / "waiting"
+   string note;                   // one-liners for the inactive states
+   // ---- ready to draw: label + value per cell -------------------------
+   string lbl[PLAN_LINES][3];
+   string val[PLAN_LINES][3];
+   color  clr[PLAN_LINES][3];
+};
+
+SPlanRow g_plans[TF_COUNT];
+
+//+------------------------------------------------------------------+
+//  Value of ONE POINT of one lot, in the account currency.  Taken from
+//  the contract the broker actually offers, so this is correct for gold,
+//  FX, indices, anything - and it self-adjusts when a broker uses 3-digit
+//  gold, 5-digit EURUSD, cent lots, or a non-USD account.
+//+------------------------------------------------------------------+
+double PointValuePerLot()
+{
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double tick  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tval  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(point <= 0.0 || tick <= 0.0 || tval <= 0.0) return(0.0);
+   return(tval * (point / tick));
+}
+
+//+------------------------------------------------------------------+
+double SymbolMinLot()
+{
+   double mn = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   return(mn > 0.0 ? mn : 0.01);
+}
+
+//+------------------------------------------------------------------+
+//  Snap a lot size onto the broker's grid: never below the minimum,
+//  never above the maximum, always a whole number of lot steps.
+//+------------------------------------------------------------------+
+double NormalizeLots(double lots)
+{
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double mn   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double mx   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(step <= 0.0) step = 0.01;
+   if(mn   <= 0.0) mn   = step;
+   if(mx   <= 0.0) mx   = 100.0;
+
+   double n = MathFloor(lots / step + 1e-8) * step;
+   if(n < mn) n = mn;
+   if(n > mx) n = mx;
+
+   int digits = 0;
+   double probe = step;
+   while(probe < 1.0 && digits < 8) { probe *= 10.0; digits++; }
+   return(NormalizeDouble(n, digits));
+}
+
+//+------------------------------------------------------------------+
+//  Average true range over CLOSED bars of a timeframe.
+//+------------------------------------------------------------------+
+double ATRClosed(ENUM_TIMEFRAMES tf, int period)
+{
+   if(period < 1) return(0.0);
+
+   double h[], l[], c[];
+   ArraySetAsSeries(h, true);
+   ArraySetAsSeries(l, true);
+   ArraySetAsSeries(c, true);
+
+   int need = period + 1;                       // +1 for the previous close
+   if(CopyHigh (_Symbol, tf, 1, need, h) < need) return(0.0);
+   if(CopyLow  (_Symbol, tf, 1, need, l) < need) return(0.0);
+   if(CopyClose(_Symbol, tf, 1, need, c) < need) return(0.0);
+
+   double sum = 0.0;
+   for(int k = 0; k < period; k++)
+   {
+      double tr = h[k] - l[k];
+      double a  = MathAbs(h[k] - c[k + 1]);
+      double b  = MathAbs(l[k] - c[k + 1]);
+      if(a > tr) tr = a;
+      if(b > tr) tr = b;
+      sum += tr;
+   }
+   return(sum / (double)period);
+}
+
+//+------------------------------------------------------------------+
+//  Which of the three rows is the chart's own timeframe?
+//+------------------------------------------------------------------+
+int RowForChartTF()
+{
+   ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)Period();
+   for(int i = 0; i < TF_COUNT; i++)
+      if(g_rows[i].tf == tf) return(i);
+   return(-1);
+}
+
+//+------------------------------------------------------------------+
+//  Clear one timeframe's plan block.
+//+------------------------------------------------------------------+
+void ClearPlanRow(int i)
+{
+   g_plans[i].state  = 0;
+   g_plans[i].dir    = 0;
+   g_plans[i].score  = 0;
+   g_plans[i].market = false;
+   g_plans[i].lines  = 1;
+   g_plans[i].head   = g_rows[i].tag;
+   g_plans[i].kind   = "";
+   g_plans[i].note   = "";
+
+   for(int l = 0; l < PLAN_LINES; l++)
+      for(int c = 0; c < 3; c++)
+      {
+         g_plans[i].lbl[l][c] = "";
+         g_plans[i].val[l][c] = "";
+         g_plans[i].clr[l][c] = clrGray;
+      }
+}
+
+//+------------------------------------------------------------------+
+//  Build the plan for ONE timeframe: M5, M15 or M30.  Everything is
+//  read from the terminal (price, contract value, account balance) and
+//  from that timeframe's own ATR, so each block stands alone - which is
+//  what the future executor will need.
+//+------------------------------------------------------------------+
+void UpdatePlanRow(int i)
+{
+   ClearPlanRow(i);
+
+   if(!g_rows[i].ok)
+   {
+      g_plans[i].state = 1;
+      g_plans[i].kind  = "waiting";
+      g_plans[i].note  = "history still loading";
+      return;
+   }
+   if(g_rows[i].direction == 0)
+   {
+      g_plans[i].state = 0;
+      g_plans[i].kind  = "HOLD";
+      g_plans[i].note  = "nothing to place";
+      return;
+   }
+
+   double atr   = ATRClosed(g_rows[i].tf, InpATRPeriod);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double pv    = PointValuePerLot();
+   if(atr <= 0.0 || point <= 0.0 || bid <= 0.0 || ask <= 0.0)
+   {
+      g_plans[i].state = 1;
+      g_plans[i].kind  = "waiting";
+      g_plans[i].note  = "no price data yet";
+      return;
+   }
+
+   int    dir    = g_rows[i].direction;
+   int    score  = g_rows[i].score;
+   bool   market = (MathAbs(score) >= 3);          // 3 of 3 -> trade now
+   double entry  = (dir > 0) ? ask : bid;
+   double offset = InpPendATR * atr;
+   double pend   = (dir > 0) ? (entry - offset) : (entry + offset);
+
+   // ---- stop and target, snapped onto the broker's point grid ------
+   int slPts = (int)MathMax(1.0, MathRound(InpSLATR * atr / point));
+   int tpPts = (int)MathMax(1.0, MathRound(InpTPATR * atr / point));
+
+   double minStop = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   bool   widened = false;
+   if(minStop > 0.0 && (double)slPts * point < minStop)
+   {
+      slPts   = (int)MathCeil(minStop / point);
+      widened = true;
+   }
+
+   double slPrice = (dir > 0) ? (entry - (double)slPts * point)
+                              : (entry + (double)slPts * point);
+   double tpPrice = (dir > 0) ? (entry + (double)tpPts * point)
+                              : (entry - (double)tpPts * point);
+
+   // ---- lot size ---------------------------------------------------
+   double balance  = AccountInfoDouble(ACCOUNT_BALANCE);
+   double lots     = SymbolMinLot();
+   double wantRisk = 0.0;
+   bool   minLot   = false;
+
+   if(InpUseMinLot)
+   {
+      minLot = true;
+      lots   = SymbolMinLot();
+   }
+   else if(InpUseRisk)
+   {
+      double pct = (MathAbs(score) >= 3) ? InpRiskScore3 : InpRiskScore2;
+      wantRisk   = balance * pct / 100.0;
+      if(pv > 0.0 && slPts > 0)
+         lots = wantRisk / ((double)slPts * pv);
+   }
+   else
+   {
+      double step = (InpBalPer001 > 0.0) ? InpBalPer001 : 1000.0;
+      lots = (balance / step) * 0.01;
+      if(MathAbs(score) >= 3) lots *= InpScore3Factor;
+   }
+
+   double lot       = NormalizeLots(lots);
+   double riskUSD   = (pv > 0.0) ? lot * (double)slPts * pv : 0.0;
+   double rewardUSD = (pv > 0.0) ? lot * (double)tpPts * pv : 0.0;
+   bool   riskOver  = (!InpUseMinLot && InpUseRisk && wantRisk > 0.0 &&
+                       riskUSD > wantRisk * 1.05);
+
+   // ---- how long this reading is worth acting on -------------------
+   datetime until  = 0;
+   datetime sigBar = LastClosedBarTime(_Symbol, g_rows[i].tf);
+   if(sigBar > 0)
+      until = sigBar + (datetime)((InpValidBars + 1) * PeriodSeconds(g_rows[i].tf));
+
+   // ---- fill the cells ---------------------------------------------
+   string cur  = AccountInfoString(ACCOUNT_CURRENCY);
+   int    dg   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   color  dirC = (dir > 0) ? InpBuyColor : InpSellColor;
+
+   g_plans[i].state  = 2;
+   g_plans[i].dir    = dir;
+   g_plans[i].score  = score;
+   g_plans[i].market = market;
+   g_plans[i].lines  = PLAN_LINES;
+   g_plans[i].kind   = StringFormat("%s %+d/%d",
+                                    market ? "market" : "pending", score, 3);
+
+   g_plans[i].lbl[0][0] = "Entry:";
+   g_plans[i].val[0][0] = DoubleToString(market ? entry : pend, dg);
+   g_plans[i].clr[0][0] = dirC;
+
+   string lotTxt = DoubleToString(lot, 2);
+   if(minLot)        lotTxt += " (min)";
+   else if(riskOver) lotTxt += StringFormat(" (min, %s %s)",
+                                            DoubleToString(riskUSD, 2), cur);
+   g_plans[i].lbl[0][1] = "Lot:";
+   g_plans[i].val[0][1] = lotTxt;
+   g_plans[i].clr[0][1] = InpTitleColor;
+
+   g_plans[i].lbl[1][0] = "Stop:";
+   g_plans[i].val[1][0] = StringFormat("%s %dpts%s", DoubleToString(slPrice, dg), slPts,
+                                       widened ? " (min)" : "");
+   g_plans[i].clr[1][0] = InpSellColor;
+
+   g_plans[i].lbl[1][1] = "Target:";
+   g_plans[i].val[1][1] = StringFormat("%s %dpts", DoubleToString(tpPrice, dg), tpPts);
+   g_plans[i].clr[1][1] = InpBuyColor;
+
+   g_plans[i].lbl[2][0] = "Risk:";
+   g_plans[i].val[2][0] = StringFormat("%s %s", DoubleToString(riskUSD, 2), cur);
+   g_plans[i].clr[2][0] = InpSellColor;
+
+   g_plans[i].lbl[2][1] = "Reward:";
+   g_plans[i].val[2][1] = StringFormat("%s %s", DoubleToString(rewardUSD, 2), cur);
+   g_plans[i].clr[2][1] = InpBuyColor;
+
+   g_plans[i].lbl[2][2] = "Valid:";
+   g_plans[i].val[2][2] = (until > 0)
+      ? StringFormat("%d bars -> %s", InpValidBars, TimeToString(until, TIME_MINUTES))
+      : StringFormat("%d bars", InpValidBars);
+   g_plans[i].clr[2][2] = clrSilver;
+}
+
+//+------------------------------------------------------------------+
+//  Rebuild all three plan blocks.  Called whenever the panel is
+//  redrawn, right after the timeframe rows have been evaluated.  On an
+//  unsupported chart timeframe there are no plans at all.
+//+------------------------------------------------------------------+
+void UpdatePlan()
+{
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      ClearPlanRow(i);
+      if(!InpShowPlan || !ChartSupported()) continue;
+      UpdatePlanRow(i);
+   }
 }
 
 //==================================================================
@@ -597,6 +1049,30 @@ string ShortTimeframe(ENUM_TIMEFRAMES tf)
 }
 
 //+------------------------------------------------------------------+
+//  THE CHART-TIMEFRAME RULE
+//+------------------------------------------------------------------+
+//  True only while the chart the EA is running on is M5, M15 or M30.
+//  This is the single test the whole rule hangs on: the panel is built
+//  for those three timeframes only, and on any other chart every part
+//  of the program refuses to produce a reading.
+//+------------------------------------------------------------------+
+bool ChartSupported()
+{
+   return(TIMEFRAME_OK((ENUM_TIMEFRAMES)Period()));
+}
+
+//  Name of the current chart timeframe, spelled the way a trader says it
+//  ("H1", "M1", ...), for the notice and the journal line.  SHORT_TIMEFRAMES
+//  does not know the "current chart" pseudo-period, so map that first.
+//+------------------------------------------------------------------+
+string ChartTimeframeText()
+{
+   ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)Period();
+   if(tf == PERIOD_CURRENT) tf = (ENUM_TIMEFRAMES)_Period;
+   return(ShortTimeframe(tf));
+}
+
+//+------------------------------------------------------------------+
 void MakeLabel(string name, int x, int y, string text, color clr,
                int size, bool rightAnchor)
 {
@@ -622,6 +1098,50 @@ void MakeLabel(string name, int x, int y, string text, color clr,
 }
 
 //+------------------------------------------------------------------+
+//  Estimated rendered width of one character, in pixels, for a given
+//  font size.  Used only to keep long text inside the panel box; it is
+//  rounded up so the estimate errs on the wide side.
+//+------------------------------------------------------------------+
+//  The width the header + notice need.  Both panels are at least this
+//  wide, so the notice can never be clipped - it is the one line that
+//  must always be readable in full, whatever the font size.
+//+------------------------------------------------------------------+
+int NoticeWidth()
+{
+   int w = 10 + StringLen(IncompatibleNotice()) * CharW(InpFontSize + 1) + 10;
+   if(w < PLAN_W_MIN) w = PLAN_W_MIN;
+   return(w);
+}
+
+//+------------------------------------------------------------------+
+//  Estimated width of one character, in pixels, for a given point size.
+//  MetaTrader sizes fonts in POINTS, so what that means in pixels depends
+//  on the screen DPI - the terminal reports it, so this uses the real
+//  value instead of assuming 96.  A monospaced face needs about 0.55 em
+//  per character, and the result is rounded UP, so the estimate is never
+//  smaller than the real glyph advance.
+//+------------------------------------------------------------------+
+int CharW(int size)
+{
+   if(size < 6) size = 6;
+   int dpi = (int)TerminalInfoInteger(TERMINAL_SCREEN_DPI);
+   if(dpi < 72) dpi = 96;
+   double em = (double)size * (double)dpi / 72.0;
+   return((int)MathCeil(em * 0.55));
+}
+
+//+------------------------------------------------------------------+
+//  Remove one panel object by short name.  Safe to call whether or not
+//  the object exists, so callers never have to check first.
+//+------------------------------------------------------------------+
+void DeleteObject(string name)
+{
+   string full = OBJ_PREFIX + name;
+   if(ObjectFind(0, full) >= 0)
+      ObjectDelete(0, full);
+}
+
+//+------------------------------------------------------------------+
 void MakeRect(string name, int x, int y, int w, int hh, color bg, color border)
 {
    string full = OBJ_PREFIX + name;
@@ -643,27 +1163,68 @@ void MakeRect(string name, int x, int y, int w, int hh, color bg, color border)
 }
 
 //+------------------------------------------------------------------+
-//  Create the static parts once, so the panel object set is stable.
+//  The header line + notice shown when the chart timeframe is not
+//  supported.  Nothing else - no timeframe rows, no signal, no score.
+//+------------------------------------------------------------------+
+string IncompatibleNotice()
+{
+   return("Incompatible chart. Switch to " + TF_TEXT + ".");
+}
+
+//+------------------------------------------------------------------+
+//  Create the static frame once, so the panel object set is stable.
+//  NOTE: the title label deliberately belongs to DrawPanel(), so that an
+//  unsupported chart can never inherit it from a supported one.
 //+------------------------------------------------------------------+
 void BuildPanel()
 {
    int x = InpPanelX, y = InpPanelY;
    MakeRect("bg",  x, y, g_panelW, g_panelH, InpBgColor, clrDimGray);
-   MakeRect("sep", x + 4, y + 28, g_panelW - 8, 1, clrDimGray, clrDimGray);
+   MakeRect("sep", x + 4, y + HEAD_H - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
 }
 
 //+------------------------------------------------------------------+
+//  DrawPanel() never decides anything: it only shows whichever of the
+//  two panels the chart timeframe allows.  There is no path through the
+//  program on which the data panel can be drawn for a bare M1, H1, D1 ...
+//  chart, because this switch is the only way in.
+//+------------------------------------------------------------------+
 void DrawPanel()
+{
+   if(ChartSupported()) DrawSupportedPanel();
+   else                 DrawIncompatiblePanel();
+}
+
+//+------------------------------------------------------------------+
+//  Supported chart timeframe (M5 / M15 / M30) - the full panel:
+//
+//     SimpleEA                                      SYMBOL  M15
+//     --------------------------------------------------------------
+//     M5   Scalp       Trend: Going up     Regime: Steady
+//                      Signal: BUY         Score: +3 / 3
+//     ...
+//+------------------------------------------------------------------+
+void DrawSupportedPanel()
 {
    int x   = InpPanelX, y = InpPanelY;
    int pad = 10;
    int rowH = g_rowH;
 
+   //  Size the panel to its content BEFORE drawing the background, so the
+   //  trade plan can never be clipped on the right - and so the box hugs
+   //  the content instead of leaving a wide empty edge when signals go.
+   int wantW = NoticeWidth();
+   if(InpShowPlan) wantW = (int)MathMax(wantW, PlanWidthNeed());
+   g_panelW = wantW;
+   g_panelH = HEAD_H + TF_COUNT * 2 * rowH + 8
+              + (InpShowPlan ? (PLAN_SEP_H + TotalPlanLines() * rowH) : 0);
+   MakeRect("bg", x, y, g_panelW, g_panelH, InpBgColor, clrDimGray);
+
    // ---- header ----------------------------------------------------
    MakeLabel("title", x + pad, y + 7, "SimpleEA",
              InpTitleColor, InpFontSize + 1, false);
    MakeLabel("sym", x + g_panelW - pad, y + 8,
-             _Symbol + "  " + ShortTimeframe((ENUM_TIMEFRAMES)Period()),
+             _Symbol + "  " + ChartTimeframeText(),
              InpTitleColor, InpFontSize, true);
 
    // ---- two lines per timeframe -------------------------------------
@@ -675,7 +1236,7 @@ void DrawPanel()
    //  Signal/Score = what the old panel used to show on its own.
    for(int i = 0; i < TF_COUNT; i++)
    {
-      int    ry  = y + 36 + i * 2 * rowH;
+      int    ry  = y + HEAD_H + 2 + i * 2 * rowH;
       string sfx = "_" + IntegerToString(i);
 
       MakeLabel("tf" + sfx,    x + pad,      ry, g_rows[i].tag,
@@ -717,6 +1278,262 @@ void DrawPanel()
                    clrDimGray, InpFontSize, false);
       }
    }
+
+   // ---- the trade plan: one block per timeframe below the rows -------
+   if(InpShowPlan) DrawPlanBlock(x, y);
+   else            DeletePlanObjects();
+
+   // ---- retire the notice-only panel, if it was the last one shown ----
+   DeleteObject("notice");
+
+   g_panelOK = true;
+   g_drawnTf = (ENUM_TIMEFRAMES)Period();
+}
+
+//+------------------------------------------------------------------+
+//  Column geometry for the plan blocks.  The labels sit at the same x
+//  positions as the "Trend:" / "Regime:" labels of the row above, so the
+//  two groups line up; a column is pushed right only when the values in
+//  the column before it are unusually wide.
+//+------------------------------------------------------------------+
+void PlanColumns(int &cA, int &vA, int &cB, int &vB, int &cC, int &vC)
+{
+   int em = CharW(InpFontSize);
+
+   cA = PLAN_COL_A;
+   vA = cA + em * PLAN_LBL_C;
+
+   int wA = 0;
+   for(int i = 0; i < TF_COUNT; i++)
+      for(int l = 0; l < g_plans[i].lines; l++)
+         if(g_plans[i].lbl[l][0] != "")
+            wA = (int)MathMax(wA, StringLen(g_plans[i].val[l][0]) * em);
+
+   cB = (int)MathMax(PLAN_COL_B, vA + wA + em * 2);
+   vB = cB + em * PLAN_LBL_C;
+
+   int wB = 0;
+   for(int i = 0; i < TF_COUNT; i++)
+      for(int l = 0; l < g_plans[i].lines; l++)
+         if(g_plans[i].lbl[l][1] != "")
+            wB = (int)MathMax(wB, StringLen(g_plans[i].val[l][1]) * em);
+
+   cC = (int)MathMax(PLAN_COL_C, vB + wB + em * 2);
+   vC = cC + em * PLAN_LBL_C;
+}
+
+//+------------------------------------------------------------------+
+//  How many lines the second group needs: 3 per active timeframe, 1 for
+//  a HOLD or waiting one.  The panel height follows this, so the block
+//  is never taller than it has content for.
+//+------------------------------------------------------------------+
+int TotalPlanLines()
+{
+   if(!InpShowPlan) return(0);
+
+   int n = 0;
+   for(int i = 0; i < TF_COUNT; i++)
+      n += g_plans[i].lines;
+   return(n);
+}
+
+//+------------------------------------------------------------------+
+//  How much width the second group needs, in pixels.  The panel is
+//  sized from this before anything is drawn, so no line can run past the
+//  right edge - whatever the price digits or the balance happen to be.
+//+------------------------------------------------------------------+
+int PlanWidthNeed()
+{
+   if(!InpShowPlan || !ChartSupported()) return(0);
+
+   int cA, vA, cB, vB, cC, vC;
+   PlanColumns(cA, vA, cB, vB, cC, vC);
+   int em = CharW(InpFontSize);
+
+   //  timeframe tag at x+10 and the kind ("pending +3/3") at x+44
+   int need = 44 + StringLen("pending +3/3") * em + 10;
+
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      if(g_plans[i].lines == 1)
+      {
+         if(g_plans[i].note != "")
+            need = (int)MathMax(need, cA + StringLen(g_plans[i].note) * em + 10);
+         continue;
+      }
+      for(int l = 0; l < PLAN_LINES; l++)
+         for(int c = 0; c < 3; c++)
+         {
+            if(g_plans[i].lbl[l][c] == "") continue;
+            int vx = (c == 0) ? vA : ((c == 1) ? vB : vC);
+            need = (int)MathMax(need, vx + StringLen(g_plans[i].val[l][c]) * em + 10);
+         }
+   }
+   return(need);
+}
+
+//+------------------------------------------------------------------+
+//  Draw the second group: one block per timeframe, separated from the
+//  first group by a single line.  There is no heading line - the
+//  timeframe tag at the start of each block says what it is.
+//
+//    M5   market -3/3   Entry: 4285.70        Lot: 0.23
+//                       Stop: 4286.04 34pts   Target: 4285.03 67pts
+//                       Risk: 7.82 USD        Reward: 15.41 USD   Valid: 3 bars -> 14:30
+//    M15  HOLD          nothing to place
+//
+//+------------------------------------------------------------------+
+void DrawPlanBlock(int x, int y)
+{
+   if(RowForChartTF() < 0) return;              // only on M5/M15/M30 charts
+
+   int rowH = g_rowH;
+   int gy   = y + HEAD_H + 2 + TF_COUNT * 2 * rowH + PLAN_SEP_H;
+
+   //  the separator between the two groups
+   MakeRect("planSep", x + 4, gy - 8, g_panelW - 8, 1, clrDimGray, clrDimGray);
+
+   int cA, vA, cB, vB, cC, vC;
+   PlanColumns(cA, vA, cB, vB, cC, vC);
+
+   int line = 0;
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      int    ry  = gy + line * rowH;
+      string sfx = "_" + IntegerToString(i);
+
+      // ---- timeframe tag and the entry decision --------------------
+      MakeLabel("planHead" + sfx, x + 10, ry, g_plans[i].head,
+                clrWhite, InpFontSize, false);
+
+      color kc = clrDimGray;
+      if(g_plans[i].state == 2)
+         kc = (g_plans[i].dir > 0) ? InpBuyColor : InpSellColor;
+      if(g_plans[i].kind != "")
+         MakeLabel("planKind" + sfx, x + 44, ry, g_plans[i].kind, kc, InpFontSize, false);
+      else
+         DeleteObject("planKind" + sfx);
+
+      // ---- one-liner for a HOLD or waiting block -------------------
+      string nn = "planNote" + sfx;
+      if(g_plans[i].lines == 1 && g_plans[i].note != "")
+         MakeLabel(nn, x + cA, ry, g_plans[i].note, clrDimGray, InpFontSize, false);
+      else
+         DeleteObject(nn);
+
+      // ---- the cells ------------------------------------------------
+      for(int l = 0; l < PLAN_LINES; l++)
+      {
+         for(int c = 0; c < 3; c++)
+         {
+            string ln = "planCell" + sfx + "_" + IntegerToString(l) + "_" + IntegerToString(c);
+            if(l >= g_plans[i].lines || g_plans[i].lbl[l][c] == "")
+            {
+               DeleteObject(ln + "L");
+               DeleteObject(ln + "V");
+               continue;
+            }
+            int cx = (c == 0) ? cA : ((c == 1) ? cB : cC);
+            int vx = (c == 0) ? vA : ((c == 1) ? vB : vC);
+
+            MakeLabel(ln + "L", x + cx, ry + l * rowH,
+                      g_plans[i].lbl[l][c], clrGray, InpFontSize, false);
+            MakeLabel(ln + "V", x + vx, ry + l * rowH,
+                      g_plans[i].val[l][c], g_plans[i].clr[l][c], InpFontSize, false);
+         }
+      }
+
+      line += g_plans[i].lines;
+   }
+}
+
+//+------------------------------------------------------------------+
+void DeletePlanObjects()
+{
+   DeleteObject("planSep");
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      string sfx = "_" + IntegerToString(i);
+      DeleteObject("planHead" + sfx);
+      DeleteObject("planKind" + sfx);
+      DeleteObject("planNote" + sfx);
+      for(int l = 0; l < PLAN_LINES; l++)
+         for(int c = 0; c < 3; c++)
+         {
+            string ln = "planCell" + sfx + "_" + IntegerToString(l) + "_" + IntegerToString(c);
+            DeleteObject(ln + "L");
+            DeleteObject(ln + "V");
+         }
+   }
+}
+
+//+------------------------------------------------------------------+
+//  Unsupported chart timeframe - THE NOTICE PANEL.
+//
+//     +-----------------------------------------------+
+//     |  SimpleEA                        XAUUSD  H1   |
+//     +-----------------------------------------------+
+//     |  Incompatible chart. Switch to M5/M15/M30.    |
+//     +-----------------------------------------------+
+//
+//  Read as one line:  SimpleEA | Incompatible chart. Switch to M5/M15/M30.
+//
+//  That is the whole panel - the header line the user always sees, plus
+//  the notice where the M5/M15/M30 rows would have started.  No rows, no
+//  Trend, no Regime, no Signal, no Score: the engine is calibrated for
+//  those three timeframes only, so a reading taken on any other chart
+//  would be meaningless and is withheld completely.  The box is sized to
+//  those two lines and the object set is trimmed to match, so nothing
+//  from the data panel can linger underneath it.
+//+------------------------------------------------------------------+
+void DrawIncompatiblePanel()
+{
+   int x   = InpPanelX, y = InpPanelY;
+   int pad = 10;
+
+   //  Keep the header exactly where it sits in the full panel and put the
+   //  notice on the line where the first timeframe row would have started,
+   //  so an unsupported chart reads as the panel collapsing to its header
+   //  rather than as a different widget appearing.
+   int noticeH = HEAD_H + 2 + (InpFontSize + 1) + 6;
+
+   MakeRect("bg", x, y, g_panelW, noticeH, InpBgColor, clrDimGray);
+
+   //  The separator and the whole trade-plan block belong to the full
+   //  panel only - an unsupported chart shows no plan either.
+   DeleteObject("sep");
+   DeletePlanObjects();
+
+   MakeLabel("title", x + pad, y + 7, "SimpleEA",
+             InpTitleColor, InpFontSize + 1, false);
+   //  Deliberately the real chart timeframe: the header states the fact,
+   //  the line underneath states what to do about it.
+   MakeLabel("sym", x + g_panelW - pad, y + 8,
+             _Symbol + "  " + ChartTimeframeText(),
+             InpTitleColor, InpFontSize, true);
+
+   MakeLabel("notice", x + pad, y + HEAD_H + 2,
+             IncompatibleNotice(), InpSellColor, InpFontSize + 1, false);
+
+   //  Remove every row object the full panel uses, so a single leftover
+   //  cannot show through on an incompatible chart.
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      string sfx = "_" + IntegerToString(i);
+      DeleteObject("tf"        + sfx);
+      DeleteObject("style"     + sfx);
+      DeleteObject("trendCap"  + sfx);
+      DeleteObject("regimeCap" + sfx);
+      DeleteObject("signalCap" + sfx);
+      DeleteObject("scoreCap"  + sfx);
+      DeleteObject("dir"       + sfx);
+      DeleteObject("regimeVal" + sfx);
+      DeleteObject("signal"    + sfx);
+      DeleteObject("score"     + sfx);
+   }
+
+   g_panelOK = false;
+   g_drawnTf = (ENUM_TIMEFRAMES)Period();
 }
 
 //+------------------------------------------------------------------+

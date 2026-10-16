@@ -23,9 +23,47 @@ so nothing from the first panel is lost:
   **Mixed** (no clear habit), or **Choppy** (keeps turning back on itself).
 - **Signal / Score** are the original read, unchanged: Going up = **BUY**, Going down =
   **SELL**, Sideways = **HOLD**, with the score that produced it beside it.
+- Below the three rows, a **second group** gives one trade plan per timeframe — entry, lot, stop,
+  target and validity — in the same style. See *Trade plan* below.
+- On any chart timeframe other than M5 / M15 / M30 the panel shows **no data at all** — just the
+  header line and a notice, and no trade plan. See *Chart timeframe rule* below.
 
 The two are independent, so all nine pairings can appear — e.g. *Going up + Choppy* means
 "rising overall, but messily."
+
+### Chart timeframe rule
+
+This engine is calibrated for **M5, M15 and M30 only**, so the panel is only shown on those
+charts. Put the EA on **any other timeframe** (M1, M2, M4, H1, H4, D1, …) and it shows no data
+at all — just the header line, with the notice where the timeframe rows would have started:
+
+```
+ ┌─────────────────────────────────────────────────────────────┐
+ │  SimpleEA                                       XAUUSD  H1  │
+ ├─────────────────────────────────────────────────────────────┤
+ │  Incompatible chart. Switch to M5/M15/M30.                  │
+ └─────────────────────────────────────────────────────────────┘
+```
+
+Read as one line: **SimpleEA | Incompatible chart. Switch to M5/M15/M30.**
+
+While the chart is on a wrong timeframe **nothing is calculated**: no history is pulled, no
+indicator runs, and the M5/M15/M30 rows are not drawn at all — so there is no stale or
+out-of-context number on the screen that could be mistaken for a live read. The chart's own
+timeframe is named in the header, and the same line goes to the *Experts* journal:
+
+```
+SimpleEA: the H1 chart is not supported. This panel is calibrated for M5/M15/M30 only
+- switch the chart timeframe to see it.
+```
+
+Switch the chart back to M5, M15 or M30 and the full panel returns immediately, recalculated
+from current data — whether or not MetaTrader restarts the EA for the change.
+
+To see the whole thing without opening MetaTrader, `research/walk_timeframes.py` attaches the EA,
+changes the chart timeframe through H1 → M15 → M1 → D1 → H4 → M30 and prints what is on the chart
+at every step. The rule itself is verified state by state in
+`research/verify_timeframe_gate.py`.
 
 **It contains no order-sending code.** It cannot place, modify or close a trade, so it is safe to
 leave on a live chart.
@@ -43,8 +81,10 @@ leave on a live chart.
 2. Copy `SimpleAdvisor.mq5` into that folder (a subfolder such as `Experts\SimpleEA\` is fine).
 3. Open **MetaEditor** (F4), open the file, press **F7** to compile. Expect `0 errors`.
 4. Back in the terminal, press **Ctrl+N** → Navigator → Expert Advisors → drag `SimpleAdvisor`
-   onto **any chart** (the chart's own timeframe does not matter — the panel always reads
-   M5, M15 and M30).
+   onto an **M5, M15 or M30 chart** (any symbol works; those three timeframes are the ones the
+   engine is calibrated for). On any other timeframe the panel deliberately shows only its header
+   and the *Incompatible chart* notice — drop it on an H1 chart and that is exactly what you will
+   see.
 5. Colours, position, and font are all inputs under *Panel appearance*.
 
 > If a row shows `waiting ...`, the terminal has not finished downloading history for that
@@ -152,6 +192,105 @@ Raising `InpHurstTrend` makes the panel more selective (more HOLD, fewer calls).
 
 ---
 
+### Trade plan — the second group (advice only, the EA still never sends an order)
+
+Below the three timeframe rows, separated by a single line, comes a **second group with one block
+per timeframe**. Same two-column style as the group above it, and no heading line — the `M5` /
+`M15` / `M30` at the start of each block says what it is. The point of the per-timeframe shape is
+this: when autotrading arrives, the executor reads one row and acts on that timeframe.
+
+```
+ ┌──────────────────────────────────────────────────────────────────────────────┐
+ │  SimpleEA                                                        XAUUSD  M5  │
+ ├──────────────────────────────────────────────────────────────────────────────┤
+ │  M5   Scalp        Trend: Going down      Regime: Steady                     │
+ │                    Signal: SELL           Score: -3 / 3                      │
+ │  M15  Short-term   Trend: Going up        Regime: Mixed                      │
+ │                    Signal: BUY            Score: +2 / 3                      │
+ │  M30  Intraday     Trend: Going down      Regime: Choppy                     │
+ │                    Signal: SELL           Score: -2 / 3                      │
+ ├──────────────────────────────────────────────────────────────────────────────┤
+ │  M5   market -3/3   Entry:  4285.70        Lot:     0.23                     │
+ │                     Stop:   4286.04 34pts  Target:  4285.03 67pts            │
+ │                     Risk:   7.82 USD       Reward:  15.41 USD  Valid: 3 bars │
+ │  M15  pending +2/3  Entry:  4285.27        Lot:     0.03                     │
+ │                     Stop:   4284.68 102pts Target:  4287.74 204pts           │
+ │                     Risk:   3.06 USD       Reward:  6.12 USD   Valid: 3 bars │
+ │  M30  HOLD          nothing to place                                         │
+ └──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**A HOLD or waiting timeframe takes a single line**, so the group is only as tall as it has
+content for — and the panel is only as wide as its widest line, measured before it is drawn.
+With no signals anywhere the group is three short lines and the box shrinks back to the width the
+header and the "Incompatible chart" notice need; with `InpShowPlan=false` the group is not drawn
+at all.
+
+The width budget is one character = 0.55 em at the terminal's own screen DPI, which is exactly
+what the default font (`InpFont = "Consolas"`) occupies — so the panel is neither clipped nor
+padded. A wider monospaced face (Courier New, Lucida Console, ~0.60 em) on a big font can make a
+long line touch the border: `research/walk_trade_plan.py` measures that across DPI 72–192 and
+sizes 6–16 and prints the answer at the end of its run.
+
+| Your question | How the panel answers it |
+|---|---|
+| **1. Entry point** | `Entry:` is the price to use — the current ask/bid for that direction (market) or the pending price one `InpPendATR` step better. **The EA decides which, per timeframe, from the score**: `market -3/3` = all three components agree, go now; `pending +2/3` = only two agree, so the entry waits for a better price. |
+| **2. Lot size** | `Lot:` — from balance, score and that timeframe's own stop distance, snapped to your broker's lot step and clamped to its minimum and maximum. |
+| **3. Take profit** | `Target:` — price **and points**, with the same amount in account currency on the `Reward:` cell. |
+| **4. Stop loss** | `Stop:` — price **and points**, with the money on the `Risk:` cell. Widened automatically (and marked `(min)`) if your broker demands a minimum stop distance. |
+| **5. Validity** | `Valid:` — `InpValidBars` bars from the close of that timeframe's signal bar (default 3 = the measured median, see below). |
+
+**Three sizing modes** (`InpUseRisk` / `InpUseMinLot`):
+
+| Mode | What it does |
+|---|---|
+| Risk (**default**, `InpUseRisk=true`) | Risks `InpRiskScore2` % of balance at score 2 and `InpRiskScore3` % at score 3 (defaults 0.5 / 1.0). The lot is whatever risks that much at that timeframe's stop — a wider stop automatically means a smaller lot. |
+| Risk-off (`InpUseRisk=false`) | Ignores the stop distance entirely: a balance ladder — one 0.01 lot per `InpBalPer001` of balance (default 1,000), multiplied by `InpScore3Factor` (1.5) when all three components agree. |
+| Min lot (`InpUseMinLot=true`) | Always advises your symbol's smallest allowed lot, whatever the risk says. This overrides the other two. |
+
+Two honest touches: if the smallest lot risks **more** than your target percentage, the `Lot:` cell
+says so (`0.01 (min, 3.36 USD)`) instead of quietly over-risking; and every level is snapped onto
+the broker's point grid first, so the printed points, prices and money are three views of exactly
+the same level.
+
+**No order is ever sent.** The EA contains no `OrderSend`, no `CTrade`, no trade calls of any
+kind — this group only prints numbers for you to type in yourself.
+
+New inputs, all under *Trade plan*:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `InpShowPlan` | true | Draw the second group at all |
+| `InpUseRisk` | true | Size by risk % of balance (false = balance ladder) |
+| `InpUseMinLot` | false | Always advise the symbol's minimum lot |
+| `InpRiskScore2` / `InpRiskScore3` | 0.5 / 1.0 | Risk % at score 2 and score 3 |
+| `InpBalPer001` | 1000 | Risk-off mode: balance per 0.01 lot |
+| `InpScore3Factor` | 1.5 | Risk-off mode: multiplier at score 3 |
+| `InpATRPeriod` | 14 | ATR period, closed bars, each timeframe's own |
+| `InpSLATR` / `InpTPATR` | 1.2 / 2.4 | Stop and target, in ATR |
+| `InpPendATR` | 0.5 | How far the pending entry sits from the market |
+| `InpValidBars` | 3 | How many bars the reading is worth acting on |
+
+Everything is read from your broker's own contract data (tick value, tick size, lot step,
+minimum/maximum lot, minimum stop distance, account balance and currency), so the block is correct
+on 2- and 3-digit gold, FX, indices, cent accounts and non-USD accounts alike.
+
+The arithmetic is checked symbol by symbol in `research/verify_plan_math.py`, and
+`research/walk_trade_plan.py` renders the whole panel for eight states — all timeframes active,
+one active, none, a loading timeframe, a small account, a very large balance, min-lot mode, and
+the plan switched off — failing if any line would overflow.
+
+### How far ahead is a reading good for?
+
+See **[research/HORIZON.md](research/HORIZON.md)** for the measured answer, with the harness
+(`research/horizon_study.py`, `research/first_passage.py`) included. In one line: a reading
+applies from the close of the bar it is computed on, stays on the panel a median of **2–3 bars**
+(M5 ~10 min, M15 ~45 min, M30 ~90 min), and where a forward edge exists at all it only appears
+at **6–16+ bars** — longer than the reading survives. On M5 the median net move while the
+reading is on screen (0.0–0.7 pips) does not even cover a retail spread.
+
+---
+
 ## 4. Validation — read this before trusting the panel
 
 Everything below was measured on real bar data, and the harness that produced it is included in
@@ -226,7 +365,13 @@ performance claim.
 ```bash
 pip install numpy pandas
 cd research
-python verify_mql.py     # proves the MQL5 math == the validated reference engine
+python verify_mql.py            # proves the MQL5 math == the validated reference engine
+python verify_timeframe_gate.py # proves the M5/M15/M30-only chart rule, switch by switch
+python walk_timeframes.py       # prints what the chart shows at each timeframe switch
+python horizon_study.py         # measured signal horizon -> research/HORIZON.md
+python verify_plan_math.py      # lot / points / money arithmetic, symbol by symbol
+python walk_trade_plan.py       # renders the panel (Group 1 + Group 2) for 8 states
+                                # (its output is saved as research/panel_layout.txt)
 python run3.py           # IS/OOS + Monte-Carlo null, 2026 sample
 python run2015.py        # same, independent 2015 era
 ```
