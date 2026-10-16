@@ -15,8 +15,13 @@ A very simple, read-only Expert Advisor that shows **BUY / SELL / HOLD** for **M
  └──────────────────────────────────┘
 ```
 
-**It contains no order-sending code.** It cannot place, modify or close a trade, so it is
-safe to leave on a live chart. It does not need "Algo Trading" enabled.
+**It contains no order-sending code.** It cannot place, modify or close a trade, so it is safe to
+leave on a live chart.
+
+> **Algo Trading:** because the EA never trades, it also works with the *Algo Trading* button off.
+> If the panel does **not** appear, that button is the usual cause — turn it on, or right-click the
+> chart → *Expert Advisors* → *Properties* → *Common* → tick **Allow Algo Trading**. Turning it on
+> is harmless here: there is no trade code for it to enable.
 
 ---
 
