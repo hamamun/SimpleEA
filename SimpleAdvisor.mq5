@@ -110,9 +110,14 @@
 //|        Score upgrades to 3/3 (same direction) -> deletes pending  |
 //|                   limit order and opens Market order immediately. |
 //|        Direction changes / HOLD / expiry -> cancels pending.      |
-//|   - Second Panel ("Autotrading", right of Main Panel):            |
+//|   - Second Panel ("Autotrading", right or bottom of Main Panel):  |
+//|        Controlled by InpAutoPanelPos (Right default, or Bottom).  |
 //|        Opens automatically when any market/pending order exists   |
 //|        and closes completely when flat.                           |
+//|        Header shows: Autotrading | Trailstop On/Off | Stoploss    |
+//|        On/Off | Symbol.                                           |
+//|        Each card shows TP1/TP2/TP3/SL prices (with USD) and       |
+//|        Distance from open price to TP1 -> TP2 -> TP3.             |
 //|  -----------------------------------------------------------------|
 //|  HONEST NOTE ON EXPECTATION                                       |
 //|  -----------------------------------------------------------------|
@@ -131,13 +136,21 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+enum ENUM_AUTO_PANEL_POS
+{
+   AUTO_POS_RIGHT  = 0, // Right
+   AUTO_POS_BOTTOM = 1  // Bottom
+};
+
 //==================================================================
 //  INPUTS
 //==================================================================
 input group "=== Autotrading ==="
-input bool     InpAutoTrading  = true;       // Autotrading (true = full auto, false = read-only)
-input long     InpMagicBase    = 202610;     // Base magic number (+0 M5, +1 M15, +2 M30)
-input int      InpSlippagePts  = 20;         // Max slippage in points for market orders
+input bool                InpAutoTrading  = true;            // Autotrading (true = full auto, false = read-only)
+input bool                InpUseStopLoss  = true;            // Stoploss (true = place initial SL, false = only at BE after TP1)
+input ENUM_AUTO_PANEL_POS InpAutoPanelPos = AUTO_POS_RIGHT;  // Right panel placement (Right or Bottom)
+input long                InpMagicBase    = 202610;          // Base magic number (+0 M5, +1 M15, +2 M30)
+input int                 InpSlippagePts  = 20;              // Max slippage in points for market orders
 
 input group "=== Panel appearance ==="
 input int      InpPanelX      = 12;          // Panel X offset (px)
@@ -209,7 +222,8 @@ input double   InpHurstRevertM30 = 0.45;
 #define PLAN_LBL_C  8      // widest label in a column, in characters
 #define PLAN_SEP_H  14     // gap between the last timeframe row and the plan
 
-#define AUTO_GAP_X  10     // gap between the Main Panel and the 2nd Panel
+#define AUTO_GAP_X  10     // horizontal gap when 2nd Panel is on the Right
+#define AUTO_GAP_Y  10     // vertical gap when 2nd Panel is at the Bottom
 #define AUTO_W_MIN  420    // minimum width for the 2nd Panel
 #define AUTO_LINES  4      // lines per active trade/order card in the 2nd Panel
 #define AUTO_SEP_H  10     // gap between cards in the 2nd Panel
@@ -217,7 +231,7 @@ input double   InpHurstRevertM30 = 0.45;
 #define AUTO_COL_B  320    // second cell column in the 2nd Panel
 #define AUTO_COL_C  480    // third cell column in the 2nd Panel
 #define AUTO_LBL_A  9      // label width in chars for Col A ("Waiting: ")
-#define AUTO_LBL_B  11     // label width in chars for Col B ("Trailstop: ")
+#define AUTO_LBL_B  11     // label width in chars for Col B ("Distance: ")
 #define AUTO_LBL_C  5      // label width in chars for Col C ("Ask: " / "Bid: ")
 
 //  The only chart timeframes this engine is calibrated for.  Anything else
@@ -937,12 +951,18 @@ void UpdatePlanRow(int i)
       return;
    }
 
-   int    dir    = g_rows[i].direction;
-   int    score  = g_rows[i].score;
-   bool   market = (MathAbs(score) >= 3);          // 3 of 3 -> trade now
-   double entry  = (dir > 0) ? ask : bid;
-   double offset = InpPendATR * atr;
-   double pend   = (dir > 0) ? (entry - offset) : (entry + offset);
+   int    dir        = g_rows[i].direction;
+   int    score      = g_rows[i].score;
+   bool   market     = (MathAbs(score) >= 3);          // 3 of 3 -> trade now
+   bool   isOpenNow  = (g_auto[i].active && g_auto[i].isOpen && g_auto[i].dir == dir &&
+                        g_auto[i].entryPrice > 0.0);
+   bool   isPendNow  = (g_auto[i].active && !g_auto[i].isOpen && g_auto[i].dir == dir &&
+                        g_auto[i].entryPrice > 0.0);
+   double entry      = (dir > 0) ? ask : bid;
+   double offset     = InpPendATR * atr;
+   double pend       = ValidLimitPrice(dir, (dir > 0) ? (entry - offset) : (entry + offset),
+                                       bid, ask, point);
+   double planEntry  = market ? entry : pend;
 
    // ---- stop and target, snapped onto the broker's point grid ------
    int slPts = (int)MathMax(1.0, MathRound(InpSLATR * atr / point));
@@ -955,11 +975,24 @@ void UpdatePlanRow(int i)
       slPts   = (int)MathCeil(minStop / point);
       widened = true;
    }
+   if(minStop > 0.0 && (double)tpPts * point < minStop)
+      tpPts = (int)MathCeil(minStop / point);
 
-   double slPrice = (dir > 0) ? (entry - (double)slPts * point)
-                              : (entry + (double)slPts * point);
-   double tpPrice = (dir > 0) ? (entry + (double)tpPts * point)
-                              : (entry - (double)tpPts * point);
+   double dispEntry = isOpenNow ? g_auto[i].entryPrice
+                                : (isPendNow ? g_auto[i].entryPrice : planEntry);
+   int    dispSlPts = ((isOpenNow || isPendNow) && g_auto[i].slPrice > 0.0) ? g_auto[i].slPts : slPts;
+   int    dispTpPts = (isOpenNow && g_auto[i].tp3Pts > 0)  ? g_auto[i].tp3Pts
+                    : ((isPendNow && g_auto[i].tp3Pts > 0) ? g_auto[i].tp3Pts : tpPts);
+
+   double slPrice = (dir > 0) ? (dispEntry - (double)dispSlPts * point)
+                              : (dispEntry + (double)dispSlPts * point);
+   if((isOpenNow || isPendNow) && g_auto[i].slPrice > 0.0)
+      slPrice = g_auto[i].slPrice;
+
+   double tpPrice = (dir > 0) ? (dispEntry + (double)dispTpPts * point)
+                              : (dispEntry - (double)dispTpPts * point);
+   if((isOpenNow || isPendNow) && g_auto[i].tpPrice > 0.0)
+      tpPrice = g_auto[i].tpPrice;
 
    // ---- lot size ---------------------------------------------------
    double balance  = AccountInfoDouble(ACCOUNT_BALANCE);
@@ -987,8 +1020,9 @@ void UpdatePlanRow(int i)
    }
 
    double lot       = NormalizeLots(lots);
-   double riskUSD   = (pv > 0.0) ? lot * (double)slPts * pv : 0.0;
-   double rewardUSD = (pv > 0.0) ? lot * (double)tpPts * pv : 0.0;
+   double dispLot   = ((isOpenNow || isPendNow) && g_auto[i].curLot > 0.0) ? g_auto[i].curLot : lot;
+   double riskUSD   = (pv > 0.0) ? dispLot * (double)dispSlPts * pv : 0.0;
+   double rewardUSD = (pv > 0.0) ? dispLot * (double)dispTpPts * pv : 0.0;
    bool   riskOver  = (!InpUseMinLot && InpUseRisk && wantRisk > 0.0 &&
                        riskUSD > wantRisk * 1.05);
 
@@ -1006,14 +1040,16 @@ void UpdatePlanRow(int i)
    int tp1Pts = 1, tp2Pts = 1;
    ComputeTPLevels(tpPts, tp1Pts, tp2Pts);
 
+   string kindWord = isOpenNow ? ((dir > 0) ? "buy" : "sell")
+                               : (market ? "market" : "pending");
+
    g_plans[i].state      = 2;
    g_plans[i].dir        = dir;
    g_plans[i].score      = score;
    g_plans[i].market     = market;
    g_plans[i].lines      = PLAN_LINES;
-   g_plans[i].kind       = StringFormat("%s %+d/%d",
-                                        market ? "market" : "pending", score, 3);
-   g_plans[i].entryPrice = market ? entry : pend;
+   g_plans[i].kind       = StringFormat("%s %+d/%d", kindWord, score, 3);
+   g_plans[i].entryPrice = planEntry;
    g_plans[i].lot        = lot;
    g_plans[i].slPts      = slPts;
    g_plans[i].tpPts      = tpPts;
@@ -1023,10 +1059,10 @@ void UpdatePlanRow(int i)
    g_plans[i].validUntil = until;
 
    g_plans[i].lbl[0][0] = "Entry:";
-   g_plans[i].val[0][0] = DoubleToString(market ? entry : pend, dg);
+   g_plans[i].val[0][0] = DoubleToString(dispEntry, dg);
    g_plans[i].clr[0][0] = dirC;
 
-   string lotTxt = DoubleToString(lot, 2);
+   string lotTxt = DoubleToString(dispLot, 2);
    if(minLot)        lotTxt += " (min)";
    else if(riskOver) lotTxt += StringFormat(" (min, %s %s)",
                                             DoubleToString(riskUSD, 2), cur);
@@ -1035,12 +1071,12 @@ void UpdatePlanRow(int i)
    g_plans[i].clr[0][1] = InpTitleColor;
 
    g_plans[i].lbl[1][0] = "Stop:";
-   g_plans[i].val[1][0] = StringFormat("%s %dpts%s", DoubleToString(slPrice, dg), slPts,
+   g_plans[i].val[1][0] = StringFormat("%s %dpts%s", DoubleToString(slPrice, dg), dispSlPts,
                                        widened ? " (min)" : "");
    g_plans[i].clr[1][0] = InpSellColor;
 
    g_plans[i].lbl[1][1] = "Target:";
-   g_plans[i].val[1][1] = StringFormat("%s %dpts", DoubleToString(tpPrice, dg), tpPts);
+   g_plans[i].val[1][1] = StringFormat("%s %dpts", DoubleToString(tpPrice, dg), dispTpPts);
    g_plans[i].clr[1][1] = InpBuyColor;
 
    g_plans[i].lbl[2][0] = "Risk:";
@@ -1133,6 +1169,22 @@ bool AnyAutoActive()
 {
    for(int i = 0; i < TF_COUNT; i++)
       if(g_auto[i].active) return(true);
+   return(false);
+}
+
+//+------------------------------------------------------------------+
+bool AnyTrailstopOn()
+{
+   for(int i = 0; i < TF_COUNT; i++)
+      if(g_auto[i].active && g_auto[i].trailActive) return(true);
+   return(false);
+}
+
+//+------------------------------------------------------------------+
+bool AnyStoplossOn()
+{
+   for(int i = 0; i < TF_COUNT; i++)
+      if(g_auto[i].active && g_auto[i].slPrice > 0.0) return(true);
    return(false);
 }
 
@@ -1313,6 +1365,28 @@ double ClampSLToStopsLevel(int dir, double candSL, double bid, double ask, doubl
 }
 
 //+------------------------------------------------------------------+
+//  Ensure a candidate TP price respects the broker's minimum stop
+//  distance from the current market price.
+//+------------------------------------------------------------------+
+double ClampTPToStopsLevel(int dir, double candTP, double bid, double ask, double point)
+{
+   if(candTP <= 0.0 || point <= 0.0) return(0.0);
+   double minStop = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   double pad     = MathMax(point, minStop);
+   if(dir > 0)
+   {
+      double minTP = ask + pad;
+      if(candTP < minTP) candTP = minTP;
+   }
+   else
+   {
+      double maxTP = bid - pad;
+      if(candTP > maxTP) candTP = maxTP;
+   }
+   return(NormPrice(candTP));
+}
+
+//+------------------------------------------------------------------+
 //  True only when candSL is strictly tighter (closer to price / less
 //  risk) than curSL.  Used so open-trade SL updates never widen risk.
 //+------------------------------------------------------------------+
@@ -1429,6 +1503,21 @@ bool TradePlaceLimit(int i, int dir, double lot, double price, double sl, double
 //+------------------------------------------------------------------+
 bool TradeModifyPosition(ulong posTicket, double newSL, double newTP)
 {
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0) point = 0.00001;
+
+   double normSL = (newSL > 0.0) ? NormPrice(newSL) : 0.0;
+   double normTP = (newTP > 0.0) ? NormPrice(newTP) : 0.0;
+
+   if(PositionSelectByTicket(posTicket))
+   {
+      double curSL = PositionGetDouble(POSITION_SL);
+      double curTP = PositionGetDouble(POSITION_TP);
+      if(MathAbs(normSL - curSL) < 0.5 * point &&
+         MathAbs(normTP - curTP) < 0.5 * point)
+         return(true);
+   }
+
    MqlTradeRequest req;
    MqlTradeResult  res;
    ZeroMemory(req);
@@ -1437,11 +1526,21 @@ bool TradeModifyPosition(ulong posTicket, double newSL, double newTP)
    req.action   = TRADE_ACTION_SLTP;
    req.position = posTicket;
    req.symbol   = _Symbol;
-   req.sl       = (newSL > 0.0) ? NormPrice(newSL) : 0.0;
-   req.tp       = (newTP > 0.0) ? NormPrice(newTP) : 0.0;
+   req.sl       = normSL;
+   req.tp       = normTP;
 
-   if(!OrderSend(req, res)) return(false);
-   return(res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL);
+   if(!OrderSend(req, res))
+   {
+      if(res.retcode == TRADE_RETCODE_NO_CHANGES) return(true);
+      int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+      PrintFormat("SimpleEA: TradeModifyPosition(#%I64u) failed retcode=%u sl=%.*f tp=%.*f",
+                  posTicket, res.retcode, dg, normSL, dg, normTP);
+      return(false);
+   }
+   return(res.retcode == TRADE_RETCODE_DONE ||
+          res.retcode == TRADE_RETCODE_DONE_PARTIAL ||
+          res.retcode == TRADE_RETCODE_PLACED ||
+          res.retcode == TRADE_RETCODE_NO_CHANGES);
 }
 
 //+------------------------------------------------------------------+
@@ -1473,20 +1572,58 @@ bool TradeClosePosition(ulong posTicket, int dir, double volume, long magic)
 //+------------------------------------------------------------------+
 bool TradeModifyOrder(ulong ordTicket, double newPrice, double newSL, double newTP)
 {
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0) point = 0.00001;
+
+   double normP  = NormPrice(newPrice);
+   double normSL = (newSL > 0.0) ? NormPrice(newSL) : 0.0;
+   double normTP = (newTP > 0.0) ? NormPrice(newTP) : 0.0;
+
+   ENUM_ORDER_TYPE_TIME typeTime = ORDER_TIME_GTC;
+   datetime             expTime  = 0;
+   double               stopLim  = 0.0;
+
+   if(OrderSelect(ordTicket))
+   {
+      double curP  = OrderGetDouble(ORDER_PRICE_OPEN);
+      double curSL = OrderGetDouble(ORDER_SL);
+      double curTP = OrderGetDouble(ORDER_TP);
+      if(MathAbs(normP  - curP)  < 0.5 * point &&
+         MathAbs(normSL - curSL) < 0.5 * point &&
+         MathAbs(normTP - curTP) < 0.5 * point)
+         return(true);
+
+      typeTime = (ENUM_ORDER_TYPE_TIME)OrderGetInteger(ORDER_TYPE_TIME);
+      expTime  = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+      stopLim  = OrderGetDouble(ORDER_PRICE_STOPLIMIT);
+   }
+
    MqlTradeRequest req;
    MqlTradeResult  res;
    ZeroMemory(req);
    ZeroMemory(res);
 
-   req.action    = TRADE_ACTION_MODIFY;
-   req.order     = ordTicket;
-   req.price     = NormPrice(newPrice);
-   req.sl        = (newSL > 0.0) ? NormPrice(newSL) : 0.0;
-   req.tp        = (newTP > 0.0) ? NormPrice(newTP) : 0.0;
-   req.type_time = ORDER_TIME_GTC;
+   req.action     = TRADE_ACTION_MODIFY;
+   req.order      = ordTicket;
+   req.symbol     = _Symbol;
+   req.price      = normP;
+   req.sl         = normSL;
+   req.tp         = normTP;
+   req.stoplimit  = stopLim;
+   req.type_time  = typeTime;
+   req.expiration = expTime;
 
-   if(!OrderSend(req, res)) return(false);
-   return(res.retcode == TRADE_RETCODE_DONE);
+   if(!OrderSend(req, res))
+   {
+      if(res.retcode == TRADE_RETCODE_NO_CHANGES) return(true);
+      int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+      PrintFormat("SimpleEA: TradeModifyOrder(#%I64u) failed retcode=%u price=%.*f sl=%.*f tp=%.*f",
+                  ordTicket, res.retcode, dg, normP, dg, normSL, dg, normTP);
+      return(false);
+   }
+   return(res.retcode == TRADE_RETCODE_DONE ||
+          res.retcode == TRADE_RETCODE_PLACED ||
+          res.retcode == TRADE_RETCODE_NO_CHANGES);
 }
 
 //+------------------------------------------------------------------+
@@ -1580,8 +1717,8 @@ void SyncAutoState()
                   g_auto[i].trailActive = true;
                }
             }
-            g_auto[i].lastEvalBar   = g_rows[i].lastBar;
-            g_auto[i].lastSignalBar = g_rows[i].lastBar;
+            if(g_auto[i].lastSignalBar == 0)
+               g_auto[i].lastSignalBar = g_rows[i].lastBar;
          }
          break;
       }
@@ -1628,7 +1765,6 @@ void SyncAutoState()
             g_auto[i].tp2Pts        = recTp2;
             g_auto[i].tp3Pts        = recTp3;
             g_auto[i].placedBar     = g_rows[i].lastBar;
-            g_auto[i].lastEvalBar   = g_rows[i].lastBar;
             g_auto[i].lastSignalBar = g_rows[i].lastBar;
          }
          break;
@@ -1666,7 +1802,7 @@ bool PlacePlanOrder(int i)
    if(market)
    {
       double execP = (dir > 0) ? ask : bid;
-      double slP   = NormPrice(execP - (double)dir * (double)slPts * point);
+      double slP   = InpUseStopLoss ? NormPrice(execP - (double)dir * (double)slPts * point) : 0.0;
       double tpP   = NormPrice(execP + (double)dir * (double)tp3Pts * point);
 
       if(!TradeOpenMarket(i, dir, lot, slP, tpP, ticket))
@@ -1683,7 +1819,7 @@ bool PlacePlanOrder(int i)
       g_auto[i].slPrice       = slP;
       g_auto[i].tpPrice       = tpP;
       g_auto[i].profitUSD     = 0.0;
-      g_auto[i].slPts         = slPts;
+      g_auto[i].slPts         = InpUseStopLoss ? slPts : 0;
       g_auto[i].tp1Pts        = tp1Pts;
       g_auto[i].tp2Pts        = tp2Pts;
       g_auto[i].tp3Pts        = tp3Pts;
@@ -1698,7 +1834,7 @@ bool PlacePlanOrder(int i)
    else
    {
       double pendP = ValidLimitPrice(dir, g_plans[i].entryPrice, bid, ask, point);
-      double slP   = NormPrice(pendP - (double)dir * (double)slPts * point);
+      double slP   = InpUseStopLoss ? NormPrice(pendP - (double)dir * (double)slPts * point) : 0.0;
       double tpP   = NormPrice(pendP + (double)dir * (double)tp3Pts * point);
 
       if(!TradePlaceLimit(i, dir, lot, pendP, slP, tpP, ticket))
@@ -1715,7 +1851,7 @@ bool PlacePlanOrder(int i)
       g_auto[i].slPrice       = slP;
       g_auto[i].tpPrice       = tpP;
       g_auto[i].profitUSD     = 0.0;
-      g_auto[i].slPts         = slPts;
+      g_auto[i].slPts         = InpUseStopLoss ? slPts : 0;
       g_auto[i].tp1Pts        = tp1Pts;
       g_auto[i].tp2Pts        = tp2Pts;
       g_auto[i].tp3Pts        = tp3Pts;
@@ -1741,7 +1877,11 @@ bool PlacePlanOrder(int i)
 void ManageAutoBar()
 {
    SyncAutoState();
-   if(!CanTradeNow()) return;
+   if(!CanTradeNow())
+   {
+      UpdatePlan();
+      return;
+   }
 
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -1802,9 +1942,8 @@ void ManageAutoBar()
             continue;
          }
 
-         // 4) New closed bar in the SAME direction -> update TP1/TP2/TP3 and tighten SL
-         if(g_rows[i].ok && g_rows[i].direction == dir && g_plans[i].state == 2 &&
-            g_rows[i].lastBar != g_auto[i].lastEvalBar)
+         // 4) Closed bar in the SAME direction -> update TP1/TP2/TP3 and SL
+         if(g_rows[i].ok && g_rows[i].direction == dir && g_plans[i].state == 2)
          {
             int newTp3 = g_plans[i].tp3Pts;
             int newTp1 = 1, newTp2 = 1;
@@ -1814,26 +1953,38 @@ void ManageAutoBar()
             if(!g_auto[i].tp2Hit) g_auto[i].tp2Pts = newTp2;
             g_auto[i].tp3Pts = newTp3;
 
-            double newTpPrice = NormPrice(g_auto[i].entryPrice + (double)dir * (double)newTp3 * point);
+            double rawTpPrice = NormPrice(g_auto[i].entryPrice + (double)dir * (double)newTp3 * point);
+            double newTpPrice = ClampTPToStopsLevel(dir, rawTpPrice, bid, ask, point);
             double candSL     = NormPrice(g_auto[i].entryPrice - (double)dir * (double)g_plans[i].slPts * point);
             candSL            = ClampSLToStopsLevel(dir, candSL, bid, ask, point);
 
             double useSL = g_auto[i].slPrice;
-            if(candSL > 0.0 && IsSLTighter(dir, candSL, g_auto[i].slPrice, point))
+            if(!g_auto[i].tp1Hit && !g_auto[i].trailActive)
+            {
+               useSL = InpUseStopLoss ? candSL : 0.0;
+            }
+            else if(candSL > 0.0 && IsSLTighter(dir, candSL, g_auto[i].slPrice, point))
+            {
                useSL = candSL;
+            }
 
             if(MathAbs(newTpPrice - g_auto[i].tpPrice) >= 0.5 * point ||
-               MathAbs(useSL - g_auto[i].slPrice) >= 0.5 * point)
+               MathAbs(useSL      - g_auto[i].slPrice) >= 0.5 * point)
             {
                if(TradeModifyPosition(g_auto[i].ticket, useSL, newTpPrice))
                {
-                  g_auto[i].slPrice = useSL;
-                  g_auto[i].tpPrice = newTpPrice;
-                  if(useSL > 0.0)
-                     g_auto[i].slPts = (int)MathRound(MathAbs(g_auto[i].entryPrice - useSL) / point);
+                  g_auto[i].slPrice       = useSL;
+                  g_auto[i].tpPrice       = newTpPrice;
+                  g_auto[i].lastEvalBar   = g_rows[i].lastBar;
+                  g_auto[i].slPts         = (useSL > 0.0)
+                                            ? (int)MathRound(MathAbs(g_auto[i].entryPrice - useSL) / point)
+                                            : 0;
                }
             }
-            g_auto[i].lastEvalBar = g_rows[i].lastBar;
+            else
+            {
+               g_auto[i].lastEvalBar = g_rows[i].lastBar;
+            }
          }
          continue;
       }
@@ -1874,29 +2025,31 @@ void ManageAutoBar()
             continue;
          }
 
-         // 3) New closed candle in the same direction (still Pending 2/3) ->
+         // 3) Closed candle in the same direction (still Pending 2/3) ->
          //    update Entry, SL and TP1/TP2/TP3 as per SimpleEA's new plan
-         if(g_rows[i].lastBar != g_auto[i].lastEvalBar)
-         {
-            double newEntry = ValidLimitPrice(dir, g_plans[i].entryPrice, bid, ask, point);
-            double newSL    = NormPrice(newEntry - (double)dir * (double)g_plans[i].slPts * point);
-            double newTP    = NormPrice(newEntry + (double)dir * (double)g_plans[i].tp3Pts * point);
+         double newEntry = ValidLimitPrice(dir, g_plans[i].entryPrice, bid, ask, point);
+         double newSL    = InpUseStopLoss ? NormPrice(newEntry - (double)dir * (double)g_plans[i].slPts * point) : 0.0;
+         double newTP    = NormPrice(newEntry + (double)dir * (double)g_plans[i].tp3Pts * point);
 
-            if(MathAbs(newEntry - g_auto[i].entryPrice) >= 0.5 * point ||
-               MathAbs(newSL    - g_auto[i].slPrice)    >= 0.5 * point ||
-               MathAbs(newTP    - g_auto[i].tpPrice)    >= 0.5 * point)
+         g_auto[i].slPts  = InpUseStopLoss ? g_plans[i].slPts : 0;
+         g_auto[i].tp1Pts = g_plans[i].tp1Pts;
+         g_auto[i].tp2Pts = g_plans[i].tp2Pts;
+         g_auto[i].tp3Pts = g_plans[i].tp3Pts;
+
+         if(MathAbs(newEntry - g_auto[i].entryPrice) >= 0.5 * point ||
+            MathAbs(newSL    - g_auto[i].slPrice)    >= 0.5 * point ||
+            MathAbs(newTP    - g_auto[i].tpPrice)    >= 0.5 * point)
+         {
+            if(TradeModifyOrder(g_auto[i].ticket, newEntry, newSL, newTP))
             {
-               if(TradeModifyOrder(g_auto[i].ticket, newEntry, newSL, newTP))
-               {
-                  g_auto[i].entryPrice = newEntry;
-                  g_auto[i].slPrice    = newSL;
-                  g_auto[i].tpPrice    = newTP;
-                  g_auto[i].slPts      = g_plans[i].slPts;
-                  g_auto[i].tp1Pts     = g_plans[i].tp1Pts;
-                  g_auto[i].tp2Pts     = g_plans[i].tp2Pts;
-                  g_auto[i].tp3Pts     = g_plans[i].tp3Pts;
-               }
+               g_auto[i].entryPrice  = newEntry;
+               g_auto[i].slPrice     = newSL;
+               g_auto[i].tpPrice     = newTP;
+               g_auto[i].lastEvalBar = g_rows[i].lastBar;
             }
+         }
+         else
+         {
             g_auto[i].lastEvalBar = g_rows[i].lastBar;
          }
          continue;
@@ -1914,6 +2067,7 @@ void ManageAutoBar()
    }
 
    SyncAutoState();
+   UpdatePlan();
 }
 
 //+------------------------------------------------------------------+
@@ -1922,6 +2076,14 @@ void ManageAutoBar()
 //+------------------------------------------------------------------+
 void ManageAutoTick()
 {
+   bool prevAct[TF_COUNT];
+   bool prevOpen[TF_COUNT];
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      prevAct[i]  = g_auto[i].active;
+      prevOpen[i] = g_auto[i].isOpen;
+   }
+
    bool hadActive = AnyAutoActive();
    SyncAutoState();
    bool nowActive = AnyAutoActive();
@@ -1930,6 +2092,12 @@ void ManageAutoTick()
       return;
 
    bool stateChanged = (hadActive != nowActive);
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      if(prevAct[i] != g_auto[i].active || prevOpen[i] != g_auto[i].isOpen)
+         stateChanged = true;
+   }
+
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -2035,13 +2203,24 @@ void ManageAutoTick()
          }
       }
       SyncAutoState();
+      for(int i = 0; i < TF_COUNT; i++)
+      {
+         if(prevAct[i] != g_auto[i].active || prevOpen[i] != g_auto[i].isOpen)
+            stateChanged = true;
+      }
    }
 
-   UpdateAutoPanel();
    if(stateChanged)
+   {
+      UpdatePlan();
+      UpdateAutoPanel();
       DrawSupportedPanel();
+   }
    else
+   {
+      UpdateAutoPanel();
       DrawAutoPanel();
+   }
    ChartRedraw(0);
 }
 
@@ -2092,27 +2271,33 @@ void UpdateAutoPanel()
       g_auto[i].val[0][2] = (liveP > 0.0) ? DoubleToString(liveP, dg) : "--";
       g_auto[i].clr[0][2] = clrSilver;
 
-      // ---- Line 1: TP1 & TP2 in points and account currency ---------
+      // ---- Line 1: TP1 & TP2 in price and account currency ----------
+      double tp1Price = NormPrice(g_auto[i].entryPrice + (double)dir * (double)g_auto[i].tp1Pts * point);
+      double tp2Price = NormPrice(g_auto[i].entryPrice + (double)dir * (double)g_auto[i].tp2Pts * point);
+      double tp3Price = (g_auto[i].tpPrice > 0.0)
+                        ? g_auto[i].tpPrice
+                        : NormPrice(g_auto[i].entryPrice + (double)dir * (double)g_auto[i].tp3Pts * point);
+
       double tp1USD = (pv > 0.0) ? lot * (double)g_auto[i].tp1Pts * pv : 0.0;
       double tp2USD = (pv > 0.0) ? lot * (double)g_auto[i].tp2Pts * pv : 0.0;
       double tp3USD = (pv > 0.0) ? lot * (double)g_auto[i].tp3Pts * pv : 0.0;
 
       g_auto[i].lbl[1][0] = "TP1:";
-      g_auto[i].val[1][0] = StringFormat("%dpts (%s %s)%s",
-                                         g_auto[i].tp1Pts, DoubleToString(tp1USD, 2), cur,
+      g_auto[i].val[1][0] = StringFormat("%s (%s %s)%s",
+                                         DoubleToString(tp1Price, dg), DoubleToString(tp1USD, 2), cur,
                                          g_auto[i].tp1Hit ? " [HIT]" : "");
       g_auto[i].clr[1][0] = InpBuyColor;
 
       g_auto[i].lbl[1][1] = "TP2:";
-      g_auto[i].val[1][1] = StringFormat("%dpts (%s %s)%s",
-                                         g_auto[i].tp2Pts, DoubleToString(tp2USD, 2), cur,
+      g_auto[i].val[1][1] = StringFormat("%s (%s %s)%s",
+                                         DoubleToString(tp2Price, dg), DoubleToString(tp2USD, 2), cur,
                                          g_auto[i].tp2Hit ? " [HIT]" : "");
       g_auto[i].clr[1][1] = InpBuyColor;
 
-      // ---- Line 2: TP3 & SL (or realtime Ask/Bid when SL is blank) --
+      // ---- Line 2: TP3 & SL in price (or realtime Ask/Bid when SL is blank)
       g_auto[i].lbl[2][0] = "TP3:";
-      g_auto[i].val[2][0] = StringFormat("%dpts (%s %s)",
-                                         g_auto[i].tp3Pts, DoubleToString(tp3USD, 2), cur);
+      g_auto[i].val[2][0] = StringFormat("%s (%s %s)",
+                                         DoubleToString(tp3Price, dg), DoubleToString(tp3USD, 2), cur);
       g_auto[i].clr[2][0] = InpBuyColor;
 
       g_auto[i].lbl[2][1] = "SL:";
@@ -2121,8 +2306,8 @@ void UpdateAutoPanel()
          int    slPtsNow = (int)MathRound(MathAbs(g_auto[i].entryPrice - g_auto[i].slPrice) / point);
          double slUSD    = (pv > 0.0) ? lot * (double)slPtsNow * pv : 0.0;
          bool   isBE     = (slPtsNow == 0 || g_auto[i].trailActive);
-         g_auto[i].val[2][1] = StringFormat("%dpts (%s %s)%s",
-                                            slPtsNow, DoubleToString(slUSD, 2), cur,
+         g_auto[i].val[2][1] = StringFormat("%s (%s %s)%s",
+                                            DoubleToString(g_auto[i].slPrice, dg), DoubleToString(slUSD, 2), cur,
                                             (slPtsNow == 0 && isBE) ? " [BE]" : "");
          g_auto[i].clr[2][1] = (slPtsNow == 0 && isBE) ? InpBuyColor : InpSellColor;
       }
@@ -2134,16 +2319,16 @@ void UpdateAutoPanel()
          g_auto[i].clr[2][1] = clrSilver;
       }
 
-      // ---- Line 3: Status / Waiting distance & Trailstop ------------
+      // ---- Line 3: Status / Waiting distance & Distance from open price to TP1/TP2/TP3
+      string nextTpTag = !g_auto[i].tp1Hit ? "TP1" : (!g_auto[i].tp2Hit ? "TP2" : "TP3");
+      int    nextTpPts = !g_auto[i].tp1Hit ? g_auto[i].tp1Pts
+                                           : (!g_auto[i].tp2Hit ? g_auto[i].tp2Pts : g_auto[i].tp3Pts);
+
       if(g_auto[i].isOpen)
       {
          g_auto[i].lbl[3][0] = "Status:";
          g_auto[i].val[3][0] = StringFormat("P/L %+0.2f %s", g_auto[i].profitUSD, cur);
          g_auto[i].clr[3][0] = (g_auto[i].profitUSD >= 0.0) ? InpBuyColor : InpSellColor;
-
-         g_auto[i].lbl[3][1] = "Trailstop:";
-         g_auto[i].val[3][1] = g_auto[i].trailActive ? "ACTIVE" : "OFF";
-         g_auto[i].clr[3][1] = g_auto[i].trailActive ? InpBuyColor : clrGray;
       }
       else
       {
@@ -2153,11 +2338,11 @@ void UpdateAutoPanel()
          g_auto[i].lbl[3][0] = "Waiting:";
          g_auto[i].val[3][0] = StringFormat("distance %d pts", waitPts);
          g_auto[i].clr[3][0] = clrSilver;
-
-         g_auto[i].lbl[3][1] = "Trailstop:";
-         g_auto[i].val[3][1] = "--";
-         g_auto[i].clr[3][1] = clrGray;
       }
+
+      g_auto[i].lbl[3][1] = "Distance:";
+      g_auto[i].val[3][1] = StringFormat("to %s %d pts", nextTpTag, nextTpPts);
+      g_auto[i].clr[3][1] = InpBuyColor;
    }
 }
 
@@ -2409,18 +2594,28 @@ void DrawSupportedPanel()
    //  Size the panel to its content BEFORE drawing the background, so the
    //  trade plan can never be clipped on the right - and so the box hugs
    //  the content instead of leaving a wide empty edge when signals go.
-   int wantW = NoticeWidth();
+   int    em       = CharW(InpFontSize);
+   int    titleW   = 8 * CharW(InpFontSize + 1);
+   string symRight = "|  " + _Symbol + "  |  " + ChartTimeframeText();
+   int    headW    = pad + titleW + em + (16 + 3 + 2 + StringLen(symRight)) * em + pad;
+   int    wantW    = (int)MathMax(NoticeWidth(), headW);
    if(InpShowPlan) wantW = (int)MathMax(wantW, PlanWidthNeed());
    g_panelW = wantW;
    g_panelH = HEAD_H + TF_COUNT * 2 * rowH + 8
               + (InpShowPlan ? (PLAN_SEP_H + TotalPlanLines() * rowH) : 0);
-   MakeRect("bg", x, y, g_panelW, g_panelH, InpBgColor, clrDimGray);
+   MakeRect("bg",  x, y, g_panelW, g_panelH, InpBgColor, clrDimGray);
+   MakeRect("sep", x + 4, y + HEAD_H - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
 
-   // ---- header ----------------------------------------------------
+   // ---- header: SimpleEA | Autotrading : On/Off | SYMBOL | TF -----
    MakeLabel("title", x + pad, y + 7, "SimpleEA",
              InpTitleColor, InpFontSize + 1, false);
-   MakeLabel("sym", x + g_panelW - pad, y + 8,
-             _Symbol + "  " + ChartTimeframeText(),
+   int autoCapX = x + pad + titleW + em;
+   MakeLabel("autoCap", autoCapX, y + 8, "| Autotrading : ",
+             clrSilver, InpFontSize, false);
+   int autoValX = autoCapX + 16 * em;
+   MakeLabel("autoVal", autoValX, y + 8, InpAutoTrading ? "On" : "Off",
+             InpAutoTrading ? InpBuyColor : InpSellColor, InpFontSize, false);
+   MakeLabel("sym", x + g_panelW - pad, y + 8, symRight,
              InpTitleColor, InpFontSize, true);
 
    // ---- two lines per timeframe -------------------------------------
@@ -2793,9 +2988,12 @@ int AutoWidthNeed()
 
    int cA, vA, cB, vB, cC, vC;
    AutoColumns(cA, vA, cB, vB, cC, vC);
-   int em = CharW(InpFontSize);
+   int em     = CharW(InpFontSize);
+   int titleW = 11 * CharW(InpFontSize + 1);
 
-   int need = AUTO_W_MIN;
+   int headNeed = 10 + titleW + em
+                  + (14 + 3 + 1 + 13 + 3 + 2 + StringLen("|  " + _Symbol)) * em + 10;
+   int need = (int)MathMax(AUTO_W_MIN, headNeed);
    for(int i = 0; i < TF_COUNT; i++)
    {
       if(!g_auto[i].active) continue;
@@ -2811,9 +3009,9 @@ int AutoWidthNeed()
 }
 
 //+------------------------------------------------------------------+
-//  Draw the 2nd Panel ("Autotrading") on the right side of the Main
-//  Panel when at least one market or pending order is open; close it
-//  completely when no trade is open.
+//  Draw the 2nd Panel ("Autotrading") on the right or bottom of the
+//  Main Panel when at least one market or pending order is open; close
+//  it completely when no trade is open.
 //+------------------------------------------------------------------+
 void DrawAutoPanel()
 {
@@ -2827,8 +3025,12 @@ void DrawAutoPanel()
    int activeCnt = ActiveAutoCount();
    int rowH      = g_rowH;
    int pad       = 10;
-   int x2        = InpPanelX + g_panelW + AUTO_GAP_X;
-   int y2        = InpPanelY;
+   int x2        = (InpAutoPanelPos == AUTO_POS_BOTTOM)
+                   ? InpPanelX
+                   : (InpPanelX + g_panelW + AUTO_GAP_X);
+   int y2        = (InpAutoPanelPos == AUTO_POS_BOTTOM)
+                   ? (InpPanelY + g_panelH + AUTO_GAP_Y)
+                   : InpPanelY;
 
    g_autoW = AutoWidthNeed();
    g_autoH = HEAD_H + activeCnt * AUTO_LINES * rowH
@@ -2837,9 +3039,26 @@ void DrawAutoPanel()
    MakeAutoRect("bg",  x2, y2, g_autoW, g_autoH, InpBgColor, clrDimGray);
    MakeAutoRect("sep", x2 + 4, y2 + HEAD_H - 6, g_autoW - 8, 1, clrDimGray, clrDimGray);
 
+   bool tsOn   = AnyTrailstopOn();
+   bool slOn   = AnyStoplossOn();
+   int  em     = CharW(InpFontSize);
+   int  titleW = 11 * CharW(InpFontSize + 1);
+
    MakeAutoLabel("title", x2 + pad, y2 + 7, "Autotrading",
                  InpTitleColor, InpFontSize + 1, false);
-   MakeAutoLabel("sym", x2 + g_autoW - pad, y2 + 8, _Symbol,
+   int tsCapX = x2 + pad + titleW + em;
+   MakeAutoLabel("tsCap", tsCapX, y2 + 8, "| Trailstop : ",
+                 clrSilver, InpFontSize, false);
+   int tsValX = tsCapX + 14 * em;
+   MakeAutoLabel("tsVal", tsValX, y2 + 8, tsOn ? "On" : "Off",
+                 tsOn ? InpBuyColor : InpSellColor, InpFontSize, false);
+   int slCapX = tsValX + 3 * em + em;
+   MakeAutoLabel("slCap", slCapX, y2 + 8, "| Stoploss : ",
+                 clrSilver, InpFontSize, false);
+   int slValX = slCapX + 13 * em;
+   MakeAutoLabel("slVal", slValX, y2 + 8, slOn ? "On" : "Off",
+                 slOn ? InpBuyColor : InpSellColor, InpFontSize, false);
+   MakeAutoLabel("sym", x2 + g_autoW - pad, y2 + 8, "|  " + _Symbol,
                  InpTitleColor, InpFontSize, true);
 
    int cA, vA, cB, vB, cC, vC;
@@ -2939,6 +3158,8 @@ void DrawIncompatiblePanel()
    //  The separator and the whole trade-plan block belong to the full
    //  panel only - an unsupported chart shows no plan either.
    DeleteObject("sep");
+   DeleteObject("autoCap");
+   DeleteObject("autoVal");
    DeletePlanObjects();
    DeleteAutoPanel();
 
