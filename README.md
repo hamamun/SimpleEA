@@ -280,6 +280,83 @@ The arithmetic is checked symbol by symbol in `research/verify_plan_math.py`, an
 one active, none, a loading timeframe, a small account, a very large balance, min-lot mode, and
 the plan switched off — failing if any line would overflow.
 
+---
+
+### Autotrading & Second Panel (`Autotrading`)
+
+Controlled by `InpAutoTrading` (**default `true`**, hands-free Full Auto mode; set `false` for
+read-only mode):
+
+| Input | Default | Meaning |
+|---|---|---|
+| `InpAutoTrading` | **true** | Full-auto execution on (`true`) or read-only (`false`) |
+| `InpMagicBase` | 202610 | Base magic number (`+0` M5, `+1` M15, `+2` M30) |
+| `InpSlippagePts` | 20 | Maximum slippage in points for market orders |
+
+#### Execution & Trade Management Rules
+
+1. **One Order per Timeframe at a Time:** Strictly 1 active trade or pending order per timeframe
+   (`M5`, `M15`, `M30`) at a time. When all three timeframes qualify, up to 3 independent trades
+   can run simultaneously.
+2. **M5 vs M15/M30 Trend Alignment:**
+   - **M5** trades its own signal and score directly.
+   - **M15** and **M30** only place a new order when **both M15 and M30 trends match** (`Both Going up`
+     or `Both Going down`).
+3. **Market vs Pending Limit Placement:**
+   - Score `3/3` (`+3` or `-3`) $\rightarrow$ opens a **Market order** immediately.
+   - Score `2/3` (`+2` or `-2`) $\rightarrow$ places a **Pending Limit order** (`BUY LIMIT` or `SELL LIMIT`)
+     at the advised pullback entry.
+4. **Three Take-Profit Levels (`TP1`, `TP2`, `TP3`):**
+   - **TP3** = 100% of SimpleEA's advised target points.
+   - **TP2** = 25% less than TP3 (`75%` of TP3).
+   - **TP1** = 25% less than TP2 (`75%` of TP2 = `56.25%` of TP3).
+5. **Partial Closes, Break-Even Trailstop & Score Watcher:**
+   - **At TP1 Hit:**
+     - Moves Stop Loss to **Entry (Break-Even)** and activates `Trailstop: ACTIVE` (for both
+       minimum lot and `> minLot`).
+     - If current lot > minimum lot, closes **70%** of the lot.
+     - Activates the **Score & Direction Watcher** (for both minimum lot and `> minLot`): if the
+       timeframe's score weakens or changes direction, closes the remaining position immediately;
+       if the score stays strong in the same direction, continues holding for TP2 and TP3.
+   - **At TP2 Hit:**
+     - If current lot > minimum lot, closes partial volume to **reduce remaining lot size to the
+       broker's minimum lot** and locks Stop Loss to `TP1`; continues watching score for TP3.
+   - **At TP3 Hit:** Closes the remaining order in full.
+6. **Candle-by-Candle Smart Updates:**
+   - **Open Market Trade:** On each new closed candle in the same direction, updates `TP1 / TP2 / TP3`
+     from the new plan and **only tightens `SL` (never widens risk)**. If the timeframe drops to
+     `HOLD` *before* TP1 is hit, closes immediately if the trade is in profit. If the timeframe
+     flips to the opposite direction, closes immediately.
+   - **Pending Limit Order:** On each new closed candle in the same direction (`2/3`), updates
+     `Entry`, `SL`, and `TP1 / TP2 / TP3` to the new plan. If the score upgrades from `2/3` to
+     `3/3` in the same direction, deletes the waiting pending order and opens the **Market order**
+     immediately. Cancels if the direction changes, drops to `HOLD`, or reaches `InpValidBars` expiry.
+
+#### Second Panel Layout (Right Side of Main Panel)
+
+When any market or pending order is active, the **Main Panel** tags that timeframe's plan block
+with `[OPEN]` or `[PLACED]`, and a **Second Panel (`Autotrading`)** opens automatically to the
+right of the Main Panel (and closes completely when no trade or pending order is open):
+
+```
+ ┌───────────────────────────────────────────────────────────────────────────────────────────────────┐
+ │  Autotrading                                                                              XAUUSD  │
+ ├───────────────────────────────────────────────────────────────────────────────────────────────────┤
+ │  M5  | OPEN SELL      Lot @    0.07                      Entry:     4285.70         Ask: 4285.32  │
+ │                       TP1:     38pts (2.66 USD) [HIT]    TP2:       50pts (3.50 USD)              │
+ │                       TP3:     67pts (4.69 USD)          SL:        0pts (0.00 USD) [BE]          │
+ │                       Status:  P/L +2.66 USD             Trailstop: ACTIVE                        │
+ ├───────────────────────────────────────────────────────────────────────────────────────────────────┤
+ │  M30 | BUY LIMIT      Lot @    0.01                      Entry:     4284.85         Ask: 4285.32  │
+ │                       TP1:     230pts (2.30 USD)         TP2:       306pts (3.06 USD)             │
+ │                       TP3:     408pts (4.08 USD)         SL:        204pts (2.04 USD)             │
+ │                       Waiting: distance 47 pts           Trailstop: --                            │
+ └───────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+All autotrading rules and the 2nd panel layout are verified end-to-end in
+`research/verify_autotrading.py`.
+
 ### How far ahead is a reading good for?
 
 See **[research/HORIZON.md](research/HORIZON.md)** for the measured answer, with the harness
@@ -372,6 +449,7 @@ python horizon_study.py         # measured signal horizon -> research/HORIZON.md
 python verify_plan_math.py      # lot / points / money arithmetic, symbol by symbol
 python walk_trade_plan.py       # renders the panel (Group 1 + Group 2) for 8 states
                                 # (its output is saved as research/panel_layout.txt)
+python verify_autotrading.py    # verifies all autotrading rules and renders the 2nd panel
 python run3.py           # IS/OOS + Monte-Carlo null, 2026 sample
 python run2015.py        # same, independent 2015 era
 ```
