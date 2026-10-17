@@ -102,6 +102,7 @@ class Panel:
         entry = price + (spec["point"] if dir_ > 0 else 0.0) * 0     # ask ~= bid + spread/2
         offset = self.pend_atr * atr
         pend = entry - dir_ * offset
+        plan_entry = entry if market else pend
 
         # stop / target snapped to the point grid, widened to the broker minimum
         sl_pts = max(1, int(round(self.sl_atr * atr / point)))
@@ -111,8 +112,8 @@ class Panel:
         if min_stop > 0 and sl_pts * point < min_stop:
             sl_pts = int(math.ceil(min_stop / point))
             widened = True
-        sl_price = entry - dir_ * sl_pts * point
-        tp_price = entry + dir_ * tp_pts * point
+        sl_price = plan_entry - dir_ * sl_pts * point
+        tp_price = plan_entry + dir_ * tp_pts * point
 
         # lot
         lots = spec["min_lot"]
@@ -216,8 +217,12 @@ class Panel:
                         + (PLAN_SEP_H + self.total_plan_lines() * row_h if self.show_plan else 0))
         # the real EA: NoticeWidth() is the floor for BOTH panels, then the
         # plan's own measured need (when it is shown) can only add to it
+        sym_right = "|  %s  |  %s" % (self.symbol, self.tags[0])
+        title_w = 8 * char_w(FONT + 1, DPI)
+        head_w = 10 + title_w + EM + (16 + 3 + 2 + len(sym_right)) * EM + 10
         want = max(PLAN_W_MIN,
-                   10 + len(NOTICE) * char_w(FONT + 1, DPI) + 10)
+                   10 + len(NOTICE) * char_w(FONT + 1, DPI) + 10,
+                   head_w)
         if self.show_plan:
             want = max(want, self.plan_width_need())
         self.panel_w = want
@@ -245,8 +250,10 @@ class Panel:
 
         # ---- Group 1 -----------------------------------------------------
         put("SimpleEA", 10, 0)
-        sym = "%s  %s" % (self.symbol, self.tags[0])
-        put(sym, self.panel_w - 10 - len(sym) * RENDER_CW, 0)
+        auto_cap_x = 10 + title_w + EM
+        put("| Autotrading :", auto_cap_x, 0)
+        put("On", auto_cap_x + 16 * EM, 0)
+        put(sym_right, self.panel_w - 10 - len(sym_right) * RENDER_CW, 0)
         separators.add(1)
         line = 2
         for t in self.tags:

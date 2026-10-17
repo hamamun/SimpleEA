@@ -1,28 +1,10 @@
-SimpleAdvisor - what the panel will look like
-=============================================
-
-This is the output of walk_trade_plan.py: it lays the panel out on a
-character grid where one character is one pixel-column of the real font,
-so what you see below is where the text actually lands.
-
-  Group 1 (top)   : the readings - unchanged from the current version.
-  the line        : ONE separator line only.  There is no 'Trade plan'
-                    heading.
-  Group 2 (bottom): one plan per timeframe.  A HOLD or loading timeframe
-                    takes a single line, so the group is only as tall as
-                    the signals it actually has, and the box is only as
-                    wide as its longest line.
-
-The last section sweeps the terminal's DPI (72..192) and the font size
-(6..16) to check the width budget the EA uses for its characters.
-
 SimpleEA - Group 1 (readings) + Group 2 (one plan per timeframe)
 
 ================================================================================================
 A)  all three timeframes active
 ================================================================================================
   +--------------------------------------------------------------------------------------------------+
-  |   SimpleEA                                                                              XAUUSD  M5 |
+  |   SimpleEA  | Autotrading :  On                                                   |  XAUUSD  |  M5 |
   | -------------------------------------------------------------------------------------------------- |
   |   M5   Scalp           Trend: Going down   Regime: Steady                                          |
   |                        Signal: SELL        Score: -3 / 3                                           |
@@ -35,10 +17,10 @@ A)  all three timeframes active
   |                        Stop:   4286.04 34pts    Target:  4285.03 67pts                             |
   |                        Risk:   7.82 USD         Reward:  15.41 USD        Valid:  3 bars -> 14:30  |
   |   M15  pending +2/3    Entry:  4285.27          Lot:     0.03                                      |
-  |                        Stop:   4284.68 102pts   Target:  4287.74 204pts                            |
+  |                        Stop:   4284.25 102pts   Target:  4287.31 204pts                            |
   |                        Risk:   3.06 USD         Reward:  6.12 USD         Valid:  3 bars -> 14:45  |
   |   M30  pending -2/3    Entry:  4286.55          Lot:     0.01                                      |
-  |                        Stop:   4287.74 204pts   Target:  4281.62 408pts                            |
+  |                        Stop:   4288.59 204pts   Target:  4282.47 408pts                            |
   |                        Risk:   2.04 USD         Reward:  4.08 USD         Valid:  3 bars -> 15:00  |
   +--------------------------------------------------------------------------------------------------+
   panel: 657 x 356 px   (one character = 6.6 px)
@@ -47,7 +29,7 @@ A)  all three timeframes active
 B)  the common case: one active, two HOLD (one line each)
 ================================================================================================
   +------------------------------------------------------------------------------------------------+
-  |   SimpleEA                                                                            XAUUSD  M5 |
+  |   SimpleEA  | Autotrading :  On                                                 |  XAUUSD  |  M5 |
   | ------------------------------------------------------------------------------------------------ |
   |   M5   Scalp           Trend: Going down   Regime: Steady                                        |
   |                        Signal: SELL        Score: -3 / 3                                         |
@@ -68,7 +50,7 @@ B)  the common case: one active, two HOLD (one line each)
 C)  nothing anywhere: Group 2 shrinks to three lines
 ================================================================================================
   +------------------------------------------------------------+
-  |   SimpleEA                                        XAUUSD  M5 |
+  |   SimpleEA  | Autotrading :  On             |  XAUUSD  |  M5 |
   | ------------------------------------------------------------ |
   |   M5   Scalp           Trend: Sideways     Regime: Mixed     |
   |                        Signal: HOLD        Score: +0 / 3     |
@@ -87,7 +69,7 @@ C)  nothing anywhere: Group 2 shrinks to three lines
 D)  M15 still downloading history
 ================================================================================================
   +------------------------------------------------------------------------------------------------+
-  |   SimpleEA                                                                            XAUUSD  M5 |
+  |   SimpleEA  | Autotrading :  On                                                 |  XAUUSD  |  M5 |
   | ------------------------------------------------------------------------------------------------ |
   |   M5   Scalp           Trend: Going down   Regime: Steady                                        |
   |                        Signal: SELL        Score: -3 / 3                                         |
@@ -108,7 +90,7 @@ D)  M15 still downloading history
 E)  a $200 account where the minimum lot risks more than 1% (flagged)
 ================================================================================================
   +------------------------------------------------------------------------------------------------+
-  |   SimpleEA                                                                            XAUUSD  M5 |
+  |   SimpleEA  | Autotrading :  On                                                 |  XAUUSD  |  M5 |
   | ------------------------------------------------------------------------------------------------ |
   |   M5   Scalp           Trend: Going down   Regime: Steady                                        |
   |                        Signal: SELL        Score: -3 / 3                                         |
@@ -129,7 +111,7 @@ E)  a $200 account where the minimum lot risks more than 1% (flagged)
 F)  a big balance and a wide stop: do long numbers break the layout?
 ================================================================================================
   +--------------------------------------------------------------------------------------------------+
-  |   SimpleEA                                                                              XAUUSD  M5 |
+  |   SimpleEA  | Autotrading :  On                                                   |  XAUUSD  |  M5 |
   | -------------------------------------------------------------------------------------------------- |
   |   M5   Scalp           Trend: Going down   Regime: Steady                                          |
   |                        Signal: SELL        Score: -3 / 3                                           |
@@ -152,7 +134,7 @@ F)  a big balance and a wide stop: do long numbers break the layout?
 G)  min-lot mode on EURUSD
 ================================================================================================
   +-------------------------------------------------------------------------------------------------+
-  |   SimpleEA                                                                             EURUSD  M5 |
+  |   SimpleEA  | Autotrading :  On                                                  |  EURUSD  |  M5 |
   | ------------------------------------------------------------------------------------------------- |
   |   M5   Scalp           Trend: Going up     Regime: Steady                                         |
   |                        Signal: BUY         Score: +3 / 3                                          |
@@ -173,7 +155,7 @@ G)  min-lot mode on EURUSD
 H)  InpShowPlan = false: Group 2 is not drawn at all
 ================================================================================================
   +------------------------------------------------------------+
-  |   SimpleEA                                        XAUUSD  M5 |
+  |   SimpleEA  | Autotrading :  On             |  XAUUSD  |  M5 |
   | ------------------------------------------------------------ |
   |   M5   Scalp           Trend: Going up     Regime: Steady    |
   |                        Signal: BUY         Score: +3 / 3     |

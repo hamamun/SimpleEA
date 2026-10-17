@@ -201,7 +201,7 @@ this: when autotrading arrives, the executor reads one row and acts on that time
 
 ```
  ┌──────────────────────────────────────────────────────────────────────────────┐
- │  SimpleEA                                                        XAUUSD  M5  │
+ │  SimpleEA  | Autotrading : On                               |  XAUUSD  |  M5 │
  ├──────────────────────────────────────────────────────────────────────────────┤
  │  M5   Scalp        Trend: Going down      Regime: Steady                     │
  │                    Signal: SELL           Score: -3 / 3                      │
@@ -214,7 +214,7 @@ this: when autotrading arrives, the executor reads one row and acts on that time
  │                     Stop:   4286.04 34pts  Target:  4285.03 67pts            │
  │                     Risk:   7.82 USD       Reward:  15.41 USD  Valid: 3 bars │
  │  M15  pending +2/3  Entry:  4285.27        Lot:     0.03                     │
- │                     Stop:   4284.68 102pts Target:  4287.74 204pts           │
+ │                     Stop:   4284.25 102pts Target:  4287.31 204pts           │
  │                     Risk:   3.06 USD       Reward:  6.12 USD   Valid: 3 bars │
  │  M30  HOLD          nothing to place                                         │
  └──────────────────────────────────────────────────────────────────────────────┘
@@ -290,6 +290,8 @@ read-only mode):
 | Input | Default | Meaning |
 |---|---|---|
 | `InpAutoTrading` | **true** | Full-auto execution on (`true`) or read-only (`false`) |
+| `InpUseStopLoss` | **true** | Place initial Stop Loss on order (`true` default); when `false`, no SL is placed initially, and when `TP1` hits a Stop Loss is placed at the entry point (Break-Even) |
+| `InpAutoPanelPos` | **Right** (`AUTO_POS_RIGHT`) | Second panel placement: **Right** (beside Main Panel) or **Bottom** (below Main Panel) |
 | `InpMagicBase` | 202610 | Base magic number (`+0` M5, `+1` M15, `+2` M30) |
 | `InpSlippagePts` | 20 | Maximum slippage in points for market orders |
 
@@ -312,7 +314,7 @@ read-only mode):
    - **TP1** = 25% less than TP2 (`75%` of TP2 = `56.25%` of TP3).
 5. **Partial Closes, Break-Even Trailstop & Score Watcher:**
    - **At TP1 Hit:**
-     - Moves Stop Loss to **Entry (Break-Even)** and activates `Trailstop: ACTIVE` (for both
+     - Moves Stop Loss to **Entry (Break-Even)** and activates `Trailstop : On` in the top row (for both
        minimum lot and `> minLot`).
      - If current lot > minimum lot, closes **70%** of the lot.
      - Activates the **Score & Direction Watcher** (for both minimum lot and `> minLot`): if the
@@ -332,26 +334,27 @@ read-only mode):
      `3/3` in the same direction, deletes the waiting pending order and opens the **Market order**
      immediately. Cancels if the direction changes, drops to `HOLD`, or reaches `InpValidBars` expiry.
 
-#### Second Panel Layout (Right Side of Main Panel)
+#### Second Panel Layout (Right or Bottom of Main Panel)
 
 When any market or pending order is active, the **Main Panel** tags that timeframe's plan block
 with `[OPEN]` or `[PLACED]`, and a **Second Panel (`Autotrading`)** opens automatically to the
-right of the Main Panel (and closes completely when no trade or pending order is open):
+right (or below, when `InpAutoPanelPos = Bottom`) of the Main Panel, and closes completely when no
+trade or pending order is open:
 
 ```
- ┌───────────────────────────────────────────────────────────────────────────────────────────────────┐
- │  Autotrading                                                                              XAUUSD  │
- ├───────────────────────────────────────────────────────────────────────────────────────────────────┤
- │  M5  | OPEN SELL      Lot @    0.07                      Entry:     4285.70         Ask: 4285.32  │
- │                       TP1:     38pts (2.66 USD) [HIT]    TP2:       50pts (3.50 USD)              │
- │                       TP3:     67pts (4.69 USD)          SL:        0pts (0.00 USD) [BE]          │
- │                       Status:  P/L +2.66 USD             Trailstop: ACTIVE                        │
- ├───────────────────────────────────────────────────────────────────────────────────────────────────┤
- │  M30 | BUY LIMIT      Lot @    0.01                      Entry:     4284.85         Ask: 4285.32  │
- │                       TP1:     230pts (2.30 USD)         TP2:       306pts (3.06 USD)             │
- │                       TP3:     408pts (4.08 USD)         SL:        204pts (2.04 USD)             │
- │                       Waiting: distance 47 pts           Trailstop: --                            │
- └───────────────────────────────────────────────────────────────────────────────────────────────────┘
+ ┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+ │  Autotrading   | Trailstop : On  | Stoploss : On                                                 |  XAUUSD  │
+ ├─────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+ │  M5  | OPEN SELL      Lot @    0.07                        Entry:     4285.70                  Ask: 4285.32 │
+ │                       TP1:     4285.32 (2.66 USD) [HIT]    TP2:       4285.20 (3.50 USD)                    │
+ │                       TP3:     4285.03 (4.69 USD)          SL:        4285.70 (0.00 USD) [BE]               │
+ │                       Status:  P/L +2.66 USD               Distance:  to TP2 50 pts                         │
+ ├─────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+ │  M30 | BUY LIMIT      Lot @    0.01                        Entry:     4284.85                  Ask: 4285.32 │
+ │                       TP1:     4287.15 (2.30 USD)          TP2:       4287.91 (3.06 USD)                    │
+ │                       TP3:     4288.93 (4.08 USD)          SL:        4282.81 (2.04 USD)                    │
+ │                       Waiting: distance 47 pts             Distance:  to TP1 230 pts                        │
+ └─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 All autotrading rules and the 2nd panel layout are verified end-to-end in

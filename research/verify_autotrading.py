@@ -17,12 +17,15 @@ line and verifies every rule:
           on flip/HOLD/expiry
   Rule 8  M5 trades its own signal directly; M15 and M30 require matching
           trend direction between M15 and M30
-  Rule 10 2nd Panel header: "Autotrading" with symbol name
-  Rule 11 2nd Panel opens to the right of Main Panel when orders exist and
-          closes completely (0 objects) when no trade/order is open
+  Rule 10 2nd Panel header: "Autotrading | Trailstop : Off/On | Stoploss : On/Off | SYMBOL"
+          Main Panel header: "SimpleEA | Autotrading : On/Off | SYMBOL | TF" + full-width sep
+  Rule 11 2nd Panel placement input InpAutoPanelPos (AUTO_POS_RIGHT default, or
+          AUTO_POS_BOTTOM below Main Panel); opens when orders exist and closes
+          completely (0 objects) when no trade/order is open
   Rule 12 2nd Panel rows: TF | OPEN/LIMIT | Lot @ | Entry | Ask/Bid | TP1/TP2/TP3
-          points (USD) | SL points (USD) or -- (Ask/Bid) | Status / Waiting
-          distance | Trailstop ACTIVE/OFF/--, plus [OPEN]/[PLACED] on Main Panel
+          prices (USD) | SL price (USD) or -- (Ask/Bid) | Status / Waiting
+          distance | Distance: to TP1 -> to TP2 (when TP1 hit) -> to TP3 (when TP2 hit),
+          plus [OPEN]/[PLACED] on Main Panel
 
 Run:  python3 research/verify_autotrading.py
 """
@@ -37,7 +40,10 @@ from walk_trade_plan import (HEAD_H, TF_COUNT, PLAN_SEP_H, PLAN_COL_A,
                              PLAN_COL_B, PLAN_COL_C, PLAN_W_MIN, PLAN_LBL_C,
                              NOTICE, FONT, DPI, RENDER_CW, CELL, char_w)  # noqa: E402
 
+AUTO_POS_RIGHT = 0
+AUTO_POS_BOTTOM = 1
 AUTO_GAP_X = 10
+AUTO_GAP_Y = 10
 AUTO_W_MIN = 420
 AUTO_LINES = 4
 AUTO_SEP_H = 10
@@ -134,6 +140,7 @@ class AutoTraderSim:
     """Full transcription of SimpleAdvisor.mq5's plan + autotrader + dual panels."""
 
     def __init__(self, symbol="XAUUSD", spec=None, balance=800.0, auto_trading=True,
+                 use_stop_loss=True, auto_panel_pos=AUTO_POS_RIGHT, panel_x=12, panel_y=24,
                  use_risk=True, use_min_lot=False, risk2=0.5, risk3=1.0,
                  sl_atr=1.2, tp_atr=2.4, pend_atr=0.5, valid_bars=3, show_plan=True):
         self.symbol = symbol
@@ -141,6 +148,10 @@ class AutoTraderSim:
         self.balance = balance
         self.cur = "USD"
         self.auto_trading = auto_trading
+        self.use_stop_loss = use_stop_loss
+        self.auto_panel_pos = auto_panel_pos
+        self.panel_x = panel_x
+        self.panel_y = panel_y
         self.use_risk = use_risk
         self.use_min_lot = use_min_lot
         self.risk2 = risk2
@@ -164,6 +175,8 @@ class AutoTraderSim:
         self.next_ticket = 100
         self.panel_w = PLAN_W_MIN
         self.panel_h = 130
+        self.auto_x = 0
+        self.auto_y = 0
         self.auto_w = 0
         self.auto_h = 0
         self.auto_shown = False
@@ -250,10 +263,14 @@ class AutoTraderSim:
 
             dir_, score = r["dir"], r["score"]
             market = abs(score) >= 3
+            a = self.auto[t]
+            is_open_now = (a.active and a.is_open and a.dir == dir_ and a.entry_price > 0.0)
+            is_pend_now = (a.active and not a.is_open and a.dir == dir_ and a.entry_price > 0.0)
             atr = self.atr[t]
             entry = self.ask if dir_ > 0 else self.bid
             offset = self.pend_atr * atr
             pend = entry - dir_ * offset
+            plan_entry = entry if market else pend
 
             sl_pts = max(1, int(round(self.sl_atr * atr / point)))
             tp_pts = max(1, int(round(self.tp_atr * atr / point)))
@@ -262,9 +279,21 @@ class AutoTraderSim:
             if min_stop > 0 and sl_pts * point < min_stop:
                 sl_pts = int(math.ceil(min_stop / point))
                 widened = True
+            if min_stop > 0 and tp_pts * point < min_stop:
+                tp_pts = int(math.ceil(min_stop / point))
 
-            sl_price = entry - dir_ * sl_pts * point
-            tp_price = entry + dir_ * tp_pts * point
+            disp_entry = (a.entry_price if is_open_now
+                          else (a.entry_price if is_pend_now else plan_entry))
+            disp_sl_pts = a.sl_pts if ((is_open_now or is_pend_now) and a.sl_price > 0.0) else sl_pts
+            disp_tp_pts = (a.tp3_pts if (is_open_now and a.tp3_pts > 0)
+                           else (a.tp3_pts if (is_pend_now and a.tp3_pts > 0) else tp_pts))
+
+            sl_price = disp_entry - dir_ * disp_sl_pts * point
+            if (is_open_now or is_pend_now) and a.sl_price > 0.0:
+                sl_price = a.sl_price
+            tp_price = disp_entry + dir_ * disp_tp_pts * point
+            if (is_open_now or is_pend_now) and a.tp_price > 0.0:
+                tp_price = a.tp_price
 
             want_risk, min_lot = 0.0, False
             if self.use_min_lot:
@@ -279,32 +308,36 @@ class AutoTraderSim:
                 if abs(score) >= 3:
                     lots *= 1.5
             lot = normalize_lots(lots, self.spec)
-            risk_usd = lot * sl_pts * pv
-            reward_usd = lot * tp_pts * pv
+            disp_lot = a.cur_lot if ((is_open_now or is_pend_now) and a.cur_lot > 0.0) else lot
+            risk_usd = disp_lot * disp_sl_pts * pv
+            reward_usd = disp_lot * disp_tp_pts * pv
             risk_over = (not self.use_min_lot and self.use_risk and want_risk > 0
                          and risk_usd > want_risk * 1.05)
 
             tp1_pts, tp2_pts, tp3_pts = compute_tp_levels(tp_pts)
 
-            lot_txt = "%.2f" % lot
+            lot_txt = "%.2f" % disp_lot
             if min_lot:
                 lot_txt += " (min)"
             elif risk_over:
                 lot_txt += " (min, %.2f %s)" % (risk_usd, self.cur)
 
+            kind_word = (("buy" if dir_ > 0 else "sell") if is_open_now
+                         else ("market" if market else "pending"))
+
             p.update(state=2, dir=dir_, score=score, market=market, lines=3,
-                     kind="%s %+d/%d" % ("market" if market else "pending", score, 3),
-                     entry_price=self.norm_price(entry if market else pend),
+                     kind="%s %+d/%d" % (kind_word, score, 3),
+                     entry_price=self.norm_price(plan_entry),
                      lot=lot, sl_pts=sl_pts, tp_pts=tp_pts,
                      tp1_pts=tp1_pts, tp2_pts=tp2_pts, tp3_pts=tp3_pts)
             p["lbl"][(0, 0)] = "Entry:"
-            p["val"][(0, 0)] = "%.*f" % (dg, entry if market else pend)
+            p["val"][(0, 0)] = "%.*f" % (dg, disp_entry)
             p["lbl"][(0, 1)] = "Lot:"
             p["val"][(0, 1)] = lot_txt
             p["lbl"][(1, 0)] = "Stop:"
-            p["val"][(1, 0)] = "%.*f %dpts%s" % (dg, sl_price, sl_pts, " (min)" if widened else "")
+            p["val"][(1, 0)] = "%.*f %dpts%s" % (dg, sl_price, disp_sl_pts, " (min)" if widened else "")
             p["lbl"][(1, 1)] = "Target:"
-            p["val"][(1, 1)] = "%.*f %dpts" % (dg, tp_price, tp_pts)
+            p["val"][(1, 1)] = "%.*f %dpts" % (dg, tp_price, disp_tp_pts)
             p["lbl"][(2, 0)] = "Risk:"
             p["val"][(2, 0)] = "%.2f %s" % (risk_usd, self.cur)
             p["lbl"][(2, 1)] = "Reward:"
@@ -327,7 +360,7 @@ class AutoTraderSim:
 
         if p["market"]:
             exec_p = self.norm_price(self.ask if dir_ > 0 else self.bid)
-            sl_p = self.norm_price(exec_p - dir_ * p["sl_pts"] * point)
+            sl_p = self.norm_price(exec_p - dir_ * p["sl_pts"] * point) if self.use_stop_loss else 0.0
             tp_p = self.norm_price(exec_p + dir_ * p["tp3_pts"] * point)
             a.active = True
             a.is_open = True
@@ -340,7 +373,7 @@ class AutoTraderSim:
             a.sl_price = sl_p
             a.tp_price = tp_p
             a.profit_usd = 0.0
-            a.sl_pts = p["sl_pts"]
+            a.sl_pts = p["sl_pts"] if self.use_stop_loss else 0
             a.tp1_pts = p["tp1_pts"]
             a.tp2_pts = p["tp2_pts"]
             a.tp3_pts = p["tp3_pts"]
@@ -353,7 +386,7 @@ class AutoTraderSim:
             return True
         else:
             pend_p = self.norm_price(p["entry_price"])
-            sl_p = self.norm_price(pend_p - dir_ * p["sl_pts"] * point)
+            sl_p = self.norm_price(pend_p - dir_ * p["sl_pts"] * point) if self.use_stop_loss else 0.0
             tp_p = self.norm_price(pend_p + dir_ * p["tp3_pts"] * point)
             a.active = True
             a.is_open = False
@@ -366,7 +399,7 @@ class AutoTraderSim:
             a.sl_price = sl_p
             a.tp_price = tp_p
             a.profit_usd = 0.0
-            a.sl_pts = p["sl_pts"]
+            a.sl_pts = p["sl_pts"] if self.use_stop_loss else 0
             a.tp1_pts = p["tp1_pts"]
             a.tp2_pts = p["tp2_pts"]
             a.tp3_pts = p["tp3_pts"]
@@ -434,9 +467,8 @@ class AutoTraderSim:
                         a.reset(keep_signal_bar=True)
                     continue
 
-                # 4) Same-direction new candle -> update TP1/TP2/TP3 and tighten SL
-                if (r["ok"] and r["dir"] == a.dir and p["state"] == 2
-                        and r["last_bar"] != a.last_eval_bar):
+                # 4) Same-direction closed candle -> update TP1/TP2/TP3 and SL
+                if r["ok"] and r["dir"] == a.dir and p["state"] == 2:
                     new_tp1, new_tp2, new_tp3 = compute_tp_levels(p["tp3_pts"])
                     if not a.tp1_hit:
                         a.tp1_pts = new_tp1
@@ -447,7 +479,14 @@ class AutoTraderSim:
 
                     cand_sl = self.norm_price(a.entry_price - a.dir * p["sl_pts"] * point)
                     cand_sl = self.clamp_sl_to_stops(a.dir, cand_sl)
-                    if cand_sl > 0.0 and self.is_sl_tighter(a.dir, cand_sl, a.sl_price):
+                    if not a.tp1_hit and not a.trail_active:
+                        if self.use_stop_loss and cand_sl > 0.0:
+                            a.sl_price = cand_sl
+                            a.sl_pts = int(round(abs(a.entry_price - a.sl_price) / point))
+                        else:
+                            a.sl_price = 0.0
+                            a.sl_pts = 0
+                    elif cand_sl > 0.0 and self.is_sl_tighter(a.dir, cand_sl, a.sl_price):
                         a.sl_price = cand_sl
                         a.sl_pts = int(round(abs(a.entry_price - a.sl_price) / point))
                     a.last_eval_bar = r["last_bar"]
@@ -473,16 +512,15 @@ class AutoTraderSim:
                     self.place_plan_order(t)
                     continue
 
-                # New candle in same direction (still Pending 2/3) -> update Entry/SL/TP
-                if r["last_bar"] != a.last_eval_bar:
-                    a.entry_price = self.norm_price(p["entry_price"])
-                    a.sl_pts = p["sl_pts"]
-                    a.tp1_pts = p["tp1_pts"]
-                    a.tp2_pts = p["tp2_pts"]
-                    a.tp3_pts = p["tp3_pts"]
-                    a.sl_price = self.norm_price(a.entry_price - a.dir * a.sl_pts * point)
-                    a.tp_price = self.norm_price(a.entry_price + a.dir * a.tp3_pts * point)
-                    a.last_eval_bar = r["last_bar"]
+                # Closed candle in same direction (still Pending 2/3) -> update Entry/SL/TP
+                a.entry_price = self.norm_price(p["entry_price"])
+                a.sl_pts = p["sl_pts"] if self.use_stop_loss else 0
+                a.tp1_pts = p["tp1_pts"]
+                a.tp2_pts = p["tp2_pts"]
+                a.tp3_pts = p["tp3_pts"]
+                a.sl_price = self.norm_price(a.entry_price - a.dir * a.sl_pts * point) if self.use_stop_loss else 0.0
+                a.tp_price = self.norm_price(a.entry_price + a.dir * a.tp3_pts * point)
+                a.last_eval_bar = r["last_bar"]
                 continue
 
             # CASE C: Flat -> check new order placement
@@ -493,6 +531,7 @@ class AutoTraderSim:
                     self.place_plan_order(t)
 
         self.refresh_live_pnl()
+        self.update_plan()
         self.update_auto_panel()
 
     def manage_auto_tick(self, bid, ask):
@@ -567,10 +606,17 @@ class AutoTraderSim:
                         continue
 
         self.refresh_live_pnl()
+        self.update_plan()
         self.update_auto_panel()
 
     def any_auto_active(self):
         return any(self.auto[t].active for t in TAGS)
+
+    def any_trailstop_on(self):
+        return any(self.auto[t].active and self.auto[t].trail_active for t in TAGS)
+
+    def any_stoploss_on(self):
+        return any(self.auto[t].active and self.auto[t].sl_price > 0.0 for t in TAGS)
 
     def update_auto_panel(self):
         """UpdateAutoPanel() in SimpleAdvisor.mq5."""
@@ -600,38 +646,44 @@ class AutoTraderSim:
             a.lbl[(0, 2)] = live_l
             a.val[(0, 2)] = "%.*f" % (dg, live_p)
 
+            tp1_price = self.norm_price(a.entry_price + dir_ * a.tp1_pts * point)
+            tp2_price = self.norm_price(a.entry_price + dir_ * a.tp2_pts * point)
+            tp3_price = a.tp_price if a.tp_price > 0.0 else self.norm_price(a.entry_price + dir_ * a.tp3_pts * point)
+
             tp1_usd = lot * a.tp1_pts * pv
             tp2_usd = lot * a.tp2_pts * pv
             tp3_usd = lot * a.tp3_pts * pv
 
             a.lbl[(1, 0)] = "TP1:"
-            a.val[(1, 0)] = "%dpts (%.2f %s)%s" % (a.tp1_pts, tp1_usd, self.cur, " [HIT]" if a.tp1_hit else "")
+            a.val[(1, 0)] = "%.*f (%.2f %s)%s" % (dg, tp1_price, tp1_usd, self.cur, " [HIT]" if a.tp1_hit else "")
             a.lbl[(1, 1)] = "TP2:"
-            a.val[(1, 1)] = "%dpts (%.2f %s)%s" % (a.tp2_pts, tp2_usd, self.cur, " [HIT]" if a.tp2_hit else "")
+            a.val[(1, 1)] = "%.*f (%.2f %s)%s" % (dg, tp2_price, tp2_usd, self.cur, " [HIT]" if a.tp2_hit else "")
             a.lbl[(2, 0)] = "TP3:"
-            a.val[(2, 0)] = "%dpts (%.2f %s)" % (a.tp3_pts, tp3_usd, self.cur)
+            a.val[(2, 0)] = "%.*f (%.2f %s)" % (dg, tp3_price, tp3_usd, self.cur)
 
             a.lbl[(2, 1)] = "SL:"
             if a.sl_price > 0.0:
                 sl_pts_now = int(round(abs(a.entry_price - a.sl_price) / point))
                 sl_usd = lot * sl_pts_now * pv
                 is_be = (sl_pts_now == 0 or a.trail_active)
-                a.val[(2, 1)] = "%dpts (%.2f %s)%s" % (
-                    sl_pts_now, sl_usd, self.cur, " [BE]" if (sl_pts_now == 0 and is_be) else "")
+                a.val[(2, 1)] = "%.*f (%.2f %s)%s" % (
+                    dg, a.sl_price, sl_usd, self.cur, " [BE]" if (sl_pts_now == 0 and is_be) else "")
             else:
                 a.val[(2, 1)] = "-- (%s %.*f)" % (live_l, dg, live_p)
+
+            next_tp_tag = "TP1" if not a.tp1_hit else ("TP2" if not a.tp2_hit else "TP3")
+            next_tp_pts = a.tp1_pts if not a.tp1_hit else (a.tp2_pts if not a.tp2_hit else a.tp3_pts)
 
             if a.is_open:
                 a.lbl[(3, 0)] = "Status:"
                 a.val[(3, 0)] = "P/L %+0.2f %s" % (a.profit_usd, self.cur)
-                a.lbl[(3, 1)] = "Trailstop:"
-                a.val[(3, 1)] = "ACTIVE" if a.trail_active else "OFF"
             else:
                 wait_pts = int(round(abs(live_p - a.entry_price) / point))
                 a.lbl[(3, 0)] = "Waiting:"
                 a.val[(3, 0)] = "distance %d pts" % wait_pts
-                a.lbl[(3, 1)] = "Trailstop:"
-                a.val[(3, 1)] = "--"
+
+            a.lbl[(3, 1)] = "Distance:"
+            a.val[(3, 1)] = "to %s %d pts" % (next_tp_tag, next_tp_pts)
 
         self.auto_shown = self.any_auto_active()
 
@@ -652,7 +704,10 @@ class AutoTraderSim:
         if not self.any_auto_active():
             return 0
         cA, vA, cB, vB, cC, vC = self.auto_columns()
-        need = AUTO_W_MIN
+        title_w = 11 * char_w(FONT + 1, DPI)
+        head_need = (10 + title_w + EM
+                     + (14 + 3 + 1 + 13 + 3 + 2 + len("|  " + self.symbol)) * EM + 10)
+        need = max(AUTO_W_MIN, head_need)
         for a in self.auto.values():
             if not a.active:
                 continue
@@ -662,7 +717,7 @@ class AutoTraderSim:
         return need
 
     def render_both_panels(self, title):
-        """Render Main Panel (left) and 2nd Panel (right) and assert zero overflow."""
+        """Render Main Panel (left) and 2nd Panel (right or bottom) and assert zero overflow."""
         row_h = FONT + 11
         # ---- Main Panel status tags ([OPEN] / [PLACED]) ----
         main_tags = {}
@@ -683,6 +738,10 @@ class AutoTraderSim:
             return []
 
         active_cnt = sum(1 for t in TAGS if self.auto[t].active)
+        self.auto_x = (self.panel_x if self.auto_panel_pos == AUTO_POS_BOTTOM
+                       else self.panel_x + self.panel_w + AUTO_GAP_X)
+        self.auto_y = (self.panel_y + self.panel_h + AUTO_GAP_Y
+                       if self.auto_panel_pos == AUTO_POS_BOTTOM else self.panel_y)
         self.auto_w = self.auto_width_need()
         self.auto_h = (HEAD_H + active_cnt * AUTO_LINES * row_h
                        + (active_cnt - 1) * AUTO_SEP_H + 8)
@@ -704,8 +763,21 @@ class AutoTraderSim:
             last_col[line] = col + len(text) - 1
             placed.append((line, x_px, x_px + len(text) * RENDER_CW, text))
 
+        title_w = 11 * char_w(FONT + 1, DPI)
+        ts_on = self.any_trailstop_on()
+        sl_on = self.any_stoploss_on()
+        ts_cap_x = 10 + title_w + EM
+        ts_val_x = ts_cap_x + 14 * EM
+        sl_cap_x = ts_val_x + 3 * EM + EM
+        sl_val_x = sl_cap_x + 13 * EM
+        sym_right = "|  " + self.symbol
+
         put("Autotrading", 10, 0)
-        put(self.symbol, self.auto_w - 10 - len(self.symbol) * RENDER_CW, 0)
+        put("| Trailstop :", ts_cap_x, 0)
+        put("On" if ts_on else "Off", ts_val_x, 0)
+        put("| Stoploss :", sl_cap_x, 0)
+        put("On" if sl_on else "Off", sl_val_x, 0)
+        put(sym_right, self.auto_w - 10 - len(sym_right) * RENDER_CW, 0)
         separators.add(1)
         line = 2
         cA, vA, cB, vB, cC, vC = self.auto_columns()
@@ -731,6 +803,7 @@ class AutoTraderSim:
         for r in separators:
             rows[r] = "-" * w_cols
 
+        pos_txt = "bottom of Main Panel" if self.auto_panel_pos == AUTO_POS_BOTTOM else "right of Main Panel"
         print("\n" + "=" * 96)
         print(title)
         print("=" * 96)
@@ -740,7 +813,8 @@ class AutoTraderSim:
         for i in range(line):
             print("  | %s |" % rows[i].ljust(w_cols))
         print("  +" + "-" * w_cols + "+")
-        print("  2nd Panel (right of Main Panel): %d x %d px" % (self.auto_w, self.auto_h))
+        print("  2nd Panel (%s at x=%d, y=%d): %d x %d px"
+              % (pos_txt, self.auto_x, self.auto_y, self.auto_w, self.auto_h))
 
         over = [(ln, txt, x_end) for ln, _, x_end, txt in placed if x_end > self.auto_w - 3]
         return over
@@ -809,21 +883,40 @@ def main():
     check(not over, "2nd panel overflowed: %s" % (over,))
 
     # ------------------------------------------------------------------
-    # 4. Rule 6: Market order TP1 (70% close + Break-Even + Trailstop ACTIVE)
-    #    -> TP2 (reduce to minLot + lock SL to TP1) -> TP3 (full close)
+    # 4. Rule 6 & 12: Market order TP1/TP2/TP3/SL prices, Distance to
+    #    TP1 -> TP2 -> TP3, and Trailstop/Stoploss header status
     # ------------------------------------------------------------------
-    # M5 is SELL 0.23 lots @ 4285.70, TP1=38pts (4285.32), TP2=50pts (4285.20), TP3=67pts (4285.03)
+    # M5 is SELL 0.23 lots @ 4285.70, TP1=38pts (4285.32), TP2=50pts (4285.20), TP3=67pts (4285.03), SL=34pts (4286.04)
     check(abs(sim.auto["M5"].cur_lot - 0.23) < 1e-6, "M5 initial lot should be 0.23")
+    check(sim.auto["M5"].val[(1, 0)] == "4285.32 (8.74 USD)",
+          "M5 TP1 must show price 4285.32 (8.74 USD); got %r" % sim.auto["M5"].val[(1, 0)])
+    check(sim.auto["M5"].val[(1, 1)] == "4285.20 (11.50 USD)",
+          "M5 TP2 must show price 4285.20 (11.50 USD); got %r" % sim.auto["M5"].val[(1, 1)])
+    check(sim.auto["M5"].val[(2, 0)] == "4285.03 (15.41 USD)",
+          "M5 TP3 must show price 4285.03 (15.41 USD); got %r" % sim.auto["M5"].val[(2, 0)])
+    check(sim.auto["M5"].val[(2, 1)] == "4286.04 (7.82 USD)",
+          "M5 SL must show price 4286.04 (7.82 USD); got %r" % sim.auto["M5"].val[(2, 1)])
+    check(sim.auto["M5"].lbl[(3, 1)] == "Distance:" and sim.auto["M5"].val[(3, 1)] == "to TP1 38 pts",
+          "Before TP1 hit, M5 Distance must show 'to TP1 38 pts'; got %r" % sim.auto["M5"].val[(3, 1)])
+    check(not sim.any_trailstop_on() and sim.any_stoploss_on(),
+          "Before TP1 hit, header must report Trailstop Off and Stoploss On")
+
     # Tick moves Ask down 38 pts to 4285.32 -> hits TP1!
     sim.manage_auto_tick(bid=4285.30, ask=4285.32)
     check(sim.auto["M5"].tp1_hit and sim.auto["M5"].trail_active,
           "At TP1 hit, tp1_hit and trail_active must be True")
+    check(sim.any_trailstop_on() and sim.any_stoploss_on(),
+          "At TP1 hit, header must report Trailstop On and Stoploss On")
     check(abs(sim.auto["M5"].cur_lot - 0.07) < 1e-6,
           "At TP1 hit on 0.23 lot, 70%% (0.16) closes leaving 0.07 lot; got %.2f" % sim.auto["M5"].cur_lot)
     check(abs(sim.auto["M5"].sl_price - 4285.70) < 1e-6,
           "At TP1 hit, SL must move to Entry (Break-Even 4285.70); got %.2f" % sim.auto["M5"].sl_price)
+    check(sim.auto["M5"].val[(2, 1)] == "4285.70 (0.00 USD) [BE]",
+          "At TP1 hit, SL cell must show '4285.70 (0.00 USD) [BE]'; got %r" % sim.auto["M5"].val[(2, 1)])
+    check(sim.auto["M5"].val[(3, 1)] == "to TP2 50 pts",
+          "After TP1 hit, M5 Distance must advance to 'to TP2 50 pts'; got %r" % sim.auto["M5"].val[(3, 1)])
 
-    over = sim.render_both_panels("State 2: M5 Hits TP1 (70% Closed -> 0.07 Lot Left, SL Moved to Break-Even, Trailstop ACTIVE)")
+    over = sim.render_both_panels("State 2: M5 Hits TP1 (70% Closed -> 0.07 Lot Left, SL Moved to Break-Even, Trailstop On)")
     check(not over, "2nd panel overflowed: %s" % (over,))
 
     # Tick moves Ask down 50 pts from 4285.70 to 4285.20 -> hits TP2!
@@ -833,11 +926,21 @@ def main():
           "At TP2 hit, lot must reduce to minimum lot (0.01); got %.2f" % sim.auto["M5"].cur_lot)
     check(abs(sim.auto["M5"].sl_price - (4285.70 - 0.38)) < 1e-6,
           "At TP2 hit, SL locks to TP1 price (4285.32); got %.2f" % sim.auto["M5"].sl_price)
+    check(sim.auto["M5"].val[(3, 1)] == "to TP3 67 pts",
+          "After TP2 hit, M5 Distance must advance to 'to TP3 67 pts'; got %r" % sim.auto["M5"].val[(3, 1)])
+
+    # Check Bottom placement option (AUTO_POS_BOTTOM)
+    sim.auto_panel_pos = AUTO_POS_BOTTOM
+    over_bot = sim.render_both_panels("State 2b: M5 Hits TP2 (Bottom Placement Below Main Panel, Distance -> to TP3 67 pts)")
+    check(not over_bot, "2nd panel overflowed in Bottom placement: %s" % (over_bot,))
+    check(sim.auto_x == sim.panel_x and sim.auto_y == sim.panel_y + sim.panel_h + AUTO_GAP_Y,
+          "AUTO_POS_BOTTOM must place 2nd panel directly below Main Panel")
+    sim.auto_panel_pos = AUTO_POS_RIGHT
 
     # Tick moves Ask down 67 pts from 4285.70 to 4285.03 -> hits TP3!
     sim.manage_auto_tick(bid=4285.01, ask=4285.03)
     check(not sim.auto["M5"].active, "At TP3 hit, M5 order must close completely")
-    print("  ok  Rule 6 (Lot > minLot): TP1 closes 70% + BE SL, TP2 reduces to 0.01 minLot, TP3 closes all")
+    print("  ok  Rule 6 & 12: TP1/TP2/TP3/SL prices, Distance to TP1->TP2->TP3, Trailstop/Stoploss header & Right/Bottom placement")
 
     # ------------------------------------------------------------------
     # 5. Rule 6: Score Watcher after TP1 (for both > minLot and minLot)
@@ -890,17 +993,20 @@ def main():
     sim3.set_bar("M5", 1, 3, atr=0.28, bar_time=1000)
     sim3.update_plan()
     sim3.manage_auto_bar()
+    check(sim3.plans["M5"]["kind"] == "buy +3/3",
+          "Left Panel must show 'buy +3/3' (not 'market +3/3') when order is [OPEN]; got %r"
+          % sim3.plans["M5"]["kind"])
     orig_sl = sim3.auto["M5"].sl_price
-    # New candle with WIDER ATR (0.40) -> TP updates, but SL must NEVER widen!
+    # New candle with WIDER ATR (0.40) before TP1 is hit -> both TP and SL update to new plan!
     sim3.set_bar("M5", 1, 3, atr=0.40, bar_time=1300)
     sim3.update_plan()
     sim3.manage_auto_bar()
-    check(abs(sim3.auto["M5"].sl_price - orig_sl) < 1e-6,
-          "Open trade SL must never widen when ATR increases")
+    check(sim3.auto["M5"].sl_pts == sim3.plans["M5"]["sl_pts"] and sim3.auto["M5"].sl_price < orig_sl,
+          "Before TP1/Trailstop, open trade SL must update to the new candle's plan")
     check(sim3.auto["M5"].tp3_pts == sim3.plans["M5"]["tp3_pts"],
           "Open trade TP1/TP2/TP3 must update to the new candle's plan")
 
-    # New candle with SMALLER ATR (0.20) -> SL tightens!
+    # New candle with SMALLER ATR (0.20) -> SL tightens to new plan!
     sim3.set_bar("M5", 1, 3, atr=0.20, bar_time=1600)
     sim3.update_plan()
     sim3.manage_auto_bar()
@@ -919,13 +1025,15 @@ def main():
     check(not sim3.auto["M5"].active,
           "Pre-TP1 drop to HOLD while in profit must close the trade immediately")
 
-    # Pending order (2/3) updates on new candle, and upgrades to Market when score hits 3/3!
+    # Pending order (2/3) updates on new candle, and when filled on tick shows "buy +2/3" [OPEN]!
     sim3.bid = sim3.ask = 4285.70
     sim3.set_bar("M5", 1, 2, atr=0.28, bar_time=2200)
     sim3.update_plan()
     sim3.manage_auto_bar()
     check(sim3.auto["M5"].active and not sim3.auto["M5"].is_open,
           "Score +2/3 must place a Pending Limit order")
+    check(sim3.plans["M5"]["kind"] == "pending +2/3",
+          "Left Panel must show 'pending +2/3' while [PLACED]; got %r" % sim3.plans["M5"]["kind"])
     old_pend_entry = sim3.auto["M5"].entry_price
     # Next candle still +2/3 but different ATR -> updates pending entry/SL/TP
     sim3.set_bar("M5", 1, 2, atr=0.40, bar_time=2500)
@@ -945,7 +1053,16 @@ def main():
     sim3.manage_auto_bar()
     check(sim3.auto["M5"].active and sim3.auto["M5"].dir == -1 and not sim3.auto["M5"].is_open,
           "Opposite signal (-2/3 SELL) must close BUY and place SELL LIMIT")
-    # Flip to HOLD (0) -> cancels pending SELL LIMIT and closes 2nd panel completely:
+    # Price ticks up to SELL LIMIT entry -> fills and becomes OPEN SELL with "sell -2/3" on Left Panel!
+    fill_bid = sim3.auto["M5"].entry_price
+    sim3.manage_auto_tick(bid=fill_bid, ask=fill_bid + 0.02)
+    check(sim3.auto["M5"].is_open and sim3.plans["M5"]["kind"] == "sell -2/3",
+          "When SELL LIMIT fills on tick, Left Panel must show 'sell -2/3' [OPEN] (not 'pending -2/3'); got %r"
+          % sim3.plans["M5"]["kind"])
+    check(sim3.plans["M5"]["val"][(0, 0)] == "%.2f" % fill_bid,
+          "Left Panel Entry must match the open order's entry price")
+    # Flip to HOLD (0) while in profit -> closes open SELL and closes 2nd panel completely:
+    sim3.manage_auto_tick(bid=fill_bid - 0.20, ask=fill_bid - 0.18)
     sim3.set_bar("M5", 0, 0, bar_time=3400)
     sim3.update_plan()
     sim3.manage_auto_bar()
@@ -953,6 +1070,42 @@ def main():
           "When all trades/orders close, the 2nd panel must close completely")
     over = sim3.render_both_panels("State 3: Flat (No Open or Pending Orders -> 2nd Panel Closes Completely)")
     check(not over, "Unexpected overflow when flat")
+
+    # ------------------------------------------------------------------
+    # 7. InpUseStopLoss = false: No initial SL placed, but when TP1 hits
+    #    SL IS placed at the Entry point (Break-Even)
+    # ------------------------------------------------------------------
+    sim_nosl = AutoTraderSim(auto_trading=True, use_stop_loss=False)
+    sim_nosl.set_bar("M5", 1, 3, atr=0.28, bar_time=1000)
+    sim_nosl.update_plan()
+    sim_nosl.manage_auto_bar()
+    check(sim_nosl.auto["M5"].active and sim_nosl.auto["M5"].is_open, "M5 BUY opened with InpUseStopLoss=false")
+    check(sim_nosl.auto["M5"].sl_price == 0.0 and sim_nosl.auto["M5"].sl_pts == 0,
+          "When InpUseStopLoss=false, no initial SL may be placed on the order")
+    check(not sim_nosl.any_stoploss_on() and not sim_nosl.any_trailstop_on(),
+          "Before TP1 hit with InpUseStopLoss=false, header must show Trailstop : Off | Stoploss : Off")
+    check(sim_nosl.auto["M5"].val[(2, 1)].startswith("-- ("),
+          "Before TP1 hit with InpUseStopLoss=false, SL cell must show '-- (Bid: ...)'; got %r"
+          % sim_nosl.auto["M5"].val[(2, 1)])
+
+    # New candle before TP1 hit -> TP updates, SL remains 0.0 (not placed)
+    sim_nosl.set_bar("M5", 1, 3, atr=0.35, bar_time=1300)
+    sim_nosl.update_plan()
+    sim_nosl.manage_auto_bar()
+    check(sim_nosl.auto["M5"].sl_price == 0.0,
+          "Before TP1 hit with InpUseStopLoss=false, bar close must keep SL off (0.0)")
+
+    # Price reaches TP1 -> SL MUST be placed at Entry point (Break-Even) even though InpUseStopLoss=false!
+    tp1_bid = sim_nosl.auto["M5"].entry_price + sim_nosl.auto["M5"].tp1_pts * 0.01
+    sim_nosl.manage_auto_tick(bid=tp1_bid, ask=tp1_bid + 0.02)
+    check(sim_nosl.auto["M5"].tp1_hit and sim_nosl.auto["M5"].trail_active,
+          "TP1 hit with InpUseStopLoss=false must activate TP1 and Trailstop")
+    check(abs(sim_nosl.auto["M5"].sl_price - sim_nosl.auto["M5"].entry_price) < 1e-6,
+          "When TP1 hits with InpUseStopLoss=false, SL MUST be placed at Entry point (%.2f); got %.2f"
+          % (sim_nosl.auto["M5"].entry_price, sim_nosl.auto["M5"].sl_price))
+    check(sim_nosl.any_trailstop_on() and sim_nosl.any_stoploss_on(),
+          "After TP1 hits with InpUseStopLoss=false, header must show Trailstop : On | Stoploss : On")
+    print("  ok  InpUseStopLoss=false: no SL placed initially; when TP1 hits, SL is placed at Entry (Break-Even)")
 
     print("  ok  Rule 4, 7, 10, 11, 12: Candle updates, 2/3->3/3 upgrade, HOLD-in-profit close, and 2nd panel auto-close")
     print("\nall autotrading and 2nd-panel checks passed")
