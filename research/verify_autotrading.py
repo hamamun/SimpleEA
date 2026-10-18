@@ -38,7 +38,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from verify_plan_math import SYMBOLS, point_value_per_lot, normalize_lots  # noqa: E402
 from walk_trade_plan import (HEAD_H, TF_COUNT, PLAN_SEP_H, PLAN_COL_A,
                              PLAN_COL_B, PLAN_COL_C, PLAN_W_MIN, PLAN_LBL_C,
-                             NOTICE, FONT, DPI, RENDER_CW, CELL, char_w)  # noqa: E402
+                             NOTICE, FONT, DPI, RENDER_CW, CELL, char_w,
+                             SL_ATR, TP_ATR, per_tf)  # noqa: E402
 
 AUTO_POS_RIGHT = 0
 AUTO_POS_BOTTOM = 1
@@ -61,10 +62,16 @@ TF_SEC = {"M5": 300, "M15": 900, "M30": 1800}
 
 
 def compute_tp_levels(tp3):
-    """ComputeTPLevels() in SimpleAdvisor.mq5."""
+    """ComputeTPLevels() in SimpleAdvisor.mq5.
+
+    MQL5 MathRound rounds halves away from zero (382.5 -> 383), while
+    Python's round() rounds halves to even (382.5 -> 382) - floor(x+0.5)
+    mirrors the terminal exactly, which the 510-pt M30 default target
+    (x.75 = 382.5) actually exercises.
+    """
     tp3 = max(1, int(tp3))
-    tp2 = max(1, int(round(tp3 * 0.75)))
-    tp1 = max(1, int(round(tp2 * 0.75)))
+    tp2 = max(1, int(math.floor(tp3 * 0.75 + 0.5)))
+    tp1 = max(1, int(math.floor(tp2 * 0.75 + 0.5)))
     return tp1, tp2, tp3
 
 
@@ -142,7 +149,7 @@ class AutoTraderSim:
     def __init__(self, symbol="XAUUSD", spec=None, balance=800.0, auto_trading=True,
                  use_stop_loss=True, auto_panel_pos=AUTO_POS_RIGHT, panel_x=12, panel_y=24,
                  use_risk=True, use_min_lot=False, risk2=0.5, risk3=1.0,
-                 sl_atr=1.2, tp_atr=2.4, pend_atr=0.5, valid_bars=3, show_plan=True):
+                 sl_atr=None, tp_atr=None, pend_atr=0.5, valid_bars=3, show_plan=True):
         self.symbol = symbol
         self.spec = spec or SYMBOLS["XAUUSD-2d"]
         self.balance = balance
@@ -156,8 +163,10 @@ class AutoTraderSim:
         self.use_min_lot = use_min_lot
         self.risk2 = risk2
         self.risk3 = risk3
-        self.sl_atr = sl_atr
-        self.tp_atr = tp_atr
+        #  per-timeframe stop/target (InpSLATR_* / InpTPATR_*): None =
+        #  the EA's shipped profile - scalp aims near, intraday aims far
+        self.sl_atr = per_tf(sl_atr, SL_ATR)
+        self.tp_atr = per_tf(tp_atr, TP_ATR)
         self.pend_atr = pend_atr
         self.valid_bars = valid_bars
         self.show_plan = show_plan
@@ -272,8 +281,8 @@ class AutoTraderSim:
             pend = entry - dir_ * offset
             plan_entry = entry if market else pend
 
-            sl_pts = max(1, int(round(self.sl_atr * atr / point)))
-            tp_pts = max(1, int(round(self.tp_atr * atr / point)))
+            sl_pts = max(1, int(round(self.sl_atr[t] * atr / point)))
+            tp_pts = max(1, int(round(self.tp_atr[t] * atr / point)))
             min_stop = self.spec["stops_level"] * point
             widened = False
             if min_stop > 0 and sl_pts * point < min_stop:
@@ -338,6 +347,10 @@ class AutoTraderSim:
             p["val"][(1, 0)] = "%.*f %dpts%s" % (dg, sl_price, disp_sl_pts, " (min)" if widened else "")
             p["lbl"][(1, 1)] = "Target:"
             p["val"][(1, 1)] = "%.*f %dpts" % (dg, tp_price, disp_tp_pts)
+            #  Reach: rough bar count behind the target - bars ~ (target / ATR)^2
+            eta = max(1, int(round((tp_pts * point / atr) ** 2)))
+            p["lbl"][(1, 2)] = "Reach:"
+            p["val"][(1, 2)] = "~%d bar%s" % (eta, "" if eta == 1 else "s")
             p["lbl"][(2, 0)] = "Risk:"
             p["val"][(2, 0)] = "%.2f %s" % (risk_usd, self.cur)
             p["lbl"][(2, 1)] = "Reward:"
@@ -883,62 +896,103 @@ def main():
     check(not over, "2nd panel overflowed: %s" % (over,))
 
     # ------------------------------------------------------------------
+    # 3b. Per-timeframe stop/target profile: the three styles aim apart
+    # ------------------------------------------------------------------
+    #  Shipped defaults (InpSLATR_* / InpTPATR_*): M5 1.0/0.9, M15 1.2/1.8,
+    #  M30 1.5/3.0 ATR - on the sim's XAUUSD ATRs 0.28 / 0.85 / 1.70 that is
+    #  stop/target 28/25, 102/153, 255/510 points -> R:R 1:0.89 / 1:1.5 / 1:2.
+    prof = AutoTraderSim(auto_trading=True)
+    prof.set_bar("M5", 1, 3, bar_time=1000)
+    prof.set_bar("M15", 1, 3, bar_time=1000)
+    prof.set_bar("M30", 1, 3, bar_time=1000)
+    prof.update_plan()
+    expect = {"M5": (28, 25), "M15": (102, 153), "M30": (255, 510)}
+    for t in TAGS:
+        sl_e, tp_e = expect[t]
+        check(prof.plans[t]["sl_pts"] == sl_e and prof.plans[t]["tp_pts"] == tp_e,
+              "%s plan must be stop %d / target %d pts; got %d / %d"
+              % (t, sl_e, tp_e, prof.plans[t]["sl_pts"], prof.plans[t]["tp_pts"]))
+    check(prof.plans["M5"]["tp_pts"] < prof.plans["M15"]["tp_pts"] < prof.plans["M30"]["tp_pts"],
+          "targets must fan out with the timeframe (scalp near, intraday far)")
+    rr = {t: prof.plans[t]["tp_pts"] / prof.plans[t]["sl_pts"] for t in TAGS}
+    for t, want in (("M5", 0.9), ("M15", 1.5), ("M30", 2.0)):
+        check(abs(rr[t] - want) < 0.05,
+              "%s R:R must be about 1:%.1f, got 1:%.2f" % (t, want, rr[t]))
+    reach = {"M5": "~1 bar", "M15": "~3 bars", "M30": "~9 bars"}
+    for t in TAGS:
+        check(prof.plans[t]["val"].get((1, 2)) == reach[t],
+              "%s Reach cell must be %r; got %r"
+              % (t, reach[t], prof.plans[t]["val"].get((1, 2))))
+    prof.manage_auto_bar()
+    check(prof.auto["M5"].active and prof.auto["M15"].active and prof.auto["M30"].active,
+          "all three profiled timeframes must place their orders")
+    check(prof.auto["M5"].sl_pts == 28 and prof.auto["M5"].tp3_pts == 25,
+          "the placed M5 order must carry the scalp stop 28 / target 25 pts; got %d / %d"
+          % (prof.auto["M5"].sl_pts, prof.auto["M5"].tp3_pts))
+    check(prof.auto["M30"].sl_pts == 255 and prof.auto["M30"].tp3_pts == 510,
+          "the placed M30 order must carry the intraday stop 255 / target 510 pts; got %d / %d"
+          % (prof.auto["M30"].sl_pts, prof.auto["M30"].tp3_pts))
+    print("  ok  Per-timeframe profile: M5 28/25 (R:R 0.89, Reach ~1 bar), "
+          "M15 102/153 (1.5, ~3 bars), M30 255/510 (2.0, ~9 bars)")
+
+    # ------------------------------------------------------------------
     # 4. Rule 6 & 12: Market order TP1/TP2/TP3/SL prices, Distance to
     #    TP1 -> TP2 -> TP3, and Trailstop/Stoploss header status
     # ------------------------------------------------------------------
-    # M5 is SELL 0.23 lots @ 4285.70, TP1=38pts (4285.32), TP2=50pts (4285.20), TP3=67pts (4285.03), SL=34pts (4286.04)
-    check(abs(sim.auto["M5"].cur_lot - 0.23) < 1e-6, "M5 initial lot should be 0.23")
-    check(sim.auto["M5"].val[(1, 0)] == "4285.32 (8.74 USD)",
-          "M5 TP1 must show price 4285.32 (8.74 USD); got %r" % sim.auto["M5"].val[(1, 0)])
-    check(sim.auto["M5"].val[(1, 1)] == "4285.20 (11.50 USD)",
-          "M5 TP2 must show price 4285.20 (11.50 USD); got %r" % sim.auto["M5"].val[(1, 1)])
-    check(sim.auto["M5"].val[(2, 0)] == "4285.03 (15.41 USD)",
-          "M5 TP3 must show price 4285.03 (15.41 USD); got %r" % sim.auto["M5"].val[(2, 0)])
-    check(sim.auto["M5"].val[(2, 1)] == "4286.04 (7.82 USD)",
-          "M5 SL must show price 4286.04 (7.82 USD); got %r" % sim.auto["M5"].val[(2, 1)])
-    check(sim.auto["M5"].lbl[(3, 1)] == "Distance:" and sim.auto["M5"].val[(3, 1)] == "to TP1 38 pts",
-          "Before TP1 hit, M5 Distance must show 'to TP1 38 pts'; got %r" % sim.auto["M5"].val[(3, 1)])
+    # M5 is SELL 0.28 lots @ 4285.70, TP1=14pts (4285.56), TP2=19pts (4285.51), TP3=25pts (4285.45), SL=28pts (4285.98)
+    # (the shipped per-timeframe profile: M5 stop = 1.0 ATR, target = 0.9 ATR -> R:R under 1)
+    check(abs(sim.auto["M5"].cur_lot - 0.28) < 1e-6, "M5 initial lot should be 0.28")
+    check(sim.auto["M5"].val[(1, 0)] == "4285.56 (3.92 USD)",
+          "M5 TP1 must show price 4285.56 (3.92 USD); got %r" % sim.auto["M5"].val[(1, 0)])
+    check(sim.auto["M5"].val[(1, 1)] == "4285.51 (5.32 USD)",
+          "M5 TP2 must show price 4285.51 (5.32 USD); got %r" % sim.auto["M5"].val[(1, 1)])
+    check(sim.auto["M5"].val[(2, 0)] == "4285.45 (7.00 USD)",
+          "M5 TP3 must show price 4285.45 (7.00 USD); got %r" % sim.auto["M5"].val[(2, 0)])
+    check(sim.auto["M5"].val[(2, 1)] == "4285.98 (7.84 USD)",
+          "M5 SL must show price 4285.98 (7.84 USD); got %r" % sim.auto["M5"].val[(2, 1)])
+    check(sim.auto["M5"].lbl[(3, 1)] == "Distance:" and sim.auto["M5"].val[(3, 1)] == "to TP1 14 pts",
+          "Before TP1 hit, M5 Distance must show 'to TP1 14 pts'; got %r" % sim.auto["M5"].val[(3, 1)])
     check(not sim.any_trailstop_on() and sim.any_stoploss_on(),
           "Before TP1 hit, header must report Trailstop Off and Stoploss On")
 
-    # Tick moves Ask down 38 pts to 4285.32 -> hits TP1!
-    sim.manage_auto_tick(bid=4285.30, ask=4285.32)
+    # Tick moves Bid down to TP1 4285.56 -> hits TP1!
+    sim.manage_auto_tick(bid=4285.54, ask=4285.56)
     check(sim.auto["M5"].tp1_hit and sim.auto["M5"].trail_active,
           "At TP1 hit, tp1_hit and trail_active must be True")
     check(sim.any_trailstop_on() and sim.any_stoploss_on(),
           "At TP1 hit, header must report Trailstop On and Stoploss On")
-    check(abs(sim.auto["M5"].cur_lot - 0.07) < 1e-6,
-          "At TP1 hit on 0.23 lot, 70%% (0.16) closes leaving 0.07 lot; got %.2f" % sim.auto["M5"].cur_lot)
+    check(abs(sim.auto["M5"].cur_lot - 0.09) < 1e-6,
+          "At TP1 hit on 0.28 lot, 70%% (0.19) closes leaving 0.09 lot; got %.2f" % sim.auto["M5"].cur_lot)
     check(abs(sim.auto["M5"].sl_price - 4285.70) < 1e-6,
           "At TP1 hit, SL must move to Entry (Break-Even 4285.70); got %.2f" % sim.auto["M5"].sl_price)
     check(sim.auto["M5"].val[(2, 1)] == "4285.70 (0.00 USD) [BE]",
           "At TP1 hit, SL cell must show '4285.70 (0.00 USD) [BE]'; got %r" % sim.auto["M5"].val[(2, 1)])
-    check(sim.auto["M5"].val[(3, 1)] == "to TP2 50 pts",
-          "After TP1 hit, M5 Distance must advance to 'to TP2 50 pts'; got %r" % sim.auto["M5"].val[(3, 1)])
+    check(sim.auto["M5"].val[(3, 1)] == "to TP2 19 pts",
+          "After TP1 hit, M5 Distance must advance to 'to TP2 19 pts'; got %r" % sim.auto["M5"].val[(3, 1)])
 
     over = sim.render_both_panels("State 2: M5 Hits TP1 (70% Closed -> 0.07 Lot Left, SL Moved to Break-Even, Trailstop On)")
     check(not over, "2nd panel overflowed: %s" % (over,))
 
-    # Tick moves Ask down 50 pts from 4285.70 to 4285.20 -> hits TP2!
-    sim.manage_auto_tick(bid=4285.18, ask=4285.20)
+    # Tick moves Bid down to TP2 4285.51 -> hits TP2!
+    sim.manage_auto_tick(bid=4285.49, ask=4285.51)
     check(sim.auto["M5"].tp2_hit, "At TP2 hit, tp2_hit must be True")
     check(abs(sim.auto["M5"].cur_lot - 0.01) < 1e-6,
           "At TP2 hit, lot must reduce to minimum lot (0.01); got %.2f" % sim.auto["M5"].cur_lot)
-    check(abs(sim.auto["M5"].sl_price - (4285.70 - 0.38)) < 1e-6,
-          "At TP2 hit, SL locks to TP1 price (4285.32); got %.2f" % sim.auto["M5"].sl_price)
-    check(sim.auto["M5"].val[(3, 1)] == "to TP3 67 pts",
-          "After TP2 hit, M5 Distance must advance to 'to TP3 67 pts'; got %r" % sim.auto["M5"].val[(3, 1)])
+    check(abs(sim.auto["M5"].sl_price - (4285.70 - 0.14)) < 1e-6,
+          "At TP2 hit, SL locks to TP1 price (4285.56); got %.2f" % sim.auto["M5"].sl_price)
+    check(sim.auto["M5"].val[(3, 1)] == "to TP3 25 pts",
+          "After TP2 hit, M5 Distance must advance to 'to TP3 25 pts'; got %r" % sim.auto["M5"].val[(3, 1)])
 
     # Check Bottom placement option (AUTO_POS_BOTTOM)
     sim.auto_panel_pos = AUTO_POS_BOTTOM
-    over_bot = sim.render_both_panels("State 2b: M5 Hits TP2 (Bottom Placement Below Main Panel, Distance -> to TP3 67 pts)")
+    over_bot = sim.render_both_panels("State 2b: M5 Hits TP2 (Bottom Placement Below Main Panel, Distance -> to TP3 25 pts)")
     check(not over_bot, "2nd panel overflowed in Bottom placement: %s" % (over_bot,))
     check(sim.auto_x == sim.panel_x and sim.auto_y == sim.panel_y + sim.panel_h + AUTO_GAP_Y,
           "AUTO_POS_BOTTOM must place 2nd panel directly below Main Panel")
     sim.auto_panel_pos = AUTO_POS_RIGHT
 
-    # Tick moves Ask down 67 pts from 4285.70 to 4285.03 -> hits TP3!
-    sim.manage_auto_tick(bid=4285.01, ask=4285.03)
+    # Tick moves Bid down to TP3 4285.45 -> hits TP3!
+    sim.manage_auto_tick(bid=4285.43, ask=4285.45)
     check(not sim.auto["M5"].active, "At TP3 hit, M5 order must close completely")
     print("  ok  Rule 6 & 12: TP1/TP2/TP3/SL prices, Distance to TP1->TP2->TP3, Trailstop/Stoploss header & Right/Bottom placement")
 

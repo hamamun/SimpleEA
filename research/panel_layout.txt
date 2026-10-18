@@ -13,15 +13,15 @@ A)  all three timeframes active
   |   M30  Intraday        Trend: Going down   Regime: Choppy                                          |
   |                        Signal: SELL        Score: -2 / 3                                           |
   | -------------------------------------------------------------------------------------------------- |
-  |   M5   market -3/3     Entry:  4285.70          Lot:     0.23                                      |
-  |                        Stop:   4286.04 34pts    Target:  4285.03 67pts                             |
-  |                        Risk:   7.82 USD         Reward:  15.41 USD        Valid:  3 bars -> 14:30  |
+  |   M5   market -3/3     Entry:  4285.70          Lot:     0.28                                      |
+  |                        Stop:   4285.98 28pts    Target:  4285.45 25pts    Reach:  ~1 bar           |
+  |                        Risk:   7.84 USD         Reward:  7.00 USD         Valid:  3 bars -> 14:30  |
   |   M15  pending +2/3    Entry:  4285.27          Lot:     0.03                                      |
-  |                        Stop:   4284.25 102pts   Target:  4287.31 204pts                            |
-  |                        Risk:   3.06 USD         Reward:  6.12 USD         Valid:  3 bars -> 14:45  |
+  |                        Stop:   4284.25 102pts   Target:  4286.80 153pts   Reach:  ~3 bars          |
+  |                        Risk:   3.06 USD         Reward:  4.59 USD         Valid:  3 bars -> 14:45  |
   |   M30  pending -2/3    Entry:  4286.55          Lot:     0.01                                      |
-  |                        Stop:   4288.59 204pts   Target:  4282.47 408pts                            |
-  |                        Risk:   2.04 USD         Reward:  4.08 USD         Valid:  3 bars -> 15:00  |
+  |                        Stop:   4289.10 255pts   Target:  4281.45 510pts   Reach:  ~9 bars          |
+  |                        Risk:   2.55 USD         Reward:  5.10 USD         Valid:  3 bars -> 15:00  |
   +--------------------------------------------------------------------------------------------------+
   panel: 657 x 356 px   (one character = 6.6 px)
 
@@ -38,9 +38,9 @@ B)  the common case: one active, two HOLD (one line each)
   |   M30  Intraday        Trend: Sideways     Regime: Choppy                                        |
   |                        Signal: HOLD        Score: +0 / 3                                         |
   | ------------------------------------------------------------------------------------------------ |
-  |   M5   market -3/3     Entry:  4285.70         Lot:     0.23                                     |
-  |                        Stop:   4286.04 34pts   Target:  4285.03 67pts                            |
-  |                        Risk:   7.82 USD        Reward:  15.41 USD       Valid:  3 bars -> 14:30  |
+  |   M5   market -3/3     Entry:  4285.70         Lot:     0.28                                     |
+  |                        Stop:   4285.98 28pts   Target:  4285.45 25pts   Reach:  ~1 bar           |
+  |                        Risk:   7.84 USD        Reward:  7.00 USD        Valid:  3 bars -> 14:30  |
   |   M15  HOLD            nothing to place                                                          |
   |   M30  HOLD            nothing to place                                                          |
   +------------------------------------------------------------------------------------------------+
@@ -78,9 +78,9 @@ D)  M15 still downloading history
   |   M30  Intraday        Trend: Sideways     Regime: Mixed                                         |
   |                        Signal: HOLD        Score: +0 / 3                                         |
   | ------------------------------------------------------------------------------------------------ |
-  |   M5   market -3/3     Entry:  4285.70         Lot:     0.23                                     |
-  |                        Stop:   4286.04 34pts   Target:  4285.03 67pts                            |
-  |                        Risk:   7.82 USD        Reward:  15.41 USD       Valid:  3 bars -> 14:30  |
+  |   M5   market -3/3     Entry:  4285.70         Lot:     0.28                                     |
+  |                        Stop:   4285.98 28pts   Target:  4285.45 25pts   Reach:  ~1 bar           |
+  |                        Risk:   7.84 USD        Reward:  7.00 USD        Valid:  3 bars -> 14:30  |
   |   M15  waiting         history still loading                                                     |
   |   M30  HOLD            nothing to place                                                          |
   +------------------------------------------------------------------------------------------------+
@@ -99,9 +99,9 @@ E)  a $200 account where the minimum lot risks more than 1% (flagged)
   |   M30  Intraday        Trend: Sideways     Regime: Mixed                                         |
   |                        Signal: HOLD        Score: +0 / 3                                         |
   | ------------------------------------------------------------------------------------------------ |
-  |   M5   market -3/3     Entry:  4285.70         Lot:     0.05                                     |
-  |                        Stop:   4286.04 34pts   Target:  4285.03 67pts                            |
-  |                        Risk:   1.70 USD        Reward:  3.35 USD        Valid:  3 bars -> 14:30  |
+  |   M5   market -3/3     Entry:  4285.70         Lot:     0.07                                     |
+  |                        Stop:   4285.98 28pts   Target:  4285.45 25pts   Reach:  ~1 bar           |
+  |                        Risk:   1.96 USD        Reward:  1.75 USD        Valid:  3 bars -> 14:30  |
   |   M15  HOLD            nothing to place                                                          |
   |   M30  HOLD            nothing to place                                                          |
   +------------------------------------------------------------------------------------------------+
@@ -121,11 +121,11 @@ F)  a big balance and a wide stop: do long numbers break the layout?
   |                        Signal: HOLD        Score: +0 / 3                                           |
   | -------------------------------------------------------------------------------------------------- |
   |   M5   market -3/3     Entry:  4285.70          Lot:     100.00                                    |
-  |                        Stop:   4286.04 34pts    Target:  4285.03 67pts                             |
-  |                        Risk:   3400.00 USD      Reward:  6700.00 USD      Valid:  3 bars -> 14:30  |
+  |                        Stop:   4285.98 28pts    Target:  4285.45 25pts    Reach:  ~1 bar           |
+  |                        Risk:   2800.00 USD      Reward:  2500.00 USD      Valid:  3 bars -> 14:30  |
   |   M15  market +3/3     Entry:  4285.70          Lot:     100.00                                    |
-  |                        Stop:   4284.68 102pts   Target:  4287.74 204pts                            |
-  |                        Risk:   10200.00 USD     Reward:  20400.00 USD     Valid:  3 bars -> 14:45  |
+  |                        Stop:   4284.68 102pts   Target:  4287.23 153pts   Reach:  ~3 bars          |
+  |                        Risk:   10200.00 USD     Reward:  15300.00 USD     Valid:  3 bars -> 14:45  |
   |   M30  HOLD            nothing to place                                                            |
   +--------------------------------------------------------------------------------------------------+
   panel: 657 x 316 px   (one character = 6.6 px)
@@ -133,23 +133,23 @@ F)  a big balance and a wide stop: do long numbers break the layout?
 ================================================================================================
 G)  min-lot mode on EURUSD
 ================================================================================================
-  +-------------------------------------------------------------------------------------------------+
-  |   SimpleEA  | Autotrading :  On                                                  |  EURUSD  |  M5 |
-  | ------------------------------------------------------------------------------------------------- |
-  |   M5   Scalp           Trend: Going up     Regime: Steady                                         |
-  |                        Signal: BUY         Score: +3 / 3                                          |
-  |   M15  Short-term      Trend: Sideways     Regime: Mixed                                          |
-  |                        Signal: HOLD        Score: +0 / 3                                          |
-  |   M30  Intraday        Trend: Sideways     Regime: Mixed                                          |
-  |                        Signal: HOLD        Score: +0 / 3                                          |
-  | ------------------------------------------------------------------------------------------------- |
-  |   M5   market +3/3     Entry:  1.08542         Lot:     0.01 (min)                                |
-  |                        Stop:   1.08476 66pts   Target:  1.08674 132pts                            |
-  |                        Risk:   0.66 USD        Reward:  1.32 USD         Valid:  3 bars -> 14:30  |
-  |   M15  HOLD            nothing to place                                                           |
-  |   M30  HOLD            nothing to place                                                           |
-  +-------------------------------------------------------------------------------------------------+
-  panel: 650 x 276 px   (one character = 6.6 px)
+  +------------------------------------------------------------------------------------------------+
+  |   SimpleEA  | Autotrading :  On                                                 |  EURUSD  |  M5 |
+  | ------------------------------------------------------------------------------------------------ |
+  |   M5   Scalp           Trend: Going up     Regime: Steady                                        |
+  |                        Signal: BUY         Score: +3 / 3                                         |
+  |   M15  Short-term      Trend: Sideways     Regime: Mixed                                         |
+  |                        Signal: HOLD        Score: +0 / 3                                         |
+  |   M30  Intraday        Trend: Sideways     Regime: Mixed                                         |
+  |                        Signal: HOLD        Score: +0 / 3                                         |
+  | ------------------------------------------------------------------------------------------------ |
+  |   M5   market +3/3     Entry:  1.08542         Lot:     0.01 (min)                               |
+  |                        Stop:   1.08487 55pts   Target:  1.08591 49pts   Reach:  ~1 bar           |
+  |                        Risk:   0.55 USD        Reward:  0.49 USD        Valid:  3 bars -> 14:30  |
+  |   M15  HOLD            nothing to place                                                          |
+  |   M30  HOLD            nothing to place                                                          |
+  +------------------------------------------------------------------------------------------------+
+  panel: 643 x 276 px   (one character = 6.6 px)
 
 ================================================================================================
 H)  InpShowPlan = false: Group 2 is not drawn at all

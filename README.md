@@ -200,24 +200,24 @@ per timeframe**. Same two-column style as the group above it, and no heading lin
 this: when autotrading arrives, the executor reads one row and acts on that timeframe.
 
 ```
- ┌──────────────────────────────────────────────────────────────────────────────┐
- │  SimpleEA  | Autotrading : On                               |  XAUUSD  |  M5 │
- ├──────────────────────────────────────────────────────────────────────────────┤
- │  M5   Scalp        Trend: Going down      Regime: Steady                     │
- │                    Signal: SELL           Score: -3 / 3                      │
- │  M15  Short-term   Trend: Going up        Regime: Mixed                      │
- │                    Signal: BUY            Score: +2 / 3                      │
- │  M30  Intraday     Trend: Going down      Regime: Choppy                     │
- │                    Signal: SELL           Score: -2 / 3                      │
- ├──────────────────────────────────────────────────────────────────────────────┤
- │  M5   market -3/3   Entry:  4285.70        Lot:     0.23                     │
- │                     Stop:   4286.04 34pts  Target:  4285.03 67pts            │
- │                     Risk:   7.82 USD       Reward:  15.41 USD  Valid: 3 bars │
- │  M15  pending +2/3  Entry:  4285.27        Lot:     0.03                     │
- │                     Stop:   4284.25 102pts Target:  4287.31 204pts           │
- │                     Risk:   3.06 USD       Reward:  6.12 USD   Valid: 3 bars │
- │  M30  HOLD          nothing to place                                         │
- └──────────────────────────────────────────────────────────────────────────────┘
+ ┌────────────────────────────────────────────────────────────────────────────────────┐
+ │  SimpleEA  | Autotrading : On                                     |  XAUUSD  |  M5 │
+ ├────────────────────────────────────────────────────────────────────────────────────┤
+ │  M5   Scalp        Trend: Going down      Regime: Steady                           │
+ │                    Signal: SELL           Score: -3 / 3                            │
+ │  M15  Short-term   Trend: Going up        Regime: Mixed                            │
+ │                    Signal: BUY            Score: +2 / 3                            │
+ │  M30  Intraday     Trend: Going down      Regime: Choppy                           │
+ │                    Signal: SELL           Score: -2 / 3                            │
+ ├────────────────────────────────────────────────────────────────────────────────────┤
+ │  M5   market -3/3   Entry:  4285.70        Lot:     0.28                           │
+ │                     Stop:   4285.98 28pts  Target:  4285.45 25pts   Reach: ~1 bar  │
+ │                     Risk:   7.84 USD       Reward:  7.00 USD        Valid: 3 bars  │
+ │  M15  pending +2/3  Entry:  4285.27        Lot:     0.03                           │
+ │                     Stop:   4284.25 102pts Target:  4286.80 153pts  Reach: ~3 bars │
+ │                     Risk:   3.06 USD       Reward:  4.59 USD        Valid: 3 bars  │
+ │  M30  HOLD          nothing to place                                               │
+ └────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **A HOLD or waiting timeframe takes a single line**, so the group is only as tall as it has
@@ -238,7 +238,8 @@ sizes 6–16 and prints the answer at the end of its run.
 | **2. Lot size** | `Lot:` — from balance, score and that timeframe's own stop distance, snapped to your broker's lot step and clamped to its minimum and maximum. |
 | **3. Take profit** | `Target:` — price **and points**, with the same amount in account currency on the `Reward:` cell. |
 | **4. Stop loss** | `Stop:` — price **and points**, with the money on the `Risk:` cell. Widened automatically (and marked `(min)`) if your broker demands a minimum stop distance. |
-| **5. Validity** | `Valid:` — `InpValidBars` bars from the close of that timeframe's signal bar (default 3 = the measured median, see below). |
+| **5. Reach** | `Reach:` — a rough bar count for how long the target may take (the target's own distance in ATR units, squared — a typical random walk, not a forecast). This is what makes scalp / short-term / intraday visibly different in **time**, not only in points. |
+| **6. Validity** | `Valid:` — `InpValidBars` bars from the close of that timeframe's signal bar (default 3 = the measured median, see below). |
 
 **Three sizing modes** (`InpUseRisk` / `InpUseMinLot`):
 
@@ -267,7 +268,9 @@ New inputs, all under *Trade plan*:
 | `InpBalPer001` | 1000 | Risk-off mode: balance per 0.01 lot |
 | `InpScore3Factor` | 1.5 | Risk-off mode: multiplier at score 3 |
 | `InpATRPeriod` | 14 | ATR period, closed bars, each timeframe's own |
-| `InpSLATR` / `InpTPATR` | 1.2 / 2.4 | Stop and target, in ATR |
+| `InpSLATR_M5` / `InpTPATR_M5` | 1.0 / 0.9 | **M5 scalp:** stop and target in ATR — aims near and quick (R:R ≈ 1:0.9) |
+| `InpSLATR_M15` / `InpTPATR_M15` | 1.2 / 1.8 | **M15 short-term:** stop and target in ATR (R:R 1:1.5) |
+| `InpSLATR_M30` / `InpTPATR_M30` | 1.5 / 3.0 | **M30 intraday:** stop and target in ATR — aims far and lets the move run (R:R 1:2) |
 | `InpPendATR` | 0.5 | How far the pending entry sits from the market |
 | `InpValidBars` | 3 | How many bars the reading is worth acting on |
 
@@ -345,15 +348,15 @@ trade or pending order is open:
  ┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
  │  Autotrading   | Trailstop : On  | Stoploss : On                                                 |  XAUUSD  │
  ├─────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
- │  M5  | OPEN SELL      Lot @    0.07                        Entry:     4285.70                  Ask: 4285.32 │
- │                       TP1:     4285.32 (2.66 USD) [HIT]    TP2:       4285.20 (3.50 USD)                    │
- │                       TP3:     4285.03 (4.69 USD)          SL:        4285.70 (0.00 USD) [BE]               │
- │                       Status:  P/L +2.66 USD               Distance:  to TP2 50 pts                         │
+ │  M5  | OPEN SELL      Lot @    0.09                        Entry:     4285.70                  Ask: 4285.56 │
+ │                       TP1:     4285.56 (1.26 USD) [HIT]    TP2:       4285.51 (1.71 USD)                    │
+ │                       TP3:     4285.45 (2.25 USD)          SL:        4285.70 (0.00 USD) [BE]               │
+ │                       Status:  P/L +1.26 USD               Distance:  to TP2 19 pts                         │
  ├─────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
- │  M30 | BUY LIMIT      Lot @    0.01                        Entry:     4284.85                  Ask: 4285.32 │
- │                       TP1:     4287.15 (2.30 USD)          TP2:       4287.91 (3.06 USD)                    │
- │                       TP3:     4288.93 (4.08 USD)          SL:        4282.81 (2.04 USD)                    │
- │                       Waiting: distance 47 pts             Distance:  to TP1 230 pts                        │
+ │  M30 | BUY LIMIT      Lot @    0.01                        Entry:     4284.85                  Ask: 4285.56 │
+ │                       TP1:     4287.72 (2.87 USD)          TP2:       4288.68 (3.83 USD)                    │
+ │                       TP3:     4289.95 (5.10 USD)          SL:        4282.30 (2.55 USD)                    │
+ │                       Waiting: distance 71 pts             Distance:  to TP1 287 pts                        │
  └─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 

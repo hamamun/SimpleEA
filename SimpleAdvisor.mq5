@@ -69,9 +69,9 @@
 //|  SECOND GROUP with one block per timeframe - M5, M15, M30 - in the  |
 //|  same two-column style as the first: where to enter (market or      |
 //|  pending, decided by the score), the lot size, the stop and the     |
-//|  target in price, points and account currency, and how many bars    |
-//|  the reading is worth acting on.  A HOLD or waiting timeframe takes |
-//|  a single line, so the group is only as tall as it has content for. |
+//|  target (price, points, money and a rough bar count), and how many  |
+//|  bars the reading is worth acting on. A HOLD or waiting timeframe   |
+//|  takes a single line, so the group is only as tall as its content.  |
 //|                                                                  |
 //|  Nothing is calculated at all while the chart is on a wrong       |
 //|  timeframe, so no stale or out-of-context number can be read off  |
@@ -177,8 +177,15 @@ input double   InpRiskScore3   = 1.0;        // Risk % when score is 3 (risk mod
 input double   InpBalPer001    = 1000.0;     // Risk-off mode: balance per 0.01 lot
 input double   InpScore3Factor = 1.5;        // Risk-off mode: lot multiplier at score 3
 input int      InpATRPeriod    = 14;         // ATR period (closed bars, chart timeframe)
-input double   InpSLATR        = 1.2;        // Stop loss   = this many ATR
-input double   InpTPATR        = 2.4;        // Take profit = this many ATR
+//  Stop and target are set PER TIMEFRAME, so the three styles are told
+//  apart by their aim: a scalp aims near and quick, an intraday trade
+//  aims far and lets the move run.  R:R = target / stop (0.9 / 1.5 / 2.0).
+input double   InpSLATR_M5     = 1.0;        // M5 scalp:       stop   = this many ATR
+input double   InpTPATR_M5     = 0.9;        // M5 scalp:       target = this many ATR (R:R 1:0.9)
+input double   InpSLATR_M15    = 1.2;        // M15 short-term: stop   = this many ATR
+input double   InpTPATR_M15    = 1.8;        // M15 short-term: target = this many ATR (R:R 1:1.5)
+input double   InpSLATR_M30    = 1.5;        // M30 intraday:   stop   = this many ATR
+input double   InpTPATR_M30    = 3.0;        // M30 intraday:   target = this many ATR (R:R 1:2.0)
 input double   InpPendATR      = 0.5;        // Pending entry offset = this many ATR
 input int      InpValidBars    = 3;          // Signal validity in bars (see research/HORIZON.md)
 
@@ -248,6 +255,8 @@ struct SRow
    int            l2;         // trend filter short period
    double         hTrend;     // Hurst persistent threshold
    double         hRevert;    // Hurst anti-persistent threshold
+   double         slAtr;      // stop loss   = this many ATR (per timeframe)
+   double         tpAtr;      // take profit = this many ATR (per timeframe)
    // ---- refreshed every evaluation ----
    int            score;      // -3 .. +3
    int            direction;  // +1 buy, -1 sell, 0 hold
@@ -270,7 +279,8 @@ ENUM_TIMEFRAMES g_drawnTf = (ENUM_TIMEFRAMES)0;  // timeframe the header was dra
 //  SETUP
 //==================================================================
 void ConfigureRow(int i, ENUM_TIMEFRAMES tf, string tag, string style,
-                  int l1, int l2, double hTrend, double hRevert)
+                  int l1, int l2, double hTrend, double hRevert,
+                  double slAtr, double tpAtr)
 {
    g_rows[i].tf      = tf;
    g_rows[i].tag     = tag;
@@ -279,6 +289,8 @@ void ConfigureRow(int i, ENUM_TIMEFRAMES tf, string tag, string style,
    g_rows[i].l2      = l2;
    g_rows[i].hTrend  = hTrend;
    g_rows[i].hRevert = hRevert;
+   g_rows[i].slAtr   = slAtr;
+   g_rows[i].tpAtr   = tpAtr;
    g_rows[i].score      = 0;
    g_rows[i].direction  = 0;
    g_rows[i].hurst      = 0.5;
@@ -291,11 +303,11 @@ void ConfigureRow(int i, ENUM_TIMEFRAMES tf, string tag, string style,
 int OnInit()
 {
    ConfigureRow(0, PERIOD_M5,  "M5",  "Scalp",      InpL1_M5,  InpL2_M5,
-                InpHurstTrendM5,  InpHurstRevertM5);
+                InpHurstTrendM5,  InpHurstRevertM5,  InpSLATR_M5,  InpTPATR_M5);
    ConfigureRow(1, PERIOD_M15, "M15", "Short-term", InpL1_M15, InpL2_M15,
-                InpHurstTrendM15, InpHurstRevertM15);
+                InpHurstTrendM15, InpHurstRevertM15, InpSLATR_M15, InpTPATR_M15);
    ConfigureRow(2, PERIOD_M30, "M30", "Intraday",   InpL1_M30, InpL2_M30,
-                InpHurstTrendM30, InpHurstRevertM30);
+                InpHurstTrendM30, InpHurstRevertM30, InpSLATR_M30, InpTPATR_M30);
 
    if(InpL1_M5 < InpL2_M5 || InpL1_M15 < InpL2_M15 || InpL1_M30 < InpL2_M30)
    {
@@ -742,7 +754,8 @@ void EvaluateRow(int idx)
 //  The five questions it answers, per signal:
 //     1. WHERE  - market entry, or a pending order if the score is only 2
 //     2. HOW MUCH - lot size, from balance and score
-//     3. TARGET - take profit in points and in account currency
+//     3. TARGET - take profit in points and money, plus a rough bar
+//                  count for how long reaching it may take
 //     4. STOP   - stop loss   in points and in account currency
 //     5. UNTIL  - how long the reading is worth acting on
 //
@@ -965,8 +978,10 @@ void UpdatePlanRow(int i)
    double planEntry  = market ? entry : pend;
 
    // ---- stop and target, snapped onto the broker's point grid ------
-   int slPts = (int)MathMax(1.0, MathRound(InpSLATR * atr / point));
-   int tpPts = (int)MathMax(1.0, MathRound(InpTPATR * atr / point));
+   //  Each timeframe carries its own ATR multiples (scalp aims near,
+   //  intraday aims far), so the three plans are told apart by style.
+   int slPts = (int)MathMax(1.0, MathRound(g_rows[i].slAtr * atr / point));
+   int tpPts = (int)MathMax(1.0, MathRound(g_rows[i].tpAtr * atr / point));
 
    double minStop = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
    bool   widened = false;
@@ -1078,6 +1093,17 @@ void UpdatePlanRow(int i)
    g_plans[i].lbl[1][1] = "Target:";
    g_plans[i].val[1][1] = StringFormat("%s %dpts", DoubleToString(tpPrice, dg), dispTpPts);
    g_plans[i].clr[1][1] = InpBuyColor;
+
+   // ---- roughly how long the target may take -----------------------
+   //  A driftless walk covers ~1 ATR per sqrt(bar) of bars, so the
+   //  target's own distance says how many bars it typically needs:
+   //  bars ~ (target / ATR)^2.  A rough guide printed with a "~", not
+   //  a forecast - it is what makes scalp / short-term / intraday
+   //  visibly different in TIME, not only in points.
+   int etaBars = (int)MathMax(1.0, MathRound(MathPow((double)dispTpPts * point / atr, 2.0)));
+   g_plans[i].lbl[1][2] = "Reach:";
+   g_plans[i].val[1][2] = StringFormat("~%d bar%s", etaBars, (etaBars == 1) ? "" : "s");
+   g_plans[i].clr[1][2] = clrSilver;
 
    g_plans[i].lbl[2][0] = "Risk:";
    g_plans[i].val[2][0] = StringFormat("%s %s", DoubleToString(riskUSD, 2), cur);
@@ -2771,9 +2797,9 @@ int PlanWidthNeed()
 //  first group by a single line.  There is no heading line - the
 //  timeframe tag at the start of each block says what it is.
 //
-//    M5   market -3/3   Entry: 4285.70        Lot: 0.23
-//                       Stop: 4286.04 34pts   Target: 4285.03 67pts
-//                       Risk: 7.82 USD        Reward: 15.41 USD   Valid: 3 bars -> 14:30
+//    M5   market -3/3   Entry: 4285.70        Lot: 0.28
+//                       Stop: 4285.98 28pts   Target: 4285.45 25pts  Reach: ~1 bar
+//                       Risk: 7.84 USD        Reward: 7.00 USD   Valid: 3 bars -> 14:30
 //    M15  HOLD          nothing to place
 //
 //+------------------------------------------------------------------+

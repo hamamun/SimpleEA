@@ -37,6 +37,23 @@ CELL = RENDER_CW                      # the picture is one character per glyph
 MINUTES = {"M5": 5, "M15": 15, "M30": 30}
 HOLD, WAITING, ACTIVE = 0, 1, 2
 
+#  InpSLATR_* / InpTPATR_* in the EA: stop and target are set PER
+#  TIMEFRAME, so the three styles aim apart - a scalp aims near and
+#  quick, an intraday trade aims far and lets the move run.
+SL_ATR = {"M5": 1.0, "M15": 1.2, "M30": 1.5}
+TP_ATR = {"M5": 0.9, "M15": 1.8, "M30": 3.0}
+
+
+def per_tf(value, default):
+    """Resolve per-timeframe multipliers: None = the EA's shipped
+    defaults, a number = the same value for every timeframe, a dict =
+    one value per timeframe."""
+    if value is None:
+        return dict(default)
+    if isinstance(value, (int, float)):
+        return {t: value for t in default}
+    return dict(value)
+
 
 def char_w(size=FONT, dpi=DPI):
     """CharW() in the EA: points -> pixels at the real screen DPI."""
@@ -52,14 +69,15 @@ class Panel:
 
     def __init__(self, symbol, spec, balance, tags=("M5", "M15", "M30"),
                  cur="USD", use_risk=True, use_min_lot=False, risk2=0.5, risk3=1.0,
-                 sl_atr=1.2, tp_atr=2.4, pend_atr=0.5, valid_bars=3, show_plan=True,
+                 sl_atr=None, tp_atr=None, pend_atr=0.5, valid_bars=3, show_plan=True,
                  atr=None):
         self.symbol, self.spec, self.balance, self.cur = symbol, spec, balance, cur
         self.tags = tags
         self.use_risk, self.use_min_lot = use_risk, use_min_lot
         self.risk2, self.risk3 = risk2, risk3
-        self.sl_atr, self.tp_atr, self.pend_atr = sl_atr, tp_atr, pend_atr
-        self.valid_bars, self.show_plan = valid_bars, show_plan
+        self.sl_atr = per_tf(sl_atr, SL_ATR)
+        self.tp_atr = per_tf(tp_atr, TP_ATR)
+        self.pend_atr, self.valid_bars, self.show_plan = pend_atr, valid_bars, show_plan
         self.panel_w = 406
         self.panel_h = 130
         # g_rows: tag -> (ok, direction, score, trend, regime)
@@ -105,13 +123,15 @@ class Panel:
         plan_entry = entry if market else pend
 
         # stop / target snapped to the point grid, widened to the broker minimum
-        sl_pts = max(1, int(round(self.sl_atr * atr / point)))
-        tp_pts = max(1, int(round(self.tp_atr * atr / point)))
+        sl_pts = max(1, int(round(self.sl_atr[tag] * atr / point)))
+        tp_pts = max(1, int(round(self.tp_atr[tag] * atr / point)))
         min_stop = spec["stops_level"] * point
         widened = False
         if min_stop > 0 and sl_pts * point < min_stop:
             sl_pts = int(math.ceil(min_stop / point))
             widened = True
+        if min_stop > 0 and tp_pts * point < min_stop:
+            tp_pts = int(math.ceil(min_stop / point))
         sl_price = plan_entry - dir_ * sl_pts * point
         tp_price = plan_entry + dir_ * tp_pts * point
 
@@ -163,6 +183,12 @@ class Panel:
         p["lbl"][(1, 1)] = "Target:"
         p["val"][(1, 1)] = "%.*f %dpts" % (dg, tp_price, tp_pts)
         p["clr"][(1, 1)] = "buy"
+        #  Reach: the rough bar count behind the target - the same
+        #  diffusive guide the EA prints, bars ~ (target / ATR)^2
+        eta = max(1, int(round((tp_pts * point / atr) ** 2)))
+        p["lbl"][(1, 2)] = "Reach:"
+        p["val"][(1, 2)] = "~%d bar%s" % (eta, "" if eta == 1 else "s")
+        p["clr"][(1, 2)] = "silver"
         p["lbl"][(2, 0)] = "Risk:"
         p["val"][(2, 0)] = "%.2f %s" % (risk_usd, self.cur)
         p["clr"][(2, 0)] = "sell"
