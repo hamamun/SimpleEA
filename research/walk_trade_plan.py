@@ -79,7 +79,8 @@ class Panel:
 
     def __init__(self, symbol, spec, balance, tags=("M5", "M15", "M30"),
                  cur="USD", use_risk=True, use_min_lot=False, risk2=0.5, risk3=1.0,
-                 sl_atr=None, tp_atr=None, pend_atr=0.5, valid_bars=3, show_plan=True,
+                 sl_atr=None, tp_atr=None, pend_atr=0.5, valid_bars=3,
+                 valid_bars_range=8, show_plan=True,
                  atr=None):
         self.symbol, self.spec, self.balance, self.cur = symbol, spec, balance, cur
         self.tags = tags
@@ -88,6 +89,7 @@ class Panel:
         self.sl_atr = per_tf(sl_atr, SL_ATR)
         self.tp_atr = per_tf(tp_atr, TP_ATR)
         self.pend_atr, self.valid_bars, self.show_plan = pend_atr, valid_bars, show_plan
+        self.valid_bars_range = valid_bars_range       # InpValidBarsRange in the EA
         self.panel_w = 406
         self.panel_h = 130
         # g_rows: tag -> the row fields UpdatePlanRow() reads
@@ -235,8 +237,9 @@ class Panel:
         p["lbl"][(2, 1)] = "Reward:"
         p["val"][(2, 1)] = "%.2f %s" % (reward_usd, self.cur)
         p["clr"][(2, 1)] = "buy"
+        vb = self.valid_bars_range if is_range else self.valid_bars
         p["lbl"][(2, 2)] = "Valid:"
-        p["val"][(2, 2)] = "%d bars -> %s" % (self.valid_bars, self.now[tag])
+        p["val"][(2, 2)] = "%d/%d bars" % (vb, vb)
         p["clr"][(2, 2)] = "silver"
 
     def update_plan(self):

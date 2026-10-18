@@ -66,6 +66,27 @@ SimpleEA: the H1 chart is not supported. This panel is calibrated for M5/M15/M30
 Switch the chart back to M5, M15 or M30 and the full panel returns immediately, recalculated
 from current data — whether or not MetaTrader restarts the EA for the change.
 
+**Market Closed** — the same collapse happens, on a supported chart, when the *symbol* cannot
+be traded: weekend, daily session break, or a symbol halt. The panel shrinks to the same
+two-line widget with a red `Market Closed` notice:
+
+```
+ ┌─────────────────────────────────────────────────────────────┐
+ │  SimpleEA                                      ETHUSDm  M30 │
+ ├─────────────────────────────────────────────────────────────┤
+ │  Market Closed                                              │
+ └─────────────────────────────────────────────────────────────┘
+```
+
+It is detected from four signals, cheapest first: the broker's own `SYMBOL_TRADE_MODE`
+(disabled / close-only), the symbol's quoted **trade sessions** against the server clock, a
+quote gone quiet for `InpClosedStaleMin` minutes while the server clock still runs, and — as
+the belt to those braces — the server itself answering `market closed` (retcode 10018) to an
+order, which latches the state for 15 minutes. While closed, nothing is calculated or traded:
+no history, no indicators, no orders — the auto-trader stands down and resumes on its own when
+the market opens. Both detectors can be turned off with `InpDetectClosed=false`, which restores
+the old behavior of showing the (stale) full panel through a close.
+
 To see the whole thing without opening MetaTrader, `research/walk_timeframes.py` attaches the EA,
 changes the chart timeframe through H1 → M15 → M1 → D1 → H4 → M30 and prints what is on the chart
 at every step. The rule itself is verified state by state in
@@ -90,7 +111,8 @@ leave on a live chart.
    onto an **M5, M15 or M30 chart** (any symbol works; those three timeframes are the ones the
    engine is calibrated for). On any other timeframe the panel deliberately shows only its header
    and the *Incompatible chart* notice — drop it on an H1 chart and that is exactly what you will
-   see.
+   see. On a supported chart with a closed market (weekend, daily break), the same widget shows
+   `Market Closed` instead.
 5. Colours, position, and font are all inputs under *Panel appearance*.
 
 > If a row shows `waiting ...`, the terminal has not finished downloading history for that
@@ -223,24 +245,24 @@ per timeframe**. Same two-column style as the group above it, and no heading lin
 this: when autotrading arrives, the executor reads one row and acts on that timeframe.
 
 ```
- ┌────────────────────────────────────────────────────────────────────────────────────┐
- │  SimpleEA  | Autotrading : On                                     |  XAUUSD  |  M5 │
- ├────────────────────────────────────────────────────────────────────────────────────┤
- │  M5   Scalp         Trend: Going down      Regime: Steady                          │
- │                     Signal: SELL           Score: -3 / 3                           │
- │  M15  Short-term    Trend: Sideways        Regime: Mixed                           │
- │                     Signal: BUY            Score: +2 / 3                           │
- │  M30  Intraday      Trend: Going down      Regime: Steady                          │
- │                     Signal: SELL           Score: -2 / 3                           │
- ├────────────────────────────────────────────────────────────────────────────────────┤
- │  M5   market -3/3   Entry:  4285.70        Lot:     0.28                           │
- │                     Stop:   4285.98 28pts  Target:  4285.45 25pts   Reach: ~1 bar  │
- │                     Risk:   7.84 USD       Reward:  7.00 USD        Valid: 3 bars  │
- │  M15  HOLD          mixed — no edge either way                                     │
- │  M30  pending -2/3  Entry:  4286.55        Lot:     0.01                           │
- │                     Stop:   4289.10 255pts Target:  4281.45 510pts  Reach: ~9 bars │
- │                     Risk:   2.55 USD       Reward:  5.10 USD        Valid: 3 bars  │
- └────────────────────────────────────────────────────────────────────────────────────┘
+ ┌──────────────────────────────────────────────────────────────────────────────────────┐
+ │  SimpleEA  | Autotrading : On                                     |  XAUUSD  |  M5   │
+ ├──────────────────────────────────────────────────────────────────────────────────────┤
+ │  M5   Scalp         Trend: Going down      Regime: Steady                            │
+ │                     Signal: SELL           Score: -3 / 3                             │
+ │  M15  Short-term    Trend: Sideways        Regime: Mixed                             │
+ │                     Signal: BUY            Score: +2 / 3                             │
+ │  M30  Intraday      Trend: Going down      Regime: Steady                            │
+ │                     Signal: SELL           Score: -2 / 3                             │
+ ├──────────────────────────────────────────────────────────────────────────────────────┤
+ │  M5   market -3/3   Entry:  4285.70        Lot:     0.28                             │
+ │                     Stop:   4285.98 28pts  Target:  4285.45 25pts   Reach: ~1 bar    │
+ │                     Risk:   7.84 USD       Reward:  7.00 USD        Valid: 3/3 bars  │
+ │  M15  HOLD          mixed — no edge either way                                       │
+ │  M30  pending -2/3  Entry:  4286.55        Lot:     0.01                             │
+ │                     Stop:   4289.10 255pts Target:  4281.45 510pts  Reach: ~9 bars   │
+ │                     Risk:   2.55 USD       Reward:  5.10 USD        Valid: 3/3 bars  │
+ └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Two Part 2 readings are visible at once: M15's Mixed regime **blocks** its `+2 / 3` score —
@@ -250,11 +272,11 @@ takes the range game instead, the block carries the box's own numbers — entry 
 band, stop = band + 1 ATR, target = half the box (the midpoint):
 
 ```
- ┌────────────────────────────────────────────────────────────────────────────────────┐
- │  M5   range fade    Entry:  4286.60        Lot:     0.14                           │
- │                     Stop:   4286.88 28pts  Target:  4285.60 100pts  Reach: ~13 bars│
- │                     Risk:   3.92 USD       Reward:  14.00 USD       Valid: 3 bars  │
- └────────────────────────────────────────────────────────────────────────────────────┘
+ ┌──────────────────────────────────────────────────────────────────────────────────────┐
+ │  M5   range fade    Entry:  4286.60        Lot:     0.14                             │
+ │                     Stop:   4286.88 28pts  Target:  4285.60 100pts  Reach: ~13 bars  │
+ │                     Risk:   3.92 USD       Reward:  14.00 USD       Valid: 8/8 bars  │
+ └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **A HOLD or waiting timeframe takes a single line**, so the group is only as tall as it has
@@ -276,7 +298,7 @@ sizes 6–16 and prints the answer at the end of its run.
 | **3. Take profit** | `Target:` — price **and points**, with the same amount in account currency on the `Reward:` cell. |
 | **4. Stop loss** | `Stop:` — price **and points**, with the money on the `Risk:` cell. Widened automatically (and marked `(min)`) if your broker demands a minimum stop distance. |
 | **5. Reach** | `Reach:` — a rough bar count for how long the target may take (the target's own distance in ATR units, squared — a typical random walk, not a forecast). This is what makes scalp / short-term / intraday visibly different in **time**, not only in points. |
-| **6. Validity** | `Valid:` — `InpValidBars` bars from the close of that timeframe's signal bar (default 3 = the measured median, see below). |
+| **6. Validity** | `Valid:` — `InpValidBars` bars from the close of that timeframe's signal bar (default 3 = the measured median, see below), shown as a live countdown `left/total bars`. A waiting pending order counts down from the bar it was placed on; **range fades use `InpValidBarsRange`** (default 8) instead — the box-kill is their real invalidation, so a longer leash only removes the cancel/re-place churn while the box holds. |
 
 **Three sizing modes** (`InpUseRisk` / `InpUseMinLot`):
 
@@ -309,7 +331,10 @@ New inputs, all under *Trade plan*:
 | `InpSLATR_M15` / `InpTPATR_M15` | 1.2 / 1.8 | **M15 short-term:** stop and target in ATR (R:R 1:1.5) |
 | `InpSLATR_M30` / `InpTPATR_M30` | 1.5 / 3.0 | **M30 intraday:** stop and target in ATR — aims far and lets the move run (R:R 1:2) |
 | `InpPendATR` | 0.5 | How far the pending entry sits from the market |
-| `InpValidBars` | 3 | How many bars the reading is worth acting on |
+| `InpValidBars` | 3 | How many bars a **trend** reading is worth acting on |
+| `InpValidBarsRange` | 8 | Validity of **range fades** in bars — the box-kill already guards them, they just live longer than trend pendings |
+| `InpDetectClosed` | true | Collapse the panel to `Market Closed` (and stop trading) while the symbol is not trading |
+| `InpClosedStaleMin` | 30 | Quote-age in minutes that also counts as closed (0 = off) |
 
 Everything is read from your broker's own contract data (tick value, tick size, lot step,
 minimum/maximum lot, minimum stop distance, account balance and currency), so the block is correct
@@ -374,7 +399,8 @@ read-only mode):
    - **Pending Limit Order:** On each new closed candle in the same direction (`2/3`), updates
      `Entry`, `SL`, and `TP1 / TP2 / TP3` to the new plan. If the score upgrades from `2/3` to
      `3/3` in the same direction, deletes the waiting pending order and opens the **Market order**
-     immediately. Cancels if the direction changes, drops to `HOLD`, or reaches `InpValidBars` expiry.
+     immediately. Cancels if the direction changes, drops to `HOLD`, or reaches its validity
+     expiry — `InpValidBars` closed bars for trend orders, `InpValidBarsRange` for range fades.
 7. **Range fades (Part 2 — Choppy rows):**
    - The order is **always a Pending Limit at the opposite band** of the box (never a market
      order — the score has no say in the entry), with `Stop = band + InpRangeSLATR × ATR` and
