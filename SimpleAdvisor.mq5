@@ -194,7 +194,7 @@ input double   InpTPATR_M15    = 1.8;        // M15 short-term: target = this ma
 input double   InpSLATR_M30    = 1.5;        // M30 intraday:   stop   = this many ATR
 input double   InpTPATR_M30    = 3.0;        // M30 intraday:   target = this many ATR (R:R 1:2.0)
 input double   InpPendATR      = 0.5;        // Pending entry offset = this many ATR
-input int      InpValidBars    = 3;          // Signal validity in bars (see research/HORIZON.md)
+input int      InpValidBars    = 3;          // Trend signal validity in bars (see research/HORIZON.md)
 
 input group "=== Shared engine settings ==="
 input int      InpHurstWindow = 256;         // Hurst estimate window (bars)
@@ -214,6 +214,15 @@ input double   InpRangeMinATR  = 2.0;        // Box must be at least this many A
 input double   InpRangeSpreadX = 3.0;        // Half-box target must be >= this many spreads
 input double   InpRangeERMax   = 0.40;       // Efficiency above this => a trend, not a box
 input double   InpRangeSLATR   = 1.0;        // Range stop = band + this many ATR
+input int      InpValidBarsRange = 8;        // Range fade validity in bars (the box-kill is its real guard)
+
+input group "=== Market closed detection ==="
+//  While the symbol cannot be traded (weekend, daily break, symbol halt)
+//  the panel collapses to the same two-line widget the unsupported chart
+//  uses - header plus a red "Market Closed" notice - and the auto-trader
+//  stands down until the market opens again.
+input bool     InpDetectClosed   = true;     // Detect a closed market, collapse the panel to "Market Closed"
+input int      InpClosedStaleMin = 30;       // Also closed: no quote for this many minutes (0 = off)
 
 input group "=== M5 engine (scalping) ==="
 input int      InpL1_M5          = 150;      // Trend filter long period
@@ -298,6 +307,7 @@ int  g_panelW  = 406;   // wide enough for the header + the notice line
 int  g_panelH  = 130;   // height of the full panel (recomputed in OnInit)
 int  g_rowH    = 20;
 bool g_panelOK = false; // what is currently drawn: false = notice only
+datetime g_srvSaidClosedUntil = 0;  // server said "market closed": trust it for a while
 
 ENUM_TIMEFRAMES g_drawnTf = (ENUM_TIMEFRAMES)0;  // timeframe the header was drawn for
 
@@ -373,6 +383,12 @@ int OnInit()
                   "for %s only - switch the chart timeframe to see it.",
                   ChartTimeframeText(), TF_TEXT);
    }
+   else if(MarketClosed())
+   {
+      PrintFormat("SimpleEA: %s is not trading at the moment - the panel shows "
+                  "Market Closed and the auto-trader stands down until it reopens.",
+                  _Symbol);
+   }
    else
    {
       EvaluateAll();
@@ -443,6 +459,22 @@ void CheckNewBars()
       {
          DrawPanel();
          ChartRedraw(0);
+      }
+      return;
+   }
+
+   //  The market itself is shut (weekend, daily break, symbol halt):
+   //  collapse to the "Market Closed" notice exactly like an unsupported
+   //  chart, and stand down until it reopens.  The flip is drawn once;
+   //  while closed this branch is one cheap check per timer tick - no
+   //  history, no indicators, no orders.
+   if(MarketClosed())
+   {
+      if(g_panelOK)
+      {
+         DrawPanel();
+         ChartRedraw(0);
+         Print("SimpleEA: ", _Symbol, " is closed - the panel shows Market Closed until it reopens.");
       }
       return;
    }
@@ -1178,10 +1210,18 @@ void UpdatePlanRow(int i)
                        riskUSD > wantRisk * 1.05);
 
    // ---- how long this reading is worth acting on -------------------
+   //  Trend readings live InpValidBars closed bars (the measured median
+   //  life, research/HORIZON.md).  Range fades get InpValidBarsRange:
+   //  the box is re-measured every bar and a close outside it already
+   //  kills both the pending and the position, so a longer leash costs
+   //  nothing - it only stops the cancel / re-place churn every 3 bars
+   //  and the one-bar gap at the band that churn leaves behind.
+   int vBars = (g_rows[i].mode == 2) ? MathMax(1, InpValidBarsRange)
+                                     : MathMax(1, InpValidBars);
    datetime until  = 0;
    datetime sigBar = LastClosedBarTime(_Symbol, g_rows[i].tf);
    if(sigBar > 0)
-      until = sigBar + (datetime)((InpValidBars + 1) * PeriodSeconds(g_rows[i].tf));
+      until = sigBar + (datetime)((vBars + 1) * PeriodSeconds(g_rows[i].tf));
 
    // ---- fill the cells ---------------------------------------------
    string cur  = AccountInfoString(ACCOUNT_CURRENCY);
@@ -1250,10 +1290,20 @@ void UpdatePlanRow(int i)
    g_plans[i].val[2][1] = StringFormat("%s %s", DoubleToString(rewardUSD, 2), cur);
    g_plans[i].clr[2][1] = InpBuyColor;
 
+   // ---- how much of that leash is left ------------------------------
+   //  A waiting pending order counts down from the bar it was placed on
+   //  - the same number the auto-trader expires it on.  Everything else
+   //  (fresh reading, open position) shows the full validity: for an
+   //  open trade the leash is irrelevant, its exits are SL/TP/the box.
+   int left  = vBars;
+   int tfSec = PeriodSeconds(g_rows[i].tf);
+   if(g_auto[i].active && !g_auto[i].isOpen && g_auto[i].placedBar > 0 &&
+      tfSec > 0 && g_rows[i].lastBar > g_auto[i].placedBar)
+      left = vBars - (int)((g_rows[i].lastBar - g_auto[i].placedBar) / tfSec);
+   left = (int)MathMax(0, MathMin(vBars, left));
+
    g_plans[i].lbl[2][2] = "Valid:";
-   g_plans[i].val[2][2] = (until > 0)
-      ? StringFormat("%d bars -> %s", InpValidBars, TimeToString(until, TIME_MINUTES))
-      : StringFormat("%d bars", InpValidBars);
+   g_plans[i].val[2][2] = StringFormat("%d/%d bars", left, vBars);
    g_plans[i].clr[2][2] = clrSilver;
 }
 
@@ -1420,6 +1470,7 @@ void InitAutoState()
 bool CanTradeNow()
 {
    if(!InpAutoTrading || !ChartSupported()) return(false);
+   if(MarketClosed())                       return(false);
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) return(false);
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))           return(false);
    if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))   return(false);
@@ -1633,7 +1684,9 @@ bool TradeOpenMarket(int i, int dir, double lot, double sl, double tp, ulong &ou
    req.comment      = "SimpleEA_" + g_rows[i].tag;
    req.type_filling = FillingMode();
 
-   if(!OrderSend(req, res)) return(false);
+   bool sent = OrderSend(req, res);
+   NoteMarketClosedRetcode(res.retcode);
+   if(!sent) return(false);
    if(res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_PLACED)
       return(false);
    outTicket = (res.order > 0) ? res.order : res.deal;
@@ -1662,7 +1715,9 @@ bool TradePlaceLimit(int i, int dir, double lot, double price, double sl, double
    req.type_filling = FillingMode();
    req.type_time    = ORDER_TIME_GTC;
 
-   if(!OrderSend(req, res)) return(false);
+   bool sent = OrderSend(req, res);
+   NoteMarketClosedRetcode(res.retcode);
+   if(!sent) return(false);
    if(res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_PLACED)
       return(false);
    outTicket = res.order;
@@ -1700,6 +1755,7 @@ bool TradeModifyPosition(ulong posTicket, double newSL, double newTP)
 
    if(!OrderSend(req, res))
    {
+      NoteMarketClosedRetcode(res.retcode);
       if(res.retcode == TRADE_RETCODE_NO_CHANGES) return(true);
       int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
       PrintFormat("SimpleEA: TradeModifyPosition(#%I64u) failed retcode=%u sl=%.*f tp=%.*f",
@@ -1734,7 +1790,9 @@ bool TradeClosePosition(ulong posTicket, int dir, double volume, long magic)
    req.magic        = magic;
    req.type_filling = FillingMode();
 
-   if(!OrderSend(req, res)) return(false);
+   bool sent = OrderSend(req, res);
+   NoteMarketClosedRetcode(res.retcode);
+   if(!sent) return(false);
    return(res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL);
 }
 
@@ -1784,6 +1842,7 @@ bool TradeModifyOrder(ulong ordTicket, double newPrice, double newSL, double new
 
    if(!OrderSend(req, res))
    {
+      NoteMarketClosedRetcode(res.retcode);
       if(res.retcode == TRADE_RETCODE_NO_CHANGES) return(true);
       int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
       PrintFormat("SimpleEA: TradeModifyOrder(#%I64u) failed retcode=%u price=%.*f sl=%.*f tp=%.*f",
@@ -1806,7 +1865,9 @@ bool TradeDeleteOrder(ulong ordTicket)
    req.action = TRADE_ACTION_REMOVE;
    req.order  = ordTicket;
 
-   if(!OrderSend(req, res)) return(false);
+   bool sent = OrderSend(req, res);
+   NoteMarketClosedRetcode(res.retcode);
+   if(!sent) return(false);
    return(res.retcode == TRADE_RETCODE_DONE);
 }
 
@@ -2186,9 +2247,17 @@ void ManageAutoBar()
       {
          int  dir     = g_auto[i].dir;
          int  tfSec   = PeriodSeconds(g_rows[i].tf);
+         //  Range fades live on InpValidBarsRange: the box-kill above
+         //  (a close outside the box) is their real invalidation, and
+         //  the pending is refreshed to the new plan on every closed
+         //  bar anyway.  Expiring them on the 3-bar trend leash only
+         //  produced a cancel -> one-bar gap at the band -> re-place
+         //  cycle while the thesis was intact.
+         int  vBars   = g_auto[i].isRange ? MathMax(1, InpValidBarsRange)
+                                          : MathMax(1, InpValidBars);
          bool expired = (g_auto[i].placedBar > 0 && tfSec > 0 &&
                          g_rows[i].lastBar > g_auto[i].placedBar &&
-                         ((int)((g_rows[i].lastBar - g_auto[i].placedBar) / tfSec) >= InpValidBars));
+                         ((int)((g_rows[i].lastBar - g_auto[i].placedBar) / tfSec) >= vBars));
 
          // 0) RANGE FADE: a closed bar outside the trade's box cancels the pending (Part 2)
          if(g_auto[i].isRange && g_rows[i].ok &&
@@ -2648,6 +2717,101 @@ bool ChartSupported()
    return(TIMEFRAME_OK((ENUM_TIMEFRAMES)Period()));
 }
 
+//+------------------------------------------------------------------+
+//  THE MARKET-CLOSED RULE
+//+------------------------------------------------------------------+
+//  True while this symbol cannot be traded right now.  Four signals,
+//  cheapest and most authoritative first:
+//    1. the broker's own switch: SYMBOL_TRADE_MODE disabled / close-only,
+//    2. the symbol's quoted trade sessions vs the server clock - the
+//       weekend and daily-break case, the whole reason this exists,
+//    3. a quote gone quiet while the server clock still runs (a symbol
+//       halted mid-week; a generous threshold so quiet markets do not
+//       trip it),
+//    4. the server itself rejecting an order with "market closed" -
+//       latched for a while, the belt to the session braces.
+//  With InpDetectClosed off this is always false and the panel behaves
+//  exactly as it did before.
+//+------------------------------------------------------------------+
+bool MarketClosed()
+{
+   if(!InpDetectClosed) return(false);
+
+   // ---- 1) the broker's own switch ---------------------------------
+   long mode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
+   if(mode == SYMBOL_TRADE_MODE_DISABLED || mode == SYMBOL_TRADE_MODE_CLOSEONLY)
+      return(true);
+
+   // ---- 2) the quoted trade sessions vs the server clock -----------
+   //  Session times are server-based, so the comparison uses the
+   //  estimated server time, not the local clock.  Whether the broker
+   //  publishes sessions at all is re-answered once per server day -
+   //  it cannot change intraday.
+   static int  scanDay = -1;      // server weekday of the last session scan
+   static int  anySess = -1;      // 0 = broker publishes none, 1 = publishes
+   MqlDateTime now;
+   TimeToStruct(TimeTradeServer(), now);
+   if(scanDay != now.day_of_week)
+   {
+      scanDay = now.day_of_week;
+      anySess = 0;
+      datetime sf, st;
+      for(int d = 0; d < 7 && anySess == 0; d++)
+      {
+         uint k = 0;
+         while(k < 32 && SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)d, k, sf, st))
+            k++;
+         if(k > 0) anySess = 1;
+      }
+   }
+   if(anySess == 1)
+   {
+      datetime sf, st;
+      uint    k       = 0;
+      bool    hasSess = false;   // the book has sessions for today
+      bool    inSess  = false;   // this instant sits inside one of them
+      int     sec     = now.hour * 3600 + now.min * 60 + now.sec;
+      while(k < 32 && SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)now.day_of_week, k, sf, st))
+      {
+         hasSess = true;
+         int from = (int)((long)sf % 86400);   // session offsets are
+         int to   = (int)((long)st % 86400);   // seconds of the day
+         if(from < to) inSess = (inSess || (sec >= from && sec < to));
+         else          inSess = (inSess || (sec >= from || sec < to));  // past midnight
+         k++;
+      }
+      //  The broker publishes sessions, but none for today (a Sunday in
+      //  a Mon-Fri book), or today's sessions do not cover this instant.
+      if(!hasSess || !inSess)
+         return(true);
+   }
+
+   // ---- 3) the quote went quiet while the server clock runs --------
+   if(InpClosedStaleMin > 0)
+   {
+      datetime qt = (datetime)SymbolInfoInteger(_Symbol, SYMBOL_TIME);
+      if(qt > 0 && (long)(TimeTradeServer() - qt) >= 60 * InpClosedStaleMin)
+         return(true);
+   }
+
+   // ---- 4) the server said so on the last order attempt ------------
+   if(g_srvSaidClosedUntil > TimeCurrent())
+      return(true);
+
+   return(false);
+}
+
+//  Called by the trade wrappers with every MqlTradeResult: when the
+//  server answers "market closed" the latch makes MarketClosed() true
+//  for the next while, even if the session book above disagrees - the
+//  one source a broker cannot publish wrongly.
+//+------------------------------------------------------------------+
+void NoteMarketClosedRetcode(const uint retcode)
+{
+   if(retcode == TRADE_RETCODE_MARKET_CLOSED)
+      g_srvSaidClosedUntil = TimeCurrent() + 15 * 60;
+}
+
 //  Name of the current chart timeframe, spelled the way a trader says it
 //  ("H1", "M1", ...), for the notice and the journal line.  SHORT_TIMEFRAMES
 //  does not know the "current chart" pseudo-period, so map that first.
@@ -2772,14 +2936,15 @@ void BuildPanel()
 
 //+------------------------------------------------------------------+
 //  DrawPanel() never decides anything: it only shows whichever of the
-//  two panels the chart timeframe allows.  There is no path through the
-//  program on which the data panel can be drawn for a bare M1, H1, D1 ...
-//  chart, because this switch is the only way in.
+//  three states applies.  There is no path through the program on which
+//  the data panel can be drawn for a bare M1, H1, D1 ... chart, or while
+//  the symbol has no trading session - this switch is the only way in.
 //+------------------------------------------------------------------+
 void DrawPanel()
 {
-   if(ChartSupported()) DrawSupportedPanel();
-   else                 DrawIncompatiblePanel();
+   if(!ChartSupported())   DrawNoticePanel(IncompatibleNotice());
+   else if(MarketClosed()) DrawNoticePanel("Market Closed");
+   else                    DrawSupportedPanel();
 }
 
 //+------------------------------------------------------------------+
@@ -2989,7 +3154,7 @@ int PlanWidthNeed()
 //
 //    M5   market -3/3   Entry: 4285.70        Lot: 0.28
 //                       Stop: 4285.98 28pts   Target: 4285.45 25pts  Reach: ~1 bar
-//                       Risk: 7.84 USD        Reward: 7.00 USD   Valid: 3 bars -> 14:30
+//                       Risk: 7.84 USD        Reward: 7.00 USD   Valid: 3/3 bars
 //    M15  range fade    Entry: 4279.10 (limit at the band)           Lot: 0.28
 //                       Stop: 4271.10 80pts   Target: 4287.10 80pts  Reach: ~2 bars
 //    M30  HOLD          mixed — no edge either way
@@ -3342,25 +3507,26 @@ void DrawAutoPanel()
 }
 
 //+------------------------------------------------------------------+
-//  Unsupported chart timeframe - THE NOTICE PANEL.
+//  THE NOTICE PANEL - an unsupported chart timeframe, or a market that
+//  is not trading.
 //
 //     +-----------------------------------------------+
-//     |  SimpleEA                        XAUUSD  H1   |
-//     +-----------------------------------------------+
+//     |  SimpleEA                        XAUUSD  H1   |     <- unsupported
+//     +-----------------------------------------------+        or closed
 //     |  Incompatible chart. Switch to M5/M15/M30.    |
 //     +-----------------------------------------------+
-//
-//  Read as one line:  SimpleEA | Incompatible chart. Switch to M5/M15/M30.
+//     |  Market Closed                                |               <- closed
+//     +-----------------------------------------------+
 //
 //  That is the whole panel - the header line the user always sees, plus
 //  the notice where the M5/M15/M30 rows would have started.  No rows, no
-//  Trend, no Regime, no Signal, no Score: the engine is calibrated for
-//  those three timeframes only, so a reading taken on any other chart
-//  would be meaningless and is withheld completely.  The box is sized to
-//  those two lines and the object set is trimmed to match, so nothing
-//  from the data panel can linger underneath it.
+//  Trend, no Regime, no Signal, no Score.  On another chart a reading
+//  would be meaningless; on a closed market there is nothing to read -
+//  both facts are withheld completely, in the same two-line shape.  The
+//  box is sized to those two lines and the object set is trimmed to
+//  match, so nothing from the data panel can linger underneath it.
 //+------------------------------------------------------------------+
-void DrawIncompatiblePanel()
+void DrawNoticePanel(const string noticeTxt)
 {
    int x   = InpPanelX, y = InpPanelY;
    int pad = 10;
@@ -3390,7 +3556,7 @@ void DrawIncompatiblePanel()
              InpTitleColor, InpFontSize, true);
 
    MakeLabel("notice", x + pad, y + HEAD_H + 2,
-             IncompatibleNotice(), InpSellColor, InpFontSize + 1, false);
+             noticeTxt,          InpSellColor, InpFontSize + 1, false);
 
    //  Remove every row object the full panel uses, so a single leftover
    //  cannot show through on an incompatible chart.
