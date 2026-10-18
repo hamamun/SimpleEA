@@ -93,6 +93,11 @@ of knowing **when not to act** is large.
 | 0.45 – 0.55 | random walk, no memory | **abstain** |
 | **H < 0.45** | anti-persistent, moves revert | fade (off by default; see §5) |
 
+> **Part 2 changed the Action column** (the H reads did not change): **Steady** plays the
+> trend game, **Choppy** plays the **range game** — the box trade (limit at the opposite band,
+> target = half the box, stop = band + 1 ATR, all gates must pass) — and **Mixed** stands aside
+> with `mixed — no edge either way` on the plan line. The fade row above is historical; see §6.
+
 **Evidence base:** a 2025 study across five major East Asian indices found strategy performance is
 *strongly conditional on the Hurst regime* — trend-following thrived in high-persistence periods
 and failed in anti-persistent ones. It also found **DFA a more robust estimator than R/S**
@@ -147,6 +152,15 @@ Closed bars only → non-repainting.
 the single best-looking rule in the 2026 sample (+0.21/+0.19 pips, p<0.01) and **inverted to
 −0.31/−0.06** on 2015 data. It is exposed as an input, not enabled as a default. The default
 engine only ever *confirms* a trend in a persistent regime, or **abstains**.
+
+**Superseded by Part 2** (the v1 paragraph above stays for the record): the `InpFadeInRange`
+input has been **removed**. An anti-persistent row is never faded against anymore — it plays the
+**range game** (the box trade: entry at the opposite band, target = the midpoint, stop =
+band + `InpRangeSLATR` ATR, with the half-box ≥ `InpRangeSpreadX` spreads / box ≥
+`InpRangeMinATR` ATR / ER < `InpRangeERMax` / bid-inside-box gates all-must-pass), or it stands
+aside and says why (`chop — nothing clears the spread`, etc.). The 2015 inversion above is
+exactly why the box trade should be journalled and pre-validated (band touch → midpoint hit
+before band break) before real money goes on it.
 
 ---
 

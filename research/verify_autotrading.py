@@ -27,6 +27,16 @@ line and verifies every rule:
           distance | Distance: to TP1 -> to TP2 (when TP1 hit) -> to TP3 (when TP2 hit),
           plus [OPEN]/[PLACED] on Main Panel
 
+  Part 2 (the regime now DECIDES instead of abstaining):
+          Steady rows trade the trend game exactly as above; Choppy rows
+          place a RANGE FADE - a limit at the opposite band of the box,
+          target = half the box (midpoint), stop = band + InpRangeSLATR
+          ATR, kind "range fade"; Mixed / dead / gated chop rows place
+          nothing and the plan block says why.  A closed bar outside
+          the trade's box kills it (cancel pending / close open), range
+          fades are exempt from the score watcher, and blocked rows show
+          their would-be Signal greyed out.
+
 Run:  python3 research/verify_autotrading.py
 """
 
@@ -39,7 +49,7 @@ from verify_plan_math import SYMBOLS, point_value_per_lot, normalize_lots  # noq
 from walk_trade_plan import (HEAD_H, TF_COUNT, PLAN_SEP_H, PLAN_COL_A,
                              PLAN_COL_B, PLAN_COL_C, PLAN_W_MIN, PLAN_LBL_C,
                              NOTICE, FONT, DPI, RENDER_CW, CELL, char_w,
-                             SL_ATR, TP_ATR, per_tf)  # noqa: E402
+                             SL_ATR, TP_ATR, RANGE_SL_ATR, per_tf)  # noqa: E402
 
 AUTO_POS_RIGHT = 0
 AUTO_POS_BOTTOM = 1
@@ -135,6 +145,9 @@ class AutoSlot:
         self.tp1_hit = False
         self.tp2_hit = False
         self.trail_active = False
+        self.is_range = False
+        self.rng_top = 0.0
+        self.rng_bot = 0.0
         self.placed_bar = 0
         self.last_eval_bar = 0
         self.last_signal_bar = sig_bar
@@ -173,9 +186,13 @@ class AutoTraderSim:
 
         self.bid = 4285.70
         self.ask = 4285.70
+        #  InpRangeSLATR: the range game's stop is band + this many ATR
+        self.range_sl_atr = RANGE_SL_ATR
         self.atr = {"M5": 0.28, "M15": 0.85, "M30": 1.70}
         self.rows = {t: dict(ok=True, dir=0, score=0, trend="Sideways",
-                             regime="Mixed", last_bar=1000) for t in TAGS}
+                             regime="Mixed", last_bar=1000, mode=0, reason="",
+                             rng_top=0.0, rng_bot=0.0, last_close=0.0)
+                     for t in TAGS}
         self.plans = {t: dict(state=0, dir=0, score=0, market=False, lines=1,
                               head=t, kind="", note="", entry_price=0.0, lot=0.0,
                               sl_pts=0, tp_pts=0, tp1_pts=0, tp2_pts=0, tp3_pts=0,
@@ -194,17 +211,37 @@ class AutoTraderSim:
         return round(p, self.spec["digits"])
 
     def set_bar(self, tag, direction, score, trend=None, regime="Steady",
-                atr=None, bar_time=None, ok=True):
+                atr=None, bar_time=None, ok=True, mode=None, reason=None,
+                rng_top=0.0, rng_bot=0.0, close=None):
         if trend is None:
             trend = "Going up" if direction > 0 else ("Going down" if direction < 0 else "Sideways")
         if atr is not None:
             self.atr[tag] = atr
         r = self.rows[tag]
+        #  mode / reason mirror SRow.mode / SRow.blockReason as
+        #  EvaluateRow() writes them (the walk carries the same rules):
+        #  Mixed and Choppy rows that do not trade always carry their
+        #  why; a Steady row stays quiet.  Dead-market depends on ER,
+        #  which the sim does not model - pass it explicitly.
+        if mode is None:
+            mode = 1 if direction != 0 else 0
+        if reason is None:
+            if direction == 0 and regime == "Mixed":
+                reason = "mixed — no edge either way"
+            elif direction == 0 and regime == "Choppy":
+                reason = "chop — no valid box yet"
+            else:
+                reason = ""
         r["ok"] = ok
         r["dir"] = direction
         r["score"] = score
         r["trend"] = trend
         r["regime"] = regime
+        r["mode"] = mode
+        r["reason"] = reason
+        r["rng_top"] = rng_top
+        r["rng_bot"] = rng_bot
+        r["last_close"] = self.bid if close is None else close
         if bar_time is not None:
             r["last_bar"] = bar_time
 
@@ -267,11 +304,13 @@ class AutoTraderSim:
                 p.update(state=1, kind="waiting", note="history still loading")
                 continue
             if r["dir"] == 0:
-                p.update(state=0, kind="HOLD", note="nothing to place")
+                p.update(state=0, kind="HOLD",
+                         note=r["reason"] or "nothing to place")
                 continue
 
             dir_, score = r["dir"], r["score"]
-            market = abs(score) >= 3
+            is_range = r["mode"] == 2
+            market = (not is_range) and abs(score) >= 3
             a = self.auto[t]
             is_open_now = (a.active and a.is_open and a.dir == dir_ and a.entry_price > 0.0)
             is_pend_now = (a.active and not a.is_open and a.dir == dir_ and a.entry_price > 0.0)
@@ -281,8 +320,16 @@ class AutoTraderSim:
             pend = entry - dir_ * offset
             plan_entry = entry if market else pend
 
-            sl_pts = max(1, int(round(self.sl_atr[t] * atr / point)))
-            tp_pts = max(1, int(round(self.tp_atr[t] * atr / point)))
+            #  trend rows keep the per-timeframe profiles; range rows are
+            #  pure box geometry (band entry, stop = band + InpRangeSLATR
+            #  ATR, target = half the box) - never shrunk by hand
+            if is_range:
+                plan_entry = r["rng_bot"] if dir_ > 0 else r["rng_top"]
+                sl_pts = max(1, int(round(self.range_sl_atr * atr / point)))
+                tp_pts = max(1, int(round(0.5 * (r["rng_top"] - r["rng_bot"]) / point)))
+            else:
+                sl_pts = max(1, int(round(self.sl_atr[t] * atr / point)))
+                tp_pts = max(1, int(round(self.tp_atr[t] * atr / point)))
             min_stop = self.spec["stops_level"] * point
             widened = False
             if min_stop > 0 and sl_pts * point < min_stop:
@@ -335,7 +382,8 @@ class AutoTraderSim:
                          else ("market" if market else "pending"))
 
             p.update(state=2, dir=dir_, score=score, market=market, lines=3,
-                     kind="%s %+d/%d" % (kind_word, score, 3),
+                     kind=("range fade" if is_range
+                           else "%s %+d/%d" % (kind_word, score, 3)),
                      entry_price=self.norm_price(plan_entry),
                      lot=lot, sl_pts=sl_pts, tp_pts=tp_pts,
                      tp1_pts=tp1_pts, tp2_pts=tp2_pts, tp3_pts=tp3_pts)
@@ -393,6 +441,9 @@ class AutoTraderSim:
             a.tp1_hit = False
             a.tp2_hit = False
             a.trail_active = False
+            a.is_range = False                # market orders are never range fades
+            a.rng_top = 0.0
+            a.rng_bot = 0.0
             a.placed_bar = r["last_bar"]
             a.last_eval_bar = r["last_bar"]
             a.last_signal_bar = r["last_bar"]
@@ -419,6 +470,10 @@ class AutoTraderSim:
             a.tp1_hit = False
             a.tp2_hit = False
             a.trail_active = False
+            #  range fades carry their box: a close outside it kills the trade
+            a.is_range = (r["mode"] == 2)
+            a.rng_top = r["rng_top"] if r["mode"] == 2 else 0.0
+            a.rng_bot = r["rng_bot"] if r["mode"] == 2 else 0.0
             a.placed_bar = r["last_bar"]
             a.last_eval_bar = r["last_bar"]
             a.last_signal_bar = r["last_bar"]
@@ -460,6 +515,13 @@ class AutoTraderSim:
                 if r["ok"] and r["dir"] == a.dir and abs(r["score"]) > abs(a.entry_score):
                     a.entry_score = r["score"]
 
+                # 0) RANGE FADE: a closed bar outside the trade's box kills it
+                if (a.is_range and r["ok"]
+                        and (r["last_close"] > a.rng_top or r["last_close"] < a.rng_bot)):
+                    a.last_signal_bar = r["last_bar"]
+                    a.reset(keep_signal_bar=True)
+                    continue
+
                 # 1) Opposite direction -> close immediately (and reverse into new signal)
                 if r["ok"] and r["dir"] != 0 and r["dir"] != a.dir:
                     a.reset(keep_signal_bar=False)
@@ -467,8 +529,8 @@ class AutoTraderSim:
                         self.place_plan_order(t)
                     continue
 
-                # 2) Post-TP1 score/direction watcher
-                if a.tp1_hit and not self.is_score_strong(t):
+                # 2) Post-TP1 score/direction watcher (range fades exempt)
+                if a.tp1_hit and not a.is_range and not self.is_score_strong(t):
                     a.last_signal_bar = r["last_bar"]
                     a.reset(keep_signal_bar=True)
                     continue
@@ -510,6 +572,14 @@ class AutoTraderSim:
                 tf_sec = TF_SEC[t]
                 expired = (a.placed_bar > 0 and r["last_bar"] > a.placed_bar
                            and ((r["last_bar"] - a.placed_bar) // tf_sec) >= self.valid_bars)
+
+                # 0) RANGE FADE: a closed bar outside the trade's box cancels the pending
+                if (a.is_range and r["ok"]
+                        and (r["last_close"] > a.rng_top or r["last_close"] < a.rng_bot)):
+                    a.last_signal_bar = r["last_bar"]
+                    a.reset(keep_signal_bar=True)
+                    continue
+
                 if (not r["ok"] or r["dir"] != a.dir or not self.trend_match_for_tf(t)
                         or expired or p["state"] != 2):
                     flipped = (r["ok"] and r["dir"] != 0 and r["dir"] != a.dir)
@@ -596,7 +666,8 @@ class AutoTraderSim:
                     if close70 > 0.0:
                         a.cur_lot = floor_lot_step(a.cur_lot - close70, self.spec)
 
-                    if not self.is_score_strong(t):
+                    #  range fades are exempt from the score watcher (Part 2)
+                    if not a.is_range and not self.is_score_strong(t):
                         a.reset(keep_signal_bar=True)
                         continue
 
@@ -614,7 +685,8 @@ class AutoTraderSim:
                     if close_min > 0.0:
                         a.cur_lot = self.spec["min_lot"]
 
-                    if not self.is_score_strong(t):
+                    #  range fades are exempt from the score watcher (Part 2)
+                    if not a.is_range and not self.is_score_strong(t):
                         a.reset(keep_signal_bar=True)
                         continue
 
@@ -1162,6 +1234,110 @@ def main():
     print("  ok  InpUseStopLoss=false: no SL placed initially; when TP1 hits, SL is placed at Entry (Break-Even)")
 
     print("  ok  Rule 4, 7, 10, 11, 12: Candle updates, 2/3->3/3 upgrade, HOLD-in-profit close, and 2nd panel auto-close")
+
+    # ------------------------------------------------------------------
+    # 8. Part 2: the regime decides - reasons, range fade, box-kill
+    # ------------------------------------------------------------------
+    # 8a. Blocked rows say WHY on the plan block, and never place
+    rng = AutoTraderSim(auto_trading=True)
+    rng.set_bar("M5", 0, 2, regime="Mixed", bar_time=1000)
+    rng.set_bar("M15", 0, -3, regime="Steady", bar_time=1000,
+                reason="dead market — nothing moves")
+    rng.set_bar("M30", 0, 0, regime="Choppy", bar_time=1000)
+    rng.update_plan()
+    check(rng.plans["M5"]["kind"] == "HOLD" and rng.plans["M5"]["state"] == 0,
+          "a Mixed row with score +2 must HOLD (the score leak is closed); got %r"
+          % (rng.plans["M5"],))
+    check(rng.plans["M5"]["note"] == "mixed — no edge either way",
+          "Mixed row must say why; got %r" % rng.plans["M5"]["note"])
+    check(rng.plans["M15"]["note"] == "dead market — nothing moves",
+          "dead row must say why; got %r" % rng.plans["M15"]["note"])
+    check(rng.plans["M30"]["note"] == "chop — no valid box yet",
+          "gated chop row must say why; got %r" % rng.plans["M30"]["note"])
+    rng.manage_auto_bar()
+    check(not rng.any_auto_active(),
+          "blocked rows must never place an order")
+    print("  ok  Part 2 decisions: Mixed/dead/chop rows hold with a reason and place nothing")
+
+    # 8b. Range fade: limit at the opposite band, box geometry (M5 independent)
+    box_top, box_bot = 4286.60, 4284.60      # sell from the top: bid 4285.70 > mid 4285.60
+    rng2 = AutoTraderSim(auto_trading=True)
+    rng2.set_bar("M5", -1, -1, regime="Choppy", mode=2,
+                 rng_top=box_top, rng_bot=box_bot, bar_time=1000)
+    rng2.update_plan()
+    check(rng2.plans["M5"]["kind"] == "range fade",
+          "range plan kind must be 'range fade'; got %r" % rng2.plans["M5"]["kind"])
+    check(abs(rng2.plans["M5"]["entry_price"] - box_top) < 1e-9,
+          "range entry must be the opposite band (%.2f); got %.2f"
+          % (box_top, rng2.plans["M5"]["entry_price"]))
+    check(rng2.plans["M5"]["sl_pts"] == 28 and rng2.plans["M5"]["tp_pts"] == 100,
+          "range stop must be 1 ATR = 28 pts and target half the box = 100 pts; got %d / %d"
+          % (rng2.plans["M5"]["sl_pts"], rng2.plans["M5"]["tp_pts"]))
+    rng2.manage_auto_bar()
+    a2 = rng2.auto["M5"]
+    check(a2.active and not a2.is_open and a2.is_range,
+          "M5 must place its own range pending (it is independent of M15/M30)")
+    check(abs(a2.entry_price - box_top) < 1e-9 and a2.sl_pts == 28 and a2.tp3_pts == 100,
+          "placed range order must carry band entry 4286.60, stop 28 pts, target 100 pts; "
+          "got entry %.2f / %d / %d" % (a2.entry_price, a2.sl_pts, a2.tp3_pts))
+    check(a2.rng_top == box_top and a2.rng_bot == box_bot,
+          "the box must be captured at placement for the box-kill check")
+    check(abs(a2.sl_price - (box_top + 0.28)) < 1e-9 and abs(a2.tp_price - 4285.60) < 1e-9,
+          "range SL = band + 1 ATR (4286.88), TP = midpoint (4285.60); got %.2f / %.2f"
+          % (a2.sl_price, a2.tp_price))
+    check(not rng2.auto["M15"].active and not rng2.auto["M30"].active,
+          "the other timeframes must stay flat")
+    print("  ok  Part 2 range fade: limit at the band, stop = band + 1 ATR, target = box midpoint, M5 independent")
+
+    # 8c. Fill at the band, then a close outside the box KILLS the open trade
+    rng2.manage_auto_tick(bid=box_top, ask=box_top + 0.02)
+    check(rng2.auto["M5"].is_open, "the range sell limit must fill when bid reaches the band")
+    rng2.set_bar("M5", -1, -1, regime="Choppy", mode=2,
+                 rng_top=box_top, rng_bot=box_bot, bar_time=1900,
+                 close=box_top + 0.30)         # close broke the top of the trade's box
+    rng2.update_plan()
+    rng2.manage_auto_bar()
+    check(not rng2.auto["M5"].active,
+          "a close outside the trade's box must kill the open range trade")
+    print("  ok  Part 2 box-kill (open): a closed bar outside the box closes the trade")
+
+    # 8d. Re-place on a new valid bar; a close below the box cancels the pending
+    rng2.set_bar("M5", -1, -1, regime="Choppy", mode=2,
+                 rng_top=box_top, rng_bot=box_bot, bar_time=2500, close=4285.70)
+    rng2.update_plan()
+    rng2.manage_auto_bar()
+    check(rng2.auto["M5"].active and not rng2.auto["M5"].is_open and rng2.auto["M5"].is_range,
+          "a fresh bar inside a valid box must re-place the range pending")
+    rng2.set_bar("M5", -1, -1, regime="Choppy", mode=2,
+                 rng_top=box_top, rng_bot=box_bot, bar_time=3100,
+                 close=box_bot - 0.30)          # close broke the bottom
+    rng2.update_plan()
+    rng2.manage_auto_bar()
+    check(not rng2.auto["M5"].active,
+          "a close outside the trade's box must cancel the pending range order")
+    print("  ok  Part 2 box-kill (pending): a closed bar outside the box cancels the limit order")
+
+    # 8e. Range fades are exempt from the post-TP1 score watcher
+    rng3 = AutoTraderSim(auto_trading=True)
+    rng3.set_bar("M5", -1, -1, regime="Choppy", mode=2,
+                 rng_top=box_top, rng_bot=box_bot, bar_time=1000)
+    rng3.update_plan()
+    rng3.manage_auto_bar()
+    check(rng3.auto["M5"].active and not rng3.auto["M5"].is_open, "range pending placed")
+    rng3.manage_auto_tick(bid=box_top, ask=box_top + 0.02)
+    check(rng3.auto["M5"].is_open, "range pending filled at the band")
+    tp1_p = rng3.auto["M5"].entry_price - rng3.auto["M5"].tp1_pts * 0.01
+    rng3.manage_auto_tick(bid=tp1_p - 0.02, ask=tp1_p)   # the sim exits sells at ask
+    check(rng3.auto["M5"].tp1_hit and rng3.auto["M5"].active,
+          "range fade must reach TP1 and stay open")
+    rng3.set_bar("M5", -1, 0, regime="Choppy", mode=2,
+                 rng_top=box_top, rng_bot=box_bot, bar_time=1600)   # score now too weak for the watcher
+    rng3.update_plan()
+    rng3.manage_auto_bar()
+    check(rng3.auto["M5"].active,
+          "range fades are exempt from the score watcher - box, stop and box-kill govern them")
+    print("  ok  Part 2 score watcher: trend rows watch the score, range fades do not")
+
     print("\nall autotrading and 2nd-panel checks passed")
 
 

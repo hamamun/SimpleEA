@@ -22,7 +22,13 @@ so nothing from the first panel is lost:
 - **Regime** (how it is moving) can only be: **Steady** (keeps going the same way),
   **Mixed** (no clear habit), or **Choppy** (keeps turning back on itself).
 - **Signal / Score** are the original read, unchanged: Going up = **BUY**, Going down =
-  **SELL**, Sideways = **HOLD**, with the score that produced it beside it.
+  **SELL**, Sideways = **HOLD**, with the score that produced it beside it. When the regime
+  blocks a row, the Signal still shows the trade the score *would* have fired — **greyed out**
+  — so a gate is never a silent blank.
+- Each regime decides its own row's game (**Part 2**): a **Steady** row trades the trend as
+  before; a **Choppy** row trades the box (band entry, midpoint target — see *Range mode*);
+  a **Mixed** row, a dead market or a failed gate stands aside and the trade plan below says
+  exactly why. Rows never look at each other — M5's chop never holds M15 or M30 back.
 - Below the three rows, a **second group** gives one trade plan per timeframe — entry, lot, stop,
   target and validity — in the same style. See *Trade plan* below.
 - On any chart timeframe other than M5 / M15 / M30 the panel shows **no data at all** — just the
@@ -135,9 +141,16 @@ The Hurst exponent measures long-range memory in the price series:
 
 | H | Meaning | Action |
 |---|---|---|
-| **> 0.55** | persistent — trends extend | the trend is real, **vote with it** |
-| 0.45 – 0.55 | random walk — no memory | **abstain** (vote 0) |
-| **< 0.45** | anti-persistent — moves revert | abstain by default; optional fade (`InpFadeInRange`) |
+| **> 0.55** | persistent — trends extend | the trend is real, **play the trend game** (vote with it) |
+| 0.45 – 0.55 | random walk — no memory | **stand aside** — no edge either way (the plan block says why) |
+| **< 0.45** | anti-persistent — moves revert | **play the range game** — the box trade, see *Range mode* |
+
+**The regime decides the game, per row (Part 2).** It is no longer just a vote that can go
+quiet: each timeframe's regime picks between the trend game (Steady), the range game
+(Choppy) and standing aside (Mixed), and every refusal is written on that row's plan line —
+`mixed — no edge either way`, `dead market — nothing moves`, `chop — range mode is off`,
+`chop — no valid box yet`, `chop — nothing clears the spread`. The decision is strictly
+per-timeframe: no row's regime can veto another.
 
 This is the component that stops the panel from issuing a confident call in a market that has
 no directional memory. It is the difference between a signal panel and a coin-flip generator.
@@ -153,11 +166,16 @@ is why the cheap version is used inside the terminal.
 score = vote1 + vote2 + vote3          range -3 .. +3
 BUY   if score >= +2
 SELL  if score <= -2
-HOLD  otherwise
+HOLD  otherwise (and the plan block says WHY)
 ```
 
+A **Choppy** row never reaches ±3 — the regime adds no trend vote in the range game; it
+trades through the box gates instead (entry, stop and target come from the box geometry, not
+from the score). A **Mixed** row stands aside whatever the score says.
+
 Kaufman's **Efficiency Ratio** is a dead-market gate: if ER is below `InpERDead` (default 0.10)
-the instrument is not travelling anywhere, so the row is forced to `HOLD` regardless of score.
+the instrument is not travelling anywhere, so the row is forced to `HOLD` regardless of score —
+and now says so: `dead market — nothing moves`.
 
 On the chart those three outcomes are spelled out as **Going up** / **Going down** /
 **Sideways**, and the Hurst read above is spelled out as **Steady** / **Mixed** / **Choppy**.
@@ -181,8 +199,13 @@ reading never changes after the fact.
 | | `InpBarsToLoad` | 700 | closed bars pulled per timeframe |
 | Shared | `InpHurstWindow` | 256 | Hurst estimate window in bars |
 | | `InpERPeriod` | 20 | efficiency-ratio period |
-| | `InpERDead` | 0.10 | below this ⇒ dead market, force HOLD |
-| | `InpFadeInRange` | **false** | when H < 0.45, vote *against* the trend |
+| | `InpERDead` | 0.10 | below this ⇒ dead market, force HOLD (with reason) |
+| Range | `InpRangeMode` | **true** | range game on (false ⇒ every chop row says `chop — range mode is off`) |
+| | `InpRangeBars` | 20 | range box = the last N closed bars' highs/lows |
+| | `InpRangeMinATR` | 2.0 | box must be at least this many ATR tall |
+| | `InpRangeSpreadX` | 3.0 | half-box target must clear at least this many spreads |
+| | `InpRangeERMax` | 0.40 | efficiency above this ⇒ a walk, not a box |
+| | `InpRangeSLATR` | 1.0 | range stop = opposite band + this many ATR |
 | Per TF | `InpL1_*` / `InpL2_*` | 150 / 24 | Precision Trend filter periods |
 | | `InpHurstTrend*` | 0.55 | persistent threshold |
 | | `InpHurstRevert*` | 0.45 | anti-persistent threshold |
@@ -203,20 +226,34 @@ this: when autotrading arrives, the executor reads one row and acts on that time
  ┌────────────────────────────────────────────────────────────────────────────────────┐
  │  SimpleEA  | Autotrading : On                                     |  XAUUSD  |  M5 │
  ├────────────────────────────────────────────────────────────────────────────────────┤
- │  M5   Scalp        Trend: Going down      Regime: Steady                           │
- │                    Signal: SELL           Score: -3 / 3                            │
- │  M15  Short-term   Trend: Going up        Regime: Mixed                            │
- │                    Signal: BUY            Score: +2 / 3                            │
- │  M30  Intraday     Trend: Going down      Regime: Choppy                           │
- │                    Signal: SELL           Score: -2 / 3                            │
+ │  M5   Scalp         Trend: Going down      Regime: Steady                          │
+ │                     Signal: SELL           Score: -3 / 3                           │
+ │  M15  Short-term    Trend: Sideways        Regime: Mixed                           │
+ │                     Signal: BUY            Score: +2 / 3                           │
+ │  M30  Intraday      Trend: Going down      Regime: Steady                          │
+ │                     Signal: SELL           Score: -2 / 3                           │
  ├────────────────────────────────────────────────────────────────────────────────────┤
  │  M5   market -3/3   Entry:  4285.70        Lot:     0.28                           │
  │                     Stop:   4285.98 28pts  Target:  4285.45 25pts   Reach: ~1 bar  │
  │                     Risk:   7.84 USD       Reward:  7.00 USD        Valid: 3 bars  │
- │  M15  pending +2/3  Entry:  4285.27        Lot:     0.03                           │
- │                     Stop:   4284.25 102pts Target:  4286.80 153pts  Reach: ~3 bars │
- │                     Risk:   3.06 USD       Reward:  4.59 USD        Valid: 3 bars  │
- │  M30  HOLD          nothing to place                                               │
+ │  M15  HOLD          mixed — no edge either way                                     │
+ │  M30  pending -2/3  Entry:  4286.55        Lot:     0.01                           │
+ │                     Stop:   4289.10 255pts Target:  4281.45 510pts  Reach: ~9 bars │
+ │                     Risk:   2.55 USD       Reward:  5.10 USD        Valid: 3 bars  │
+ └────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Two Part 2 readings are visible at once: M15's Mixed regime **blocks** its `+2 / 3` score —
+the `BUY` above is drawn *greyed out* on the chart (the trade that was refused), and its plan
+collapses to the single line `HOLD  mixed — no edge either way`. And when a Choppy regime
+takes the range game instead, the block carries the box's own numbers — entry at the opposite
+band, stop = band + 1 ATR, target = half the box (the midpoint):
+
+```
+ ┌────────────────────────────────────────────────────────────────────────────────────┐
+ │  M5   range fade    Entry:  4286.60        Lot:     0.14                           │
+ │                     Stop:   4286.88 28pts  Target:  4285.60 100pts  Reach: ~13 bars│
+ │                     Risk:   3.92 USD       Reward:  14.00 USD       Valid: 3 bars  │
  └────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -234,7 +271,7 @@ sizes 6–16 and prints the answer at the end of its run.
 
 | Your question | How the panel answers it |
 |---|---|
-| **1. Entry point** | `Entry:` is the price to use — the current ask/bid for that direction (market) or the pending price one `InpPendATR` step better. **The EA decides which, per timeframe, from the score**: `market -3/3` = all three components agree, go now; `pending +2/3` = only two agree, so the entry waits for a better price. |
+| **1. Entry point** | `Entry:` is the price to use — the current ask/bid for that direction (market) or the pending price one `InpPendATR` step better. **The EA decides which, per timeframe, from the score**: `market -3/3` = all three components agree, go now; `pending +2/3` = only two agree, so the entry waits for a better price. In the **range game** the box decides instead: `range fade` = a limit at the **opposite band** of the box, no matter what the score says. |
 | **2. Lot size** | `Lot:` — from balance, score and that timeframe's own stop distance, snapped to your broker's lot step and clamped to its minimum and maximum. |
 | **3. Take profit** | `Target:` — price **and points**, with the same amount in account currency on the `Reward:` cell. |
 | **4. Stop loss** | `Stop:` — price **and points**, with the money on the `Risk:` cell. Widened automatically (and marked `(min)`) if your broker demands a minimum stop distance. |
@@ -279,9 +316,10 @@ minimum/maximum lot, minimum stop distance, account balance and currency), so th
 on 2- and 3-digit gold, FX, indices, cent accounts and non-USD accounts alike.
 
 The arithmetic is checked symbol by symbol in `research/verify_plan_math.py`, and
-`research/walk_trade_plan.py` renders the whole panel for eight states — all timeframes active,
-one active, none, a loading timeframe, a small account, a very large balance, min-lot mode, and
-the plan switched off — failing if any line would overflow.
+`research/walk_trade_plan.py` renders the whole panel for ten states — all timeframes active,
+one active, none, a loading timeframe, a small account, a very large balance, min-lot mode,
+the plan switched off, blocked rows stating their reasons, and range fades on the box —
+failing if any line would overflow.
 
 ---
 
@@ -315,7 +353,8 @@ read-only mode):
    - **TP3** = 100% of SimpleEA's advised target points.
    - **TP2** = 25% less than TP3 (`75%` of TP3).
    - **TP1** = 25% less than TP2 (`75%` of TP2 = `56.25%` of TP3).
-5. **Partial Closes, Break-Even Trailstop & Score Watcher:**
+5. **Partial Closes, Break-Even Trailstop & Score Watcher:** *(trend trades — range fades are
+   exempt; see rule 7)*
    - **At TP1 Hit:**
      - Moves Stop Loss to **Entry (Break-Even)** and activates `Trailstop : On` in the top row (for both
        minimum lot and `> minLot`).
@@ -336,6 +375,17 @@ read-only mode):
      `Entry`, `SL`, and `TP1 / TP2 / TP3` to the new plan. If the score upgrades from `2/3` to
      `3/3` in the same direction, deletes the waiting pending order and opens the **Market order**
      immediately. Cancels if the direction changes, drops to `HOLD`, or reaches `InpValidBars` expiry.
+7. **Range fades (Part 2 — Choppy rows):**
+   - The order is **always a Pending Limit at the opposite band** of the box (never a market
+     order — the score has no say in the entry), with `Stop = band + InpRangeSLATR × ATR` and
+     `TP3 = half the box` (the midpoint). The plan block shows it as `range fade`.
+   - **Box-kill:** if a closed bar closes **outside the trade's box**, the pending is cancelled
+     or the open trade closed immediately — the broken box is the thesis being invalidated.
+   - The **score watcher does not apply** to range fades (after TP1/TP2): the box midpoint, the
+     stop and the box-kill govern their exits. The flip-to-opposite-direction and
+     HOLD-in-profit rules still apply, exactly as for trend trades.
+   - M5 range fades follow **rule 2 as usual**: M5 places its own box trade entirely on its own;
+     M15/M30 still require their mutual trend match.
 
 #### Second Panel Layout (Right or Bottom of Main Panel)
 
@@ -441,7 +491,11 @@ performance claim.
   Discarded rather than shipped.
 - **The fade leg as a default.** It was the strongest rule in 2026 and inverted in 2015, so
   `InpFadeInRange` ships **off**. The default only ever *confirms* a trend in a persistent
-  regime, or abstains.
+  regime, or abstains. **Superseded by Part 2:** the input is gone — an anti-persistent market
+  is no longer faded against; it is traded as a **box** (limit at the band, target at the
+  midpoint) when every gate clears, and refused with a reason when they do not. The 2015
+  inversion is exactly why the box trade should be validated in the journal (does price reach
+  the midpoint before breaking the band?) before real money goes on it.
 
 ### 4.5 Reproducing
 
@@ -453,7 +507,8 @@ python verify_timeframe_gate.py # proves the M5/M15/M30-only chart rule, switch 
 python walk_timeframes.py       # prints what the chart shows at each timeframe switch
 python horizon_study.py         # measured signal horizon -> research/HORIZON.md
 python verify_plan_math.py      # lot / points / money arithmetic, symbol by symbol
-python walk_trade_plan.py       # renders the panel (Group 1 + Group 2) for 8 states
+                                # (trend profiles AND range-fade box geometry)
+python walk_trade_plan.py       # renders the panel (Group 1 + Group 2) for 10 states
                                 # (its output is saved as research/panel_layout.txt)
 python verify_autotrading.py    # verifies all autotrading rules and renders the 2nd panel
 python run3.py           # IS/OOS + Monte-Carlo null, 2026 sample
@@ -483,6 +538,13 @@ every number in §4 came from a third-party data feed.** Your broker's spread, s
 hours and execution differ. Until you have your own journal showing a real edge *after spread on
 your account and your symbol*, you do not have evidence — you have someone else's backtest.
 
+> **Before risking money on the range fade**, journal its key claim: after entry at the band,
+> does price reach the midpoint **before** breaking the band? The spread gate is already
+> calculative (half-box ≥ 3 spreads, all gates visible in §3), but the claim itself is a market
+> claim, and the 2015 fade inversion (§4.4) is the reason to measure it first. Extending the
+> pre-validation harness with a band-touch → midpoint-hit sequence and journaling real fills are
+> both recommended — neither blocks the code, which ships with `InpRangeMode = true`.
+
 **Phase 3 — risk layer, still manual.** ATR-based SL/TP and position sizing so each trade risks a
 fixed fraction of the account. Keep approve-by-hand.
 
@@ -491,6 +553,8 @@ M30/H1+ where the efficiency ratio and cost-to-edge ratio are more favourable, a
 M5 entirely unless you are on a raw-spread account where the cost can drop to ~0.1–0.3 pip.
 
 **A realistic expectation to hold on to:** this panel is a structured, low-lag reading of the
-market that is honest about when the market has no memory. It is a decision aid, not a
-money-printing machine. The most valuable thing it does is tell you when to **do nothing** —
-in my sampling it reads HOLD roughly 55–60% of the time, and that is a feature.
+market that is honest about when the market has no memory. It no longer sits back in chop —
+when the box gates clear it trades the range with calculative numbers, and when they do not it
+tells you *why* (`mixed — no edge either way`, `chop — nothing clears the spread`,
+`dead market — nothing moves`) instead of a blank HOLD. That refusal, roughly 55–60% of
+readings in my sampling, is still a feature — it just comes with receipts now.
