@@ -26,6 +26,17 @@ line and verifies every rule:
           prices (USD) | SL price (USD) or -- (Ask/Bid) | Status / Waiting
           distance | Distance: to TP1 -> to TP2 (when TP1 hit) -> to TP3 (when TP2 hit),
           plus [OPEN]/[PLACED] on Main Panel
+  Rule 13 Pre-TP1 stepped trailstop (Entry -> TP1 only): the selected %
+          (Tight 40 when the regime is not Steady, Steady 55 in a clear
+          Steady trend, picked at fill) both activates the trail and is
+          counted back from the activation price to place the first SL;
+          every further +5% of progress jumps the SL +5% (gap widened
+          x1.25 on M15, x1.50 on M30).  Percentages use the Entry->TP1
+          distance frozen at fill.  At TP1 the trail hands off - the
+          TP1 Break-Even move only applies if it is tighter than the
+          trailed SL.  With InpUseStopLoss=false the trail places the
+          first SL itself at activation.  The card shows "TS: 40% Tight"
+          / "55% Steady".
 
   Part 2 (the regime now DECIDES instead of abstaining):
           Steady rows trade the trend game exactly as above; Choppy rows
@@ -145,6 +156,15 @@ class AutoSlot:
         self.tp1_hit = False
         self.tp2_hit = False
         self.trail_active = False
+        self.trail_steady = False
+        self.trail_started = False
+        self.trail_pct = 0
+        self.trail_gap_pct = 0.0
+        self.trail_ref_tp1_pts = 0
+        self.trail_peak_pts = 0.0
+        self.trail_applied_pct = 0.0
+        self.trail_tried_pct = 0.0
+        self.trail_last_try = 0
         self.is_range = False
         self.rng_top = 0.0
         self.rng_bot = 0.0
@@ -160,7 +180,8 @@ class AutoTraderSim:
     """Full transcription of SimpleAdvisor.mq5's plan + autotrader + dual panels."""
 
     def __init__(self, symbol="XAUUSD", spec=None, balance=800.0, auto_trading=True,
-                 use_stop_loss=True, auto_panel_pos=AUTO_POS_RIGHT, panel_x=12, panel_y=24,
+                 use_stop_loss=True, use_trail_stop=True, trail_pct_tight=40,
+                 trail_pct_steady=55, auto_panel_pos=AUTO_POS_RIGHT, panel_x=12, panel_y=24,
                  use_risk=True, use_min_lot=False, risk2=0.5, risk3=1.0,
                  sl_atr=None, tp_atr=None, pend_atr=0.5, valid_bars=3, show_plan=True):
         self.symbol = symbol
@@ -169,6 +190,9 @@ class AutoTraderSim:
         self.cur = "USD"
         self.auto_trading = auto_trading
         self.use_stop_loss = use_stop_loss
+        self.use_trail_stop = use_trail_stop
+        self.trail_pct_tight = trail_pct_tight
+        self.trail_pct_steady = trail_pct_steady
         self.auto_panel_pos = auto_panel_pos
         self.panel_x = panel_x
         self.panel_y = panel_y
@@ -288,6 +312,73 @@ class AutoTraderSim:
         if dir_ > 0:
             return cand_sl > cur_sl + 0.5 * point
         return cand_sl < cur_sl - 0.5 * point
+
+    def trail_room_factor(self, tag):
+        """TrailRoomFactor() in SimpleAdvisor.mq5."""
+        return {"M5": 1.0, "M15": 1.25, "M30": 1.50}[tag]
+
+    def init_trail(self, tag):
+        """InitTrailState() in SimpleAdvisor.mq5 (settings frozen at fill)."""
+        a = self.auto[tag]
+        r = self.rows[tag]
+        if not self.use_trail_stop:
+            a.trail_steady = False
+            a.trail_pct = 0
+            a.trail_gap_pct = 0.0
+            a.trail_ref_tp1_pts = 0
+            a.trail_started = False
+            a.trail_peak_pts = 0.0
+            a.trail_applied_pct = 0.0
+            a.trail_tried_pct = 0.0
+            a.trail_last_try = 0
+            return
+        steady = (r["ok"] and not a.is_range and r["dir"] == a.dir
+                  and r["regime"] == "Steady")
+        a.trail_steady = steady
+        a.trail_pct = max(10, min(70, int(self.trail_pct_steady if steady
+                                          else self.trail_pct_tight)))
+        a.trail_gap_pct = a.trail_pct * a.trail_pct / 100.0 * self.trail_room_factor(tag)
+        a.trail_ref_tp1_pts = a.tp1_pts
+        a.trail_started = False
+        a.trail_peak_pts = 0.0
+        a.trail_applied_pct = 0.0
+        a.trail_tried_pct = 0.0
+        a.trail_last_try = 0
+
+    def update_pre_tp1_trail(self, tag, fav_pts):
+        """UpdatePreTP1Trail() in SimpleAdvisor.mq5 (sim modifies always succeed)."""
+        a = self.auto[tag]
+        point = self.spec["point"]
+        if not self.use_trail_stop or a.tp1_hit:
+            return False
+        if a.trail_ref_tp1_pts <= 0 or a.trail_pct <= 0 or a.entry_price <= 0.0:
+            return False
+        a.trail_peak_pts = max(a.trail_peak_pts, fav_pts)
+        peak_pct = a.trail_peak_pts / a.trail_ref_tp1_pts * 100.0
+        if peak_pct < a.trail_pct:
+            return False
+        capped = min(peak_pct, 100.0)
+        steps = math.floor((capped - a.trail_pct) / 5.0 + 1e-9)
+        level_pct = a.trail_pct + steps * 5.0
+        if level_pct <= a.trail_applied_pct + 1e-9:
+            return False
+        sl_prog_pct = level_pct - a.trail_gap_pct
+        cand_sl = self.norm_price(a.entry_price + a.dir * sl_prog_pct / 100.0
+                                  * a.trail_ref_tp1_pts * point)
+        cand_sl = self.clamp_sl_to_stops(a.dir, cand_sl)
+        if cand_sl <= 0.0:
+            return False
+        if not self.is_sl_tighter(a.dir, cand_sl, a.sl_price):
+            a.trail_applied_pct = level_pct
+            a.trail_started = True
+            a.trail_active = True
+            return True
+        a.sl_price = cand_sl
+        a.sl_pts = int(round(abs(a.entry_price - cand_sl) / point))
+        a.trail_applied_pct = level_pct
+        a.trail_started = True
+        a.trail_active = True
+        return True
 
     def update_plan(self):
         point = self.spec["point"]
@@ -447,6 +538,7 @@ class AutoTraderSim:
             a.placed_bar = r["last_bar"]
             a.last_eval_bar = r["last_bar"]
             a.last_signal_bar = r["last_bar"]
+            self.init_trail(tag)      # market fill: freeze the trailstop % now
             return True
         else:
             pend_p = self.norm_price(p["entry_price"])
@@ -470,6 +562,16 @@ class AutoTraderSim:
             a.tp1_hit = False
             a.tp2_hit = False
             a.trail_active = False
+            #  trailstop initialised at fill (see manage_auto_tick below)
+            a.trail_steady = False
+            a.trail_started = False
+            a.trail_pct = 0
+            a.trail_gap_pct = 0.0
+            a.trail_ref_tp1_pts = 0
+            a.trail_peak_pts = 0.0
+            a.trail_applied_pct = 0.0
+            a.trail_tried_pct = 0.0
+            a.trail_last_try = 0
             #  range fades carry their box: a close outside it kills the trade
             a.is_range = (r["mode"] == 2)
             a.rng_top = r["rng_top"] if r["mode"] == 2 else 0.0
@@ -634,6 +736,7 @@ class AutoTraderSim:
                 if not a.is_open:
                     if (a.dir > 0 and ask <= a.entry_price) or (a.dir < 0 and bid >= a.entry_price):
                         a.is_open = True
+                        self.init_trail(t)   # pending fill: freeze the trailstop %
                         self.refresh_live_pnl()
                     else:
                         continue
@@ -653,7 +756,11 @@ class AutoTraderSim:
                     a.reset(keep_signal_bar=True)
                     continue
 
-                # TP1 hit -> Break-Even SL + Trailstop ACTIVE + 70% partial close + Score check
+                # Pre-TP1 stepped trailstop (before the TP1 check, as in MQL)
+                self.update_pre_tp1_trail(t, fav_pts)
+
+                # TP1 hit -> Break-Even SL only if tighter than the trailed
+                # SL + 70% partial close + Score check
                 if not a.tp1_hit and a.tp1_pts > 0 and fav_pts >= a.tp1_pts - 1e-6:
                     a.tp1_hit = True
                     a.trail_active = True
@@ -769,6 +876,13 @@ class AutoTraderSim:
 
             a.lbl[(3, 1)] = "Distance:"
             a.val[(3, 1)] = "to %s %d pts" % (next_tp_tag, next_tp_pts)
+
+            a.lbl[(3, 2)] = "TS:"
+            if not a.is_open or a.trail_pct <= 0:
+                a.val[(3, 2)] = "--" if self.use_trail_stop else "Off"
+            else:
+                a.val[(3, 2)] = "%d%% %s" % (a.trail_pct,
+                                             "Steady" if a.trail_steady else "Tight")
 
         self.auto_shown = self.any_auto_active()
 
@@ -1027,7 +1141,16 @@ def main():
     check(not sim.any_trailstop_on() and sim.any_stoploss_on(),
           "Before TP1 hit, header must report Trailstop Off and Stoploss On")
 
-    # Tick moves Bid down to TP1 4285.56 -> hits TP1!
+    # Tick moves Bid down to TP1 4285.56 -> hits TP1!  The Row was Steady,
+    # so the pre-TP1 trail picked 55% at fill; at TP1 its final stepped SL
+    # sits at 100 - 30.25 = 69.75% of the 14-pt Entry->TP1 distance
+    # (4285.60) - tighter than Break-Even, so the TP1 rule leaves it there.
+    check(sim.auto["M5"].trail_pct == 55 and sim.auto["M5"].trail_steady,
+          "A Steady row must pick the Steady trail %% (55) at fill; got %d"
+          % sim.auto["M5"].trail_pct)
+    check(sim.auto["M5"].val[(3, 2)] == "55% Steady",
+          "The card must show the picked trail %% ('TS: 55%% Steady'); got %r"
+          % sim.auto["M5"].val.get((3, 2)))
     sim.manage_auto_tick(bid=4285.54, ask=4285.56)
     check(sim.auto["M5"].tp1_hit and sim.auto["M5"].trail_active,
           "At TP1 hit, tp1_hit and trail_active must be True")
@@ -1035,14 +1158,16 @@ def main():
           "At TP1 hit, header must report Trailstop On and Stoploss On")
     check(abs(sim.auto["M5"].cur_lot - 0.09) < 1e-6,
           "At TP1 hit on 0.28 lot, 70%% (0.19) closes leaving 0.09 lot; got %.2f" % sim.auto["M5"].cur_lot)
-    check(abs(sim.auto["M5"].sl_price - 4285.70) < 1e-6,
-          "At TP1 hit, SL must move to Entry (Break-Even 4285.70); got %.2f" % sim.auto["M5"].sl_price)
-    check(sim.auto["M5"].val[(2, 1)] == "4285.70 (0.00 USD) [BE]",
-          "At TP1 hit, SL cell must show '4285.70 (0.00 USD) [BE]'; got %r" % sim.auto["M5"].val[(2, 1)])
+    check(abs(sim.auto["M5"].sl_price - 4285.60) < 1e-6,
+          "At TP1 hit, the trailed SL (4285.60) is tighter than Break-Even and must remain; got %.2f"
+          % sim.auto["M5"].sl_price)
+    check(sim.auto["M5"].val[(2, 1)] == "4285.60 (0.90 USD)",
+          "At TP1 hit, SL cell must show the trailed SL '4285.60 (0.90 USD)'; got %r"
+          % sim.auto["M5"].val[(2, 1)])
     check(sim.auto["M5"].val[(3, 1)] == "to TP2 19 pts",
           "After TP1 hit, M5 Distance must advance to 'to TP2 19 pts'; got %r" % sim.auto["M5"].val[(3, 1)])
 
-    over = sim.render_both_panels("State 2: M5 Hits TP1 (70% Closed -> 0.07 Lot Left, SL Moved to Break-Even, Trailstop On)")
+    over = sim.render_both_panels("State 2: M5 Hits TP1 (70% Closed -> 0.09 Lot Left, Trailed SL Remains, Trailstop On)")
     check(not over, "2nd panel overflowed: %s" % (over,))
 
     # Tick moves Bid down to TP2 4285.51 -> hits TP2!
@@ -1198,8 +1323,73 @@ def main():
     check(not over, "Unexpected overflow when flat")
 
     # ------------------------------------------------------------------
-    # 7. InpUseStopLoss = false: No initial SL placed, but when TP1 hits
-    #    SL IS placed at the Entry point (Break-Even)
+    # 6b. Rule 13: Pre-TP1 stepped trailstop - Tight %, 5% steps, TF room
+    # ------------------------------------------------------------------
+    # Tight 40% (regime not Steady), no initial SL: at +40% of the 14-pt
+    # Entry->TP1 the trail places the first SL itself at +24% (40 counted
+    # back 40% towards Entry); each further +5% jumps it +5%.
+    tr = AutoTraderSim(auto_trading=True, use_stop_loss=False)
+    tr.set_bar("M5", 1, 3, regime="Mixed", atr=0.28, bar_time=1000)
+    tr.update_plan()
+    tr.manage_auto_bar()
+    a_tr = tr.auto["M5"]
+    check(a_tr.active and a_tr.is_open and a_tr.sl_price == 0.0,
+          "trail test: M5 BUY must open with no SL (InpUseStopLoss=false)")
+    check(a_tr.trail_pct == 40 and not a_tr.trail_steady and a_tr.trail_ref_tp1_pts == 14,
+          "a non-Steady row must pick Tight 40%% with the 14-pt TP1 reference; got %d%% / %d pts"
+          % (a_tr.trail_pct, a_tr.trail_ref_tp1_pts))
+    check(abs(a_tr.trail_gap_pct - 16.0) < 1e-9,
+          "Tight 40%% on M5 must leave a 16%% gap behind price; got %.2f" % a_tr.trail_gap_pct)
+    check(a_tr.val[(3, 2)] == "40% Tight",
+          "the card must show 'TS: 40%% Tight'; got %r" % a_tr.val.get((3, 2)))
+    check(not tr.any_trailstop_on(),
+          "before activation the header must still report Trailstop Off")
+
+    # +6 pts = 42.9% of TP1: activation step 40 -> SL at +24% (4285.73)
+    tr.manage_auto_tick(bid=4285.76, ask=4285.78)
+    check(a_tr.trail_started and a_tr.trail_active and tr.any_trailstop_on(),
+          "crossing 40%% of Entry->TP1 must activate the trailstop")
+    check(abs(a_tr.sl_price - 4285.73) < 1e-6,
+          "at activation the trail must place SL at +24%% (4285.73); got %.2f" % a_tr.sl_price)
+    check(not a_tr.tp1_hit, "trail activation happens BEFORE TP1 (tp1_hit must stay False)")
+
+    # +7 pts = 50%: two 5% steps landed -> SL at +34% (4285.75)
+    tr.manage_auto_tick(bid=4285.77, ask=4285.79)
+    check(abs(a_tr.sl_price - 4285.75) < 1e-6,
+          "at +50%% progress the SL must step to +34%% (4285.75); got %.2f" % a_tr.sl_price)
+
+    # Price falls back onto the trailed SL -> trade closes before TP1
+    tr.manage_auto_tick(bid=4285.75, ask=4285.77)
+    check(not a_tr.active,
+          "price falling onto the trailed SL must close the trade before TP1")
+    print("  ok  Rule 13 (Tight): activation places SL at +24%, +5% steps, pre-TP1 stop-out, "
+          "first SL self-placed when InpUseStopLoss=false")
+
+    # Steady 55% on M15: same activation idea, gap widened x1.25
+    tr2 = AutoTraderSim(auto_trading=True)
+    tr2.set_bar("M15", 1, 3, regime="Steady", bar_time=1000)
+    tr2.set_bar("M30", 1, 2, regime="Steady", bar_time=1000)
+    tr2.update_plan()
+    tr2.manage_auto_bar()
+    a_tr2 = tr2.auto["M15"]
+    check(a_tr2.active and a_tr2.is_open, "trail test: M15 BUY must open (market at 3/3)")
+    check(a_tr2.trail_pct == 55 and a_tr2.trail_steady and a_tr2.trail_ref_tp1_pts == 86,
+          "a Steady M15 row must pick 55%% with the 86-pt TP1 reference; got %d%% / %d pts"
+          % (a_tr2.trail_pct, a_tr2.trail_ref_tp1_pts))
+    check(abs(a_tr2.trail_gap_pct - 55 * 55 / 100.0 * 1.25) < 1e-9,
+          "M15 must widen the gap x1.25 (37.81%%); got %.2f" % a_tr2.trail_gap_pct)
+    # +48 pts = 55.8% of TP1: activation step 55 -> SL at 55 - 37.81 = +17.19%
+    tr2.manage_auto_tick(bid=a_tr2.entry_price + 0.48, ask=a_tr2.entry_price + 0.50)
+    check(a_tr2.trail_started and abs(a_tr2.sl_price - 4285.85) < 1e-6,
+          "Steady M15 activation must place SL at +17.19%% (4285.85); got %.2f" % a_tr2.sl_price)
+    check(a_tr2.val[(3, 2)] == "55% Steady",
+          "the card must show 'TS: 55%% Steady'; got %r" % a_tr2.val.get((3, 2)))
+    print("  ok  Rule 13 (Steady): 55% picked in a clear Steady trend, M15 gap widened x1.25")
+
+    # ------------------------------------------------------------------
+    # 7. InpUseStopLoss = false: No initial SL placed; the pre-TP1
+    #    trailstop places the first SL at activation, and at TP1 the
+    #    final trailed SL remains (Break-Even only if tighter)
     # ------------------------------------------------------------------
     sim_nosl = AutoTraderSim(auto_trading=True, use_stop_loss=False)
     sim_nosl.set_bar("M5", 1, 3, atr=0.28, bar_time=1000)
@@ -1221,17 +1411,20 @@ def main():
     check(sim_nosl.auto["M5"].sl_price == 0.0,
           "Before TP1 hit with InpUseStopLoss=false, bar close must keep SL off (0.0)")
 
-    # Price reaches TP1 -> SL MUST be placed at Entry point (Break-Even) even though InpUseStopLoss=false!
+    # Price reaches TP1 in one tick: the trail lands its final stepped SL
+    # first (Steady 55% picked at fill, reference frozen at the fill-time
+    # 14-pt TP1 -> SL at +69.75% of 14 pts = 4285.80), and the TP1
+    # Break-Even move must NOT pull it back to Entry.
     tp1_bid = sim_nosl.auto["M5"].entry_price + sim_nosl.auto["M5"].tp1_pts * 0.01
     sim_nosl.manage_auto_tick(bid=tp1_bid, ask=tp1_bid + 0.02)
     check(sim_nosl.auto["M5"].tp1_hit and sim_nosl.auto["M5"].trail_active,
           "TP1 hit with InpUseStopLoss=false must activate TP1 and Trailstop")
-    check(abs(sim_nosl.auto["M5"].sl_price - sim_nosl.auto["M5"].entry_price) < 1e-6,
-          "When TP1 hits with InpUseStopLoss=false, SL MUST be placed at Entry point (%.2f); got %.2f"
-          % (sim_nosl.auto["M5"].entry_price, sim_nosl.auto["M5"].sl_price))
+    check(abs(sim_nosl.auto["M5"].sl_price - 4285.80) < 1e-6,
+          "When TP1 hits with InpUseStopLoss=false, the final trailed SL (4285.80) must remain; got %.2f"
+          % sim_nosl.auto["M5"].sl_price)
     check(sim_nosl.any_trailstop_on() and sim_nosl.any_stoploss_on(),
           "After TP1 hits with InpUseStopLoss=false, header must show Trailstop : On | Stoploss : On")
-    print("  ok  InpUseStopLoss=false: no SL placed initially; when TP1 hits, SL is placed at Entry (Break-Even)")
+    print("  ok  InpUseStopLoss=false: no SL placed initially; the trail places it and TP1 keeps the trailed SL")
 
     print("  ok  Rule 4, 7, 10, 11, 12: Candle updates, 2/3->3/3 upgrade, HOLD-in-profit close, and 2nd panel auto-close")
 

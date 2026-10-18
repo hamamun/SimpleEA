@@ -100,8 +100,19 @@
 //|        TP2 = 25% less than TP3 (75% of TP3)                       |
 //|        TP1 = 25% less than TP2 (75% of TP2 = 56.25% of TP3)       |
 //|   - Market order management:                                      |
-//|        TP1 hit -> moves SL to Entry (Break-Even, Trailstop ACTIVE)|
-//|                   and closes 70% of lot (if lot > min lot).       |
+//|        Before TP1 -> stepped trailstop: when price has covered    |
+//|                   the selected % of Entry->TP1, SL is placed /    |
+//|                   moved that same % back from the activation      |
+//|                   price towards Entry, then jumps +5% for every   |
+//|                   further +5% of progress.  The % is picked at    |
+//|                   fill (Tight when the regime is not Steady,      |
+//|                   Steady % in a clear Steady trend) and the gap   |
+//|                   behind price is widened x1.25 on M15, x1.50     |
+//|                   on M30.  At TP1 the trail hands off and its     |
+//|                   last SL simply remains.                         |
+//|        TP1 hit -> moves SL to Entry (Break-Even) only if that is  |
+//|                   tighter than the trailed SL, and closes 70% of  |
+//|                   lot (if lot > min lot).                         |
 //|                   Watches score/direction: if score weakens or    |
 //|                   flips, closes immediately; if strong, holds.    |
 //|        TP2 hit -> reduces remaining lot to min lot (if > min lot) |
@@ -136,7 +147,7 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "2.00"
+#property version   "2.10"
 #property description "Multi-timeframe BUY/SELL/HOLD direction panel, trade plan and full-auto executor. M5 / M15 / M30 charts only."
 
 #ifndef M_PI
@@ -154,7 +165,10 @@ enum ENUM_AUTO_PANEL_POS
 //==================================================================
 input group "=== Autotrading ==="
 input bool                InpAutoTrading  = true;            // Autotrading (true = full auto, false = read-only)
-input bool                InpUseStopLoss  = true;            // Stoploss (true = place initial SL, false = only at BE after TP1)
+input bool                InpUseStopLoss  = true;            // Stoploss (true = place initial SL, false = only when trailstop / TP1 places it)
+input bool                InpUseTrailStop = true;            // Pre-TP1 stepped trailstop (true = on, Entry->TP1 only)
+input int                 InpTrailPctTight  = 40;            // Trailstop % when regime is NOT Steady (10-70)
+input int                 InpTrailPctSteady = 55;            // Trailstop % in a Steady, clear trend (10-70)
 input ENUM_AUTO_PANEL_POS InpAutoPanelPos = AUTO_POS_RIGHT;  // Right panel placement (Right or Bottom)
 input long                InpMagicBase    = 202610;          // Base magic number (+0 M5, +1 M15, +2 M30)
 input int                 InpSlippagePts  = 20;              // Max slippage in points for market orders
@@ -249,6 +263,7 @@ input double   InpHurstRevertM30 = 0.45;
 #define AUTO_PREFIX "SA2_"
 #define TF_COUNT    3
 #define TF_TEXT     "M5/M15/M30"
+#define TRAIL_STEP_PCT 5.0   // pre-TP1 trailstop: SL jumps this many % per step of progress
 #define HEAD_H      34     // height of the header band (title + symbol line)
 #define PLAN_W_MIN  406    // panel width with no plan showing
 #define PLAN_LINES  3      // lines an ACTIVE timeframe uses (1 for HOLD)
@@ -1348,6 +1363,16 @@ struct SAutoState
    bool     tp1Hit;        // true once TP1 has been reached
    bool     tp2Hit;        // true once TP2 has been reached
    bool     trailActive;   // true once break-even / trailstop is active
+   // ---- pre-TP1 stepped trailstop (Entry -> TP1 only) -----------------
+   bool     trailSteady;   // true when the Steady % was picked at fill
+   bool     trailStarted;  // true once the activation % has been reached
+   int      trailPct;      // selected activation % of Entry->TP1 (10-70)
+   double   trailGapPct;   // gap behind the stepped peak, in % of Entry->TP1
+   int      trailRefTp1Pts;// Entry->TP1 distance in points, frozen at fill
+   double   trailPeakPts;  // best favourable progress in points since fill
+   double   trailAppliedPct; // highest stepped progress % whose SL is in place
+   double   trailTriedPct;   // last stepped progress % a modify was tried for
+   datetime trailLastTry;    // time of the last trailstop modify attempt
    bool     isRange;       // true when this order is a range fade (box trade)
    double   rngTop;        // range box upper band captured at placement (box-kill)
    double   rngBot;        // range box lower band captured at placement (box-kill)
@@ -1449,6 +1474,15 @@ void ResetAutoSlot(int i, bool keepSignalBar)
    g_auto[i].tp1Hit        = false;
    g_auto[i].tp2Hit        = false;
    g_auto[i].trailActive   = false;
+   g_auto[i].trailSteady   = false;
+   g_auto[i].trailStarted  = false;
+   g_auto[i].trailPct      = 0;
+   g_auto[i].trailGapPct   = 0.0;
+   g_auto[i].trailRefTp1Pts = 0;
+   g_auto[i].trailPeakPts  = 0.0;
+   g_auto[i].trailAppliedPct = 0.0;
+   g_auto[i].trailTriedPct   = 0.0;
+   g_auto[i].trailLastTry    = 0;
    g_auto[i].isRange       = false;
    g_auto[i].rngTop        = 0.0;
    g_auto[i].rngBot        = 0.0;
@@ -1616,6 +1650,143 @@ bool IsSLTighter(int dir, double candSL, double curSL, double point)
    if(curSL  <= 0.0) return(true);
    if(dir > 0) return(candSL > curSL + 0.5 * point);
    return(candSL < curSL - 0.5 * point);
+}
+
+//+------------------------------------------------------------------+
+//  PRE-TP1 STEPPED TRAILSTOP (Entry -> TP1 only)
+//
+//  One selected percentage P drives the whole trail:
+//     - price covering P% of the Entry->TP1 distance ACTIVATES it;
+//     - the first SL sits P% of the activation->Entry distance back
+//       from the activation price (P=40: activation at +40%, SL at
+//       +24%, so the gap behind price is 16% of Entry->TP1);
+//     - every further +5% of progress jumps the SL another +5%, so
+//       the gap stays constant;
+//     - at TP1 the trail hands off: its last SL simply remains and
+//       the existing TP1 / TP2 / TP3 logic takes over.
+//
+//  SimpleEA picks P itself at fill: InpTrailPctTight when the
+//  regime is not Steady, InpTrailPctSteady in a Steady regime with
+//  a clear trend in the trade's direction.  The gap behind price
+//  is then widened per timeframe (M15 x1.25, M30 x1.50) so the
+//  slower styles get more breathing room at the same activation.
+//  All percentages use the Entry->TP1 distance frozen at fill, so
+//  candle-by-candle plan updates can never shift the steps.
+//+------------------------------------------------------------------+
+int ClampTrailPct(int pct)
+{
+   if(pct < 10) return(10);
+   if(pct > 70) return(70);
+   return(pct);
+}
+
+//+------------------------------------------------------------------+
+double TrailRoomFactor(int i)
+{
+   if(i == 1) return(1.25);   // M15: 25% more breathing room
+   if(i == 2) return(1.50);   // M30: 50% more breathing room
+   return(1.0);               // M5: the tight baseline
+}
+
+//+------------------------------------------------------------------+
+//  Choose and freeze this trade's trailstop settings at fill time.
+//+------------------------------------------------------------------+
+void InitTrailState(int i)
+{
+   if(!InpUseTrailStop)
+   {
+      g_auto[i].trailSteady    = false;
+      g_auto[i].trailPct       = 0;
+      g_auto[i].trailGapPct    = 0.0;
+      g_auto[i].trailRefTp1Pts = 0;
+      g_auto[i].trailStarted   = false;
+      g_auto[i].trailPeakPts   = 0.0;
+      g_auto[i].trailAppliedPct = 0.0;
+      g_auto[i].trailTriedPct   = 0.0;
+      g_auto[i].trailLastTry    = 0;
+      return;
+   }
+
+   bool steady = (g_rows[i].ok && !g_auto[i].isRange &&
+                  g_rows[i].direction == g_auto[i].dir &&
+                  g_rows[i].hurst > g_rows[i].hTrend);
+
+   g_auto[i].trailSteady    = steady;
+   g_auto[i].trailPct       = ClampTrailPct(steady ? InpTrailPctSteady
+                                                   : InpTrailPctTight);
+   g_auto[i].trailGapPct    = (double)g_auto[i].trailPct *
+                              (double)g_auto[i].trailPct / 100.0 *
+                              TrailRoomFactor(i);
+   g_auto[i].trailRefTp1Pts = g_auto[i].tp1Pts;
+   g_auto[i].trailStarted   = false;
+   g_auto[i].trailPeakPts   = 0.0;
+   g_auto[i].trailAppliedPct = 0.0;
+   g_auto[i].trailTriedPct   = 0.0;
+   g_auto[i].trailLastTry    = 0;
+}
+
+//+------------------------------------------------------------------+
+//  Tick-level pre-TP1 trailstop.  Returns true when the trail state
+//  changed (activation or a step applied), so the caller can flag a
+//  panel redraw.  Never moves an SL backwards, and places the first
+//  SL itself when the order was opened without one
+//  (InpUseStopLoss=false) - IsSLTighter() treats a blank SL as
+//  "any candidate is tighter".
+//+------------------------------------------------------------------+
+bool UpdatePreTP1Trail(int i, double favPts, double bid, double ask, double point)
+{
+   if(!InpUseTrailStop || g_auto[i].tp1Hit) return(false);
+   if(g_auto[i].trailRefTp1Pts <= 0 || g_auto[i].trailPct <= 0) return(false);
+   if(g_auto[i].entryPrice <= 0.0 || point <= 0.0) return(false);
+
+   if(favPts > g_auto[i].trailPeakPts)
+      g_auto[i].trailPeakPts = favPts;
+
+   double peakPct = g_auto[i].trailPeakPts / (double)g_auto[i].trailRefTp1Pts * 100.0;
+   if(peakPct < (double)g_auto[i].trailPct) return(false);
+
+   // Highest completed 5% step (capped at TP1 = 100% for the handoff)
+   double cappedPct = MathMin(peakPct, 100.0);
+   double steps     = MathFloor((cappedPct - (double)g_auto[i].trailPct) /
+                                TRAIL_STEP_PCT + 1e-9);
+   double levelPct  = (double)g_auto[i].trailPct + steps * TRAIL_STEP_PCT;
+   if(levelPct <= g_auto[i].trailAppliedPct + 1e-9) return(false);
+
+   // A failed modify for this step is retried, but not on every tick
+   datetime now = TimeCurrent();
+   if(MathAbs(levelPct - g_auto[i].trailTriedPct) < 1e-9 &&
+      g_auto[i].trailLastTry > 0 && now - g_auto[i].trailLastTry < 5)
+      return(false);
+
+   int    dir        = g_auto[i].dir;
+   double slProgPct  = levelPct - g_auto[i].trailGapPct;
+   double candSL     = NormPrice(g_auto[i].entryPrice +
+                                 (double)dir * slProgPct / 100.0 *
+                                 (double)g_auto[i].trailRefTp1Pts * point);
+   candSL            = ClampSLToStopsLevel(dir, candSL, bid, ask, point);
+   if(candSL <= 0.0) return(false);
+
+   if(!IsSLTighter(dir, candSL, g_auto[i].slPrice, point))
+   {
+      // The SL already in place protects at least this much: count
+      // the step as applied and never pull the SL back to the trail.
+      g_auto[i].trailAppliedPct = levelPct;
+      g_auto[i].trailStarted    = true;
+      g_auto[i].trailActive     = true;
+      return(true);
+   }
+
+   g_auto[i].trailTriedPct = levelPct;
+   g_auto[i].trailLastTry  = now;
+   if(!TradeModifyPosition(g_auto[i].ticket, candSL, g_auto[i].tpPrice))
+      return(false);
+
+   g_auto[i].slPrice         = candSL;
+   g_auto[i].slPts           = (int)MathRound(MathAbs(g_auto[i].entryPrice - candSL) / point);
+   g_auto[i].trailAppliedPct = levelPct;
+   g_auto[i].trailStarted    = true;
+   g_auto[i].trailActive     = true;
+   return(true);
 }
 
 //+------------------------------------------------------------------+
@@ -1935,16 +2106,62 @@ void SyncAutoState()
                g_auto[i].tp3Pts = recTp3;
             }
 
-            // If SL is already at Break-Even or better, mark TP1 hit and Trailstop active
+            // A freshly filled pending (or a position found after a
+            // restart) gets its pre-TP1 trailstop settings frozen now,
+            // against the TP1 distance recovered / carried above.
+            if(InpUseTrailStop && g_auto[i].trailRefTp1Pts <= 0)
+               InitTrailState(i);
+
+            // Recover the trail / TP state from where the broker SL sits:
+            //   SL at Entry          -> TP1 was hit (Break-Even placed)
+            //   SL at / beyond TP1   -> TP2 was hit (SL locked to TP1)
+            //   SL in profit, before -> the pre-TP1 trailstop had already
+            //     TP1                  started; TP1 itself was NOT hit
+            // With the trailstop off, keep the legacy rule: an SL at
+            // Break-Even or better means TP1 was hit.
             if(g_auto[i].slPrice > 0.0)
             {
-               bool atBE = (g_auto[i].dir > 0)
-                           ? (g_auto[i].slPrice >= g_auto[i].entryPrice - 0.5 * point)
-                           : (g_auto[i].slPrice <= g_auto[i].entryPrice + 0.5 * point);
-               if(atBE)
+               if(!InpUseTrailStop)
                {
-                  g_auto[i].tp1Hit      = true;
-                  g_auto[i].trailActive = true;
+                  bool atBE = (g_auto[i].dir > 0)
+                              ? (g_auto[i].slPrice >= g_auto[i].entryPrice - 0.5 * point)
+                              : (g_auto[i].slPrice <= g_auto[i].entryPrice + 0.5 * point);
+                  if(atBE)
+                  {
+                     g_auto[i].tp1Hit      = true;
+                     g_auto[i].trailActive = true;
+                  }
+               }
+               else
+               {
+                  double slFavPts = (g_auto[i].dir > 0)
+                                    ? (g_auto[i].slPrice - g_auto[i].entryPrice) / point
+                                    : (g_auto[i].entryPrice - g_auto[i].slPrice) / point;
+                  if(g_auto[i].tp1Pts > 0 && slFavPts >= (double)g_auto[i].tp1Pts - 0.5)
+                  {
+                     g_auto[i].tp1Hit      = true;
+                     g_auto[i].tp2Hit      = true;
+                     g_auto[i].trailStarted = true;
+                     g_auto[i].trailActive  = true;
+                  }
+                  else if(MathAbs(slFavPts) <= 0.5)
+                  {
+                     g_auto[i].tp1Hit       = true;
+                     g_auto[i].trailStarted = true;
+                     g_auto[i].trailActive  = true;
+                  }
+                  else if(slFavPts > 0.5)
+                  {
+                     g_auto[i].trailStarted = true;
+                     g_auto[i].trailActive  = true;
+                     if(g_auto[i].trailRefTp1Pts > 0)
+                     {
+                        double slPct = slFavPts / (double)g_auto[i].trailRefTp1Pts * 100.0;
+                        g_auto[i].trailAppliedPct = MathMin(100.0, slPct + g_auto[i].trailGapPct);
+                        g_auto[i].trailPeakPts    = g_auto[i].trailAppliedPct / 100.0 *
+                                                    (double)g_auto[i].trailRefTp1Pts;
+                     }
+                  }
                }
             }
             if(g_auto[i].lastSignalBar == 0)
@@ -2062,6 +2279,7 @@ bool PlacePlanOrder(int i)
       g_auto[i].placedBar     = g_rows[i].lastBar;
       g_auto[i].lastEvalBar   = g_rows[i].lastBar;
       g_auto[i].lastSignalBar = g_rows[i].lastBar;
+      InitTrailState(i);          // market fill: freeze the trailstop % now
       return(true);
    }
    else
@@ -2091,6 +2309,17 @@ bool PlacePlanOrder(int i)
       g_auto[i].tp1Hit        = false;
       g_auto[i].tp2Hit        = false;
       g_auto[i].trailActive   = false;
+      //  The trailstop is initialised when this pending fills (see
+      //  SyncAutoState), so its % and TP1 reference match the fill.
+      g_auto[i].trailSteady    = false;
+      g_auto[i].trailStarted   = false;
+      g_auto[i].trailPct       = 0;
+      g_auto[i].trailGapPct    = 0.0;
+      g_auto[i].trailRefTp1Pts = 0;
+      g_auto[i].trailPeakPts   = 0.0;
+      g_auto[i].trailAppliedPct = 0.0;
+      g_auto[i].trailTriedPct   = 0.0;
+      g_auto[i].trailLastTry    = 0;
       //  Range fades carry their box: a close outside it kills the trade
       //  (checked on every new closed bar, before the other rules).
       g_auto[i].isRange       = (g_rows[i].mode == 2);
@@ -2397,8 +2626,15 @@ void ManageAutoTick()
             }
          }
 
-         // ---- TP1 hit: move SL to Break-Even (Trailstop ACTIVE) and
-         //      partial-close 70% if lot > minLot ---------------------
+         // ---- Pre-TP1 stepped trailstop: ratchet the SL in 5% steps
+         //      on the way to TP1.  Runs before the TP1 check so a tick
+         //      that lands on TP1 first lands the final trailed SL;
+         //      the TP1 rule below then keeps whichever SL is tighter.
+         if(UpdatePreTP1Trail(i, favPts, bid, ask, point))
+            stateChanged = true;
+
+         // ---- TP1 hit: move SL to Break-Even (only if tighter than
+         //      the trailed SL) and partial-close 70% if lot > minLot -
          if(!g_auto[i].tp1Hit && g_auto[i].tp1Pts > 0 &&
             favPts >= (double)g_auto[i].tp1Pts - 1e-6)
          {
@@ -2618,6 +2854,20 @@ void UpdateAutoPanel()
       g_auto[i].lbl[3][1] = "Distance:";
       g_auto[i].val[3][1] = StringFormat("to %s %d pts", nextTpTag, nextTpPts);
       g_auto[i].clr[3][1] = InpBuyColor;
+
+      // ---- the trailstop % SimpleEA picked for this trade ----------
+      g_auto[i].lbl[3][2] = "TS:";
+      if(!g_auto[i].isOpen || g_auto[i].trailPct <= 0)
+      {
+         g_auto[i].val[3][2] = InpUseTrailStop ? "--" : "Off";
+         g_auto[i].clr[3][2] = clrSilver;
+      }
+      else
+      {
+         g_auto[i].val[3][2] = StringFormat("%d%% %s", g_auto[i].trailPct,
+                                            g_auto[i].trailSteady ? "Steady" : "Tight");
+         g_auto[i].clr[3][2] = g_auto[i].trailStarted ? InpBuyColor : clrSilver;
+      }
    }
 }
 
