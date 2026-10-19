@@ -219,7 +219,6 @@ reading never changes after the fact.
 | | `InpBgColor` | `48,48,48` (`#303030`) | panel background colour |
 | Thresholds | `InpBuyScore` | 2 | score ≥ this ⇒ BUY |
 | | `InpSellScore` | −2 | score ≤ this ⇒ SELL |
-| | `InpBarsToLoad` | 700 | closed bars pulled per timeframe |
 | Shared | `InpHurstWindow` | 256 | Hurst estimate window in bars |
 | | `InpERPeriod` | 20 | efficiency-ratio period |
 | | `InpERDead` | 0.10 | below this ⇒ dead market, force HOLD (with reason) |
@@ -234,7 +233,17 @@ reading never changes after the fact.
 | | `InpHurstRevert*` | 0.45 | anti-persistent threshold |
 
 Raising `InpHurstTrend` makes the panel more selective (more HOLD, fewer calls). Raising
-`InpBuyScore` to 3 requires all three components to agree.
+`InpBuyScore` to 3 requires all three components to agree. The two gates are validated at load:
+if `InpBuyScore` is not greater than `InpSellScore` the EA refuses to start, because an overlapping
+pair (say `-2` / `2` the wrong way round) would make score 0 pass the BUY test and the panel would
+call BUY forever.
+
+**History depth is automatic.** There is no bars-to-load input. The EA pulls **700 closed bars per
+timeframe** as its floor and raises that number itself when your own periods need more: four times
+the longest trend period (`InpL1_*`), the Hurst window plus margin, or the range/ATR/E-R lookbacks
+(whichever is largest), capped at 50 000. Change `InpHurstWindow` to 900 or a trend period to 400
+and the pull follows on its own — there is nothing to keep in sync, and the panel still only ever
+reads closed, finished bars.
 
 ---
 

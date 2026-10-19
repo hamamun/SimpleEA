@@ -188,7 +188,6 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 input group "=== Signal thresholds ==="
 input int      InpBuyScore    = 2;           // Score >= this  => BUY
 input int      InpSellScore   = -2;          // Score <= this  => SELL
-input int      InpBarsToLoad  = 700;         // Closed bars pulled per timeframe
 
 input group "=== Trade plan & sizing ==="
 input bool     InpShowPlan     = true;       // Show the trade plan block
@@ -286,6 +285,14 @@ input double   InpHurstRevertM30 = 0.45;
 #define AUTO_LBL_B  11     // label width in chars for Col B ("Distance: ")
 #define AUTO_LBL_C  5      // label width in chars for Col C ("Ask: " / "Bid: ")
 
+//  HISTORY DEPTH (no input - the engine sizes its own pull)
+//  BARS_BASE is the smallest pull and is enough for the default
+//  calibration.  BarsNeeded() raises it automatically whenever the
+//  user's own periods ask for more history than the base provides.
+#define BARS_BASE      700   // lowest number of closed bars pulled per timeframe
+#define BARS_WARMUP_X  4     // recursive filter warm-up: multiples of the longest period
+#define BARS_MAX       50000 // hard ceiling so a typo cannot ask for absurd history
+
 //  The only chart timeframes this engine is calibrated for.  Anything else
 //  is refused outright - see the CHART-TIMEFRAME RULE block in the header
 //  and the "Incompatible chart" notice below.
@@ -327,6 +334,42 @@ bool g_panelOK = false; // what is currently drawn: false = notice only
 datetime g_srvSaidClosedUntil = 0;  // server said "market closed": trust it for a while
 
 ENUM_TIMEFRAMES g_drawnTf = (ENUM_TIMEFRAMES)0;  // timeframe the header was drawn for
+
+//+------------------------------------------------------------------+
+//  HOW MANY CLOSED BARS THIS BUILD ACTUALLY NEEDS
+//
+//  Every consumer of history has a minimum:
+//     - Hurst          : its window, walked with block averages
+//     - PrecisionTrend : a recursive high-pass filter - it converges
+//                        over several multiples of the LONGEST period
+//     - E/R, ATR, range box : a handful of bars each
+//
+//  The pull is the largest of those, never below BARS_BASE.  So the
+//  default settings keep pulling 700, but raising the Hurst window to
+//  900 or a trend period to 400 raises the pull automatically -
+//  there is nothing to remember to change alongside them.
+//+------------------------------------------------------------------+
+int BarsNeeded()
+{
+   int need = BARS_BASE;
+
+   //  Longest trend period across the three timeframes.
+   int l1max = MathMax(InpL1_M5, MathMax(InpL1_M15, InpL1_M30));
+   int l1need = BARS_WARMUP_X * l1max;
+   if(l1need > need) need = l1need;
+
+   //  Hurst window plus margin for the block averaging.
+   int hneed = InpHurstWindow + 50;
+   if(hneed > need) need = hneed;
+
+   //  Short lookbacks: only matter if someone sets them very large.
+   if(InpRangeBars + 5 > need) need = InpRangeBars + 5;
+   if(InpATRPeriod  + 5 > need) need = InpATRPeriod  + 5;
+   if(InpERPeriod   + 5 > need) need = InpERPeriod   + 5;
+
+   if(need > BARS_MAX) need = BARS_MAX;
+   return(need);
+}
 
 //==================================================================
 //  SETUP
@@ -374,6 +417,25 @@ int OnInit()
             "Set L1 > L2 for every timeframe.");
       return(INIT_PARAMETERS_INCORRECT);
    }
+
+   //  The two score gates must not overlap.  With BUY <= SELL a score
+   //  that is both "high enough to buy" and "low enough to sell" would
+   //  take the BUY branch first and the panel would call BUY forever,
+   //  so the wrong pair is refused at load instead of traded.
+   if(InpBuyScore <= InpSellScore)
+   {
+      PrintFormat("SimpleEA: InpBuyScore (%d) must be greater than InpSellScore (%d). "
+                  "The score runs -3..+3, so a BUY gate of 2 and a SELL gate of -2 "
+                  "is the default; the two must never cross.",
+                  InpBuyScore, InpSellScore);
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+
+   //  Gates outside the reachable range are legal but can never fire;
+   //  say so once instead of leaving a silently dead panel.
+   if(InpBuyScore > 3 || InpSellScore < -3)
+      PrintFormat("SimpleEA: note - the score only reaches -3..+3, so a gate of %d / %d "
+                  "will never trigger.", InpBuyScore, InpSellScore);
 
    g_rowH   = InpFontSize + 11;
    // Each timeframe takes TWO lines: Trend/Regime on the first,
@@ -776,7 +838,7 @@ void EvaluateRow(int idx)
 {
    double c[], h[], l[];
 
-   int want = MathMax(InpBarsToLoad, InpHurstWindow + 50);
+   int want = BarsNeeded();   // 700 minimum, raised automatically by the periods above
    if(!LoadClosed(_Symbol, g_rows[idx].tf, want, c, h, l))
    {
       g_rows[idx].ok           = false;
