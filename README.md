@@ -310,13 +310,13 @@ sizes 6–16 and prints the answer at the end of its run.
 | **5. Reach** | `Reach:` — a rough bar count for how long the target may take (the target's own distance in ATR units, squared — a typical random walk, not a forecast). This is what makes scalp / short-term / intraday visibly different in **time**, not only in points. |
 | **6. Validity / Hold** | On an advice plan or a waiting pending order this is the idea's own leash: **3 bars** from the bar the idea was born (the measured median, see below), shown as a live countdown `left/total bars`. **Range fades use `InpValidBarsRange`** (default 8) instead — the box-kill is their real invalidation, so a longer leash only removes the cancel/re-place churn while the box holds. The idea is re-born when the direction changes, the game switches (trend ↔ range), or the leash runs out — the `0/total` bar is the rethink bar, the same bars the auto-trader expires and re-places a waiting order on. Once a **trade is open** the signal's leash is spent and the cell switches to `Hold: N bars (est ~M)` — bars held against the Reach estimate. |
 
-**Three sizing modes** (`InpUseRisk` / `InpUseMinLot`):
+**Sizing: one switch and one number** (`InpUseRisk` / `InpUseMinLot`):
 
 | Mode | What it does |
 |---|---|
-| Risk (**default**, `InpUseRisk=true`) | Risks `InpRiskPct` % of balance at score 2 — default 0.5 — and **double that (1.0 %)** at score 3, the only reading where all three components agree. The lot is whatever risks that much at that timeframe's stop — a wider stop automatically means a smaller lot. |
-| Risk-off (`InpUseRisk=false`) | Ignores the stop distance entirely: a balance ladder — one 0.01 lot per **1,000** of balance, multiplied by **1.5** when all three components agree. |
-| Min lot (`InpUseMinLot=true`) | Always advises your symbol's smallest allowed lot, whatever the risk says. This overrides the other two. |
+| **Allow risk** — `InpUseRisk=true` (**default**) | Risks `InpRiskPct` % of balance at score 2 — default 0.5 — and **double that (1.0 %)** at score 3, the only reading where all three components agree. The lot is whatever risks that much at that timeframe's stop — a wider stop automatically means a smaller lot. |
+| No risk % — `InpUseRisk=false` | The percentage is not applied at all. Size comes from a **fixed ladder** baked into the EA: one 0.01 lot per **1,000** of balance, ×**1.5** when all three components agree. It ignores the stop distance, so the money at risk varies by timeframe. |
+| Min lot — `InpUseMinLot=true` | Always advises your symbol's smallest allowed lot, whatever the risk says. This overrides the other two — the smallest position the broker permits, which is as close to "no risk" as a trade can get. |
 
 Two honest touches: if the smallest lot risks **more** than your target percentage, the `Lot:` cell
 says so (`0.01 (min, 3.36 USD)`) instead of quietly over-risking; and every level is snapped onto
@@ -330,7 +330,7 @@ Inputs, all under *Trade plan*:
 
 | Input | Default | Meaning |
 |---|---|---|
-| `InpUseRisk` | true | Size by risk % of balance (false = balance ladder) |
+| `InpUseRisk` | true | **Allow risk** — risk % of balance; false = no risk %, fixed lot ladder |
 | `InpUseMinLot` | false | Always advise the symbol's minimum lot |
 | `InpRiskPct` | 0.5 | Risk % per trade; score 3 risks double (1.0 %) |
 | `InpValidBarsRange` | 8 | Validity of **range fades** in bars — the box-kill already guards them, they just live longer than trend pendings |

@@ -190,12 +190,15 @@ input int      InpBuyScore    = 2;           // Score >= this  => BUY
 input int      InpSellScore   = -2;          // Score <= this  => SELL
 
 input group "=== Trade plan & sizing ==="
-input bool     InpUseRisk      = true;       // Size by RISK % of balance (false = balance+score ladder)
+//  Sizing is one switch and one number:
+//     InpUseRisk  = true   -> risk InpRiskPct % of balance (score 3: double)
+//     InpUseRisk  = false  -> no risk % is applied: a fixed lot ladder,
+//                             0.01 lot per 1,000 of balance (score 3: x1.5)
+//     InpUseMinLot = true  -> overrides both: always the symbol's min lot
+//  The ladder's two numbers and the score-3 multiplier are baked in -
+//  they define the fallback, they are not a dial to tune.
+input bool     InpUseRisk      = true;       // Allow risk (false = no risk %, fixed lot ladder)
 input bool     InpUseMinLot    = false;      // Always advise the symbol's minimum lot
-//  One risk number drives both scores: score 3 risks twice the score-2
-//  percentage, because it is the only reading where all three
-//  components agree.  The stop distance itself is never an input - it
-//  is measured from the market (ATR) and the broker (points).
 input double   InpRiskPct      = 0.5;        // Risk % per trade (score 3 risks double)
 
 input group "=== Shared engine settings ==="
