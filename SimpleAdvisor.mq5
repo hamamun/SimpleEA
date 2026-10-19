@@ -9,9 +9,13 @@
 //|     Regime = how it is moving (Steady / Mixed / Choppy),         |
 //|  plus the original Signal (BUY / SELL / HOLD) and Score.         |
 //|                                                                  |
-//|  READ-ONLY.  This program contains no OrderSend / CTrade / trade  |
-//|  calls of any kind.  It cannot place, modify or close an order.   |
-//|  It only reads price history and draws text on the chart.         |
+//|  READ-ONLY OR LIVE?  The PANEL itself only reads price history    |
+//|  and draws text.  The EXECUTOR that ships with it DOES send       |
+//|  orders when InpAutoTrading = true - the shipped default.  Set    |
+//|  it to false for advice only, and nothing is ever sent.           |
+//|                                                                   |
+//|  With InpAutoTrading = false this program contains no trade       |
+//|  calls at all: it cannot place, modify or close an order.         |
 //|                                                                  |
 //|  -----------------------------------------------------------------|
 //|  SIGNAL ENGINE                                                    |
@@ -149,7 +153,7 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "2.10"
+#property version   "2.11"
 #property description "Multi-timeframe BUY/SELL/HOLD direction panel, trade plan and full-auto executor. M5 / M15 / M30 charts only."
 
 #ifndef M_PI
@@ -364,14 +368,20 @@ int BarsNeeded()
 {
    int need = BARS_BASE;
 
-   //  Longest trend period across the three timeframes.
+   //  Longest trend period across the three timeframes.  Clamped BEFORE
+   //  the multiply, so a typo (L1 = 900,000,000) cannot overflow the int
+   //  and hand the loader a negative count.
    int l1max = MathMax(InpL1_M5, MathMax(InpL1_M15, InpL1_M30));
-   int l1need = BARS_WARMUP_X * l1max;
+   if(l1max < 1)          l1max = 1;
+   if(l1max > BARS_MAX)   l1max = BARS_MAX;
+   int l1need = MathMin(BARS_MAX, BARS_WARMUP_X * l1max);
    if(l1need > need) need = l1need;
 
-   //  Hurst window plus margin for the block averaging.
-   int hneed = InpHurstWindow + 50;
-   if(hneed > need) need = hneed;
+   //  Hurst window plus margin for the block averaging (same guard).
+   int hneed = InpHurstWindow;
+   if(hneed < 32)         hneed = 32;
+   if(hneed > BARS_MAX)   hneed = BARS_MAX;
+   if(hneed + 50 > need)  need = hneed + 50;
 
    //  Short lookbacks: only matter if someone sets them very large.
    if(InpRangeBars + 5 > need) need = InpRangeBars + 5;
@@ -448,16 +458,18 @@ int OnInit()
       PrintFormat("SimpleEA: note - the score only reaches -3..+3, so a gate of %d / %d "
                   "will never trigger.", InpBuyScore, InpSellScore);
 
-   //  One risk number now drives both scores.  Zero or negative would
-   //  silently fall back to the minimum lot on every trade, so refuse it;
-   //  anything above 5% per trade is legal but worth a single warning.
-   if(InpRiskPct <= 0.0)
+   //  The risk percentage only matters while risk mode is on.  Zero or
+   //  negative there would silently fall back to the minimum lot on every
+   //  trade, so refuse it; anything above 5% is legal but worth a warning.
+   //  With InpUseRisk=false the ladder ignores the number entirely, so it
+   //  is not validated - an unused value must not stop the EA loading.
+   if(InpUseRisk && InpRiskPct <= 0.0)
    {
       Print("SimpleEA: InpRiskPct must be greater than 0 - it is the percentage "
             "of balance risked per trade (0.5 is the default, score 3 risks double).");
       return(INIT_PARAMETERS_INCORRECT);
    }
-   if(InpRiskPct > 5.0)
+   if(InpUseRisk && InpRiskPct > 5.0)
       PrintFormat("SimpleEA: note - risking %.2f%% per trade (%.2f%% at score 3) is "
                   "far above the shipped 0.5%% / 1.0%%.", InpRiskPct,
                   InpRiskPct * RISK_SCORE3_X);
@@ -1048,8 +1060,8 @@ void EvaluateRow(int idx)
 //   when the spread or the broker's stops level demands it.)
 //+------------------------------------------------------------------+
 //  ONE PLAN PER TIMEFRAME.  The second group is three blocks, one for M5,
-//  one for M15, one for M30 - because when autotrading arrives the panel
-//  has to be able to say "buy M5, sell M30" and the executor acts per row.
+//  one for M15, one for M30 - because the executor acts per row and the
+//  panel has to be able to say "buy M5, sell M30".
 struct SPlanRow
 {
    int      state;                // 0 HOLD, 1 waiting for data, 2 active

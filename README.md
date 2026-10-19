@@ -1,7 +1,9 @@
 # SimpleEA — multi-timeframe direction panel (MT5)
 
-A very simple, read-only Expert Advisor that shows, in plain words, what price is doing on
-**M5 (scalping)**, **M15 (short-term)** and **M30 (intraday)** on **any symbol**. Each
+A very simple Expert Advisor that shows, in plain words, what price is doing on
+**M5 (scalping)**, **M15 (short-term)** and **M30 (intraday)** on **any symbol**. The panel is
+read-only; the full-auto executor that ships with it is switched on by `InpAutoTrading`
+(default `true`, so set it to `false` for advice only). Each
 timeframe gets two lines — the plain words first, then the original trading read underneath,
 so nothing from the first panel is lost:
 
@@ -92,13 +94,14 @@ changes the chart timeframe through H1 → M15 → M1 → D1 → H4 → M30 and 
 at every step. The rule itself is verified state by state in
 `research/verify_timeframe_gate.py`.
 
-**It contains no order-sending code.** It cannot place, modify or close a trade, so it is safe to
-leave on a live chart.
+**Read-only unless you ask otherwise.** The panel itself never trades: with
+`InpAutoTrading = false` the EA cannot place, modify or close anything and is safe to leave on a
+live chart. With the shipped default `InpAutoTrading = true` it *does* run its own orders (one per
+timeframe, magic-number tagged), so treat it as a live trader and start on demo.
 
-> **Algo Trading:** because the EA never trades, it also works with the *Algo Trading* button off.
-> If the panel does **not** appear, that button is the usual cause — turn it on, or right-click the
-> chart → *Expert Advisors* → *Properties* → *Common* → tick **Allow Algo Trading**. Turning it on
-> is harmless here: there is no trade code for it to enable.
+> **Algo Trading:** the panel appears with the *Algo Trading* button off, but an EA cannot send
+> orders without it. If nothing trades, that button is the usual cause — turn it on, or right-click
+> the chart → *Expert Advisors* → *Properties* → *Common* → tick **Allow Algo Trading**.
 
 ---
 
@@ -247,12 +250,12 @@ reads closed, finished bars.
 
 ---
 
-### Trade plan — the second group (advice only, the EA still never sends an order)
+### Trade plan — the second group (what the executor will do, and what you can copy)
 
 Below the three timeframe rows, separated by a single line, comes a **second group with one block
 per timeframe**. Same two-column style as the group above it, and no heading line — the `M5` /
 `M15` / `M30` at the start of each block says what it is. The point of the per-timeframe shape is
-this: when autotrading arrives, the executor reads one row and acts on that timeframe.
+this: the executor reads one row and acts on that timeframe.
 
 ```
  ┌──────────────────────────────────────────────────────────────────────────────────────┐
@@ -323,8 +326,9 @@ says so (`0.01 (min, 3.36 USD)`) instead of quietly over-risking; and every leve
 the broker's point grid first, so the printed points, prices and money are three views of exactly
 the same level.
 
-**No order is ever sent.** The EA contains no `OrderSend`, no `CTrade`, no trade calls of any
-kind — this group only prints numbers for you to type in yourself.
+**The block is both a plan and a report.** With `InpAutoTrading = false` it prints numbers for you
+to type in yourself — nothing is sent. With it on, the executor places exactly these numbers, and
+the block keeps showing them while the trade runs (Entry/SL/TP from the live position).
 
 Inputs, all under *Trade plan*:
 
