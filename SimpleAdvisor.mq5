@@ -131,7 +131,7 @@
 //|                   limit order and opens Market order immediately. |
 //|        Direction changes / HOLD / expiry -> cancels pending.      |
 //|   - Second Panel ("Autotrading", right or bottom of Main Panel):  |
-//|        Controlled by InpAutoPanelPos (Right default, or Bottom).  |
+//|        Controlled by InpAutoPanelPos (Bottom default, or Right).  |
 //|        Opens automatically when any market/pending order exists   |
 //|        and closes completely when flat.                           |
 //|        Header shows: Autotrading | Trailstop Off/On/Active        |
@@ -167,20 +167,19 @@ enum ENUM_AUTO_PANEL_POS
 //==================================================================
 input group "=== Autotrading ==="
 input bool                InpAutoTrading  = true;            // Autotrading (true = full auto, false = read-only)
-input bool                InpUseStopLoss  = true;            // Stoploss (true = place initial SL, false = only when trailstop / TP1 places it)
+input bool                InpUseStopLoss  = false;           // Stoploss (true = place initial SL, false = only when trailstop / TP1 places it)
 input bool                InpUseTrailStop = true;            // Pre-TP1 stepped trailstop (true = on, Entry->TP1 only)
 input int                 InpTrailPctTight  = 40;            // Trailstop % when regime is NOT Steady (10-70)
 input int                 InpTrailPctSteady = 55;            // Trailstop % in a Steady, clear trend (10-70)
-input ENUM_AUTO_PANEL_POS InpAutoPanelPos = AUTO_POS_RIGHT;  // Right panel placement (Right or Bottom)
+input ENUM_AUTO_PANEL_POS InpAutoPanelPos = AUTO_POS_BOTTOM; // Right panel placement (Right or Bottom)
 input long                InpMagicBase    = 202610;          // Base magic number (+0 M5, +1 M15, +2 M30)
-input int                 InpSlippagePts  = 20;              // Max slippage in points for market orders
 
 input group "=== Panel appearance ==="
 input int      InpPanelX      = 12;          // Panel X offset (px)
 input int      InpPanelY      = 24;          // Panel Y offset (px)
 input int      InpFontSize    = 9;           // Font size
 input string   InpFont        = "Consolas";  // Font (monospaced aligns best)
-input color    InpBgColor     = C'18,18,24'; // Panel background
+input color    InpBgColor     = C'48,48,48'; // Panel background
 input color    InpTitleColor  = clrWhite;    // Title colour
 input color    InpBuyColor    = clrLime;     // "Going up" colour
 input color    InpSellColor   = clrTomato;   // "Going down" colour
@@ -1568,6 +1567,54 @@ ENUM_ORDER_TYPE_FILLING FillingMode()
 }
 
 //+------------------------------------------------------------------+
+//  AUTO SLIPPAGE ALLOWANCE  (no input - derived per order)
+//
+//  One fixed point number cannot be right on every symbol: 20 points
+//  is 2 pips on a 5-digit FX pair, but a fraction of the spread on a
+//  3-digit gold quote or an index.  So the allowance is computed at
+//  the moment of the order from live market data:
+//
+//     allowance = 2.5 x max(current spread, broker stops level)
+//
+//  - the spread is what the fill can realistically drift through;
+//  - the broker's SYMBOL_TRADE_STOPS_LEVEL protects thin/synthetic
+//    symbols where the minimum distance is the real constraint;
+//  - clamped to 5..50 points for entries (a wide-spread symbol simply
+//    stops trading rather than accepting a bad fill), and to
+//    8..75 points x the same rule for CLOSES, because a rejected close
+//    is worse than a slightly worse exit.
+//
+//  Works unchanged on 2-, 3- and 5-digit symbols, FX, metals,
+//  indices, crypto and cent accounts - nothing to configure.
+//+------------------------------------------------------------------+
+ulong AutoSlippagePts(bool closing)
+{
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0) return(closing ? 30 : 20);
+
+   double spreadPts = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   if(spreadPts <= 0.0)
+   {
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      if(ask > 0.0 && bid > 0.0) spreadPts = (ask - bid) / point;
+   }
+
+   double stopsPts = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double base     = MathMax(MathMax(spreadPts, stopsPts), 1.0);
+
+   double dev = MathRound(2.5 * base);
+   if(closing) dev *= 1.5;
+
+   double lo = closing ? 8.0 : 5.0;
+   double hi = (closing ? MathMax(75.0, 3.0 * base)
+                        : MathMax(50.0, 2.0 * base));
+   if(dev < lo) dev = lo;
+   if(dev > hi) dev = hi;
+   return((ulong)dev);
+}
+
+//+------------------------------------------------------------------+
 double NormPrice(double p)
 {
    int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
@@ -1897,7 +1944,7 @@ bool TradeOpenMarket(int i, int dir, double lot, double sl, double tp, ulong &ou
    req.price        = NormPrice((dir > 0) ? ask : bid);
    req.sl           = (sl > 0.0) ? NormPrice(sl) : 0.0;
    req.tp           = (tp > 0.0) ? NormPrice(tp) : 0.0;
-   req.deviation    = (ulong)MathMax(0, InpSlippagePts);
+   req.deviation    = AutoSlippagePts(false);   // open: live spread based
    req.magic        = MagicForTF(i);
    req.comment      = "SimpleEA_" + g_rows[i].tag;
    req.type_filling = FillingMode();
@@ -2004,7 +2051,7 @@ bool TradeClosePosition(ulong posTicket, int dir, double volume, long magic)
    req.volume       = volume;
    req.type         = (dir > 0) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
    req.price        = NormPrice((dir > 0) ? bid : ask);
-   req.deviation    = (ulong)MathMax(0, InpSlippagePts);
+   req.deviation    = AutoSlippagePts(true);    // close: slightly looser
    req.magic        = magic;
    req.type_filling = FillingMode();
 

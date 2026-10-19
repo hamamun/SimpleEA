@@ -216,6 +216,7 @@ reading never changes after the fact.
 |---|---|---|---|
 | Panel | `InpPanelX/Y` | 12 / 24 | position in pixels |
 | | `InpFontSize` | 9 | font size |
+| | `InpBgColor` | `48,48,48` (`#303030`) | panel background colour |
 | Thresholds | `InpBuyScore` | 2 | score ≥ this ⇒ BUY |
 | | `InpSellScore` | −2 | score ≤ this ⇒ SELL |
 | | `InpBarsToLoad` | 700 | closed bars pulled per timeframe |
@@ -337,7 +338,7 @@ New inputs, all under *Trade plan*:
 | `InpClosedStaleMin` | 30 | Quote-age in minutes that also counts as closed (0 = off) |
 
 Everything is read from your broker's own contract data (tick value, tick size, lot step,
-minimum/maximum lot, minimum stop distance, account balance and currency), so the block is correct
+minimum/maximum lot, minimum stop distance, live spread, account balance and currency), so the block is correct
 on 2- and 3-digit gold, FX, indices, cent accounts and non-USD accounts alike.
 
 The arithmetic is checked symbol by symbol in `research/verify_plan_math.py`, and
@@ -356,13 +357,17 @@ read-only mode):
 | Input | Default | Meaning |
 |---|---|---|
 | `InpAutoTrading` | **true** | Full-auto execution on (`true`) or read-only (`false`) |
-| `InpUseStopLoss` | **true** | Place initial Stop Loss on order (`true` default); when `false`, no SL is placed initially — the pre-TP1 trailstop places the first SL at activation (or TP1 places it at Break-Even if the trailstop is off) |
+| `InpUseStopLoss` | **false** | Place initial Stop Loss on order when `true` (default is `false`): no SL is placed at entry — the pre-TP1 trailstop places the first SL at activation (or TP1 places it at Break-Even if the trailstop is off) |
 | `InpUseTrailStop` | **true** | Pre-TP1 stepped trailstop on/off (Entry→TP1 only; hands off to the TP1 logic at TP1) |
 | `InpTrailPctTight` | **40** | Trailstop % used when the regime is NOT Steady (10–70, clamped) |
 | `InpTrailPctSteady` | **55** | Trailstop % used in a Steady regime with a clear trend in the trade's direction (10–70, clamped) |
-| `InpAutoPanelPos` | **Right** (`AUTO_POS_RIGHT`) | Second panel placement: **Right** (beside Main Panel) or **Bottom** (below Main Panel) |
+| `InpAutoPanelPos` | **Bottom** (`AUTO_POS_BOTTOM`) | Second panel placement: **Right** (beside Main Panel) or **Bottom** (below Main Panel) |
 | `InpMagicBase` | 202610 | Base magic number (`+0` M5, `+1` M15, `+2` M30) |
-| `InpSlippagePts` | 20 | Maximum slippage in points for market orders |
+
+There is no slippage input. The allowance is derived per order from the live market, so one EA is
+correct on every symbol: `2.5 × max(current spread, broker stops level)`, clamped to 5–50 points
+for entries and 8–75 points (and ×1.5) for closes, because a rejected close is worse than a
+slightly worse exit.
 
 #### Execution & Trade Management Rules
 
