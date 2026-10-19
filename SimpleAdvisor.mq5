@@ -190,7 +190,6 @@ input int      InpBuyScore    = 2;           // Score >= this  => BUY
 input int      InpSellScore   = -2;          // Score <= this  => SELL
 
 input group "=== Trade plan & sizing ==="
-input bool     InpShowPlan     = true;       // Show the trade plan block
 input bool     InpUseRisk      = true;       // Size by RISK % of balance (false = balance+score ladder)
 input bool     InpUseMinLot    = false;      // Always advise the symbol's minimum lot
 input double   InpRiskScore2   = 0.5;        // Risk % when score is 2 (risk mode)
@@ -3385,10 +3384,10 @@ void DrawSupportedPanel()
    string symRight = "|  " + _Symbol + "  |  " + ChartTimeframeText();
    int    headW    = pad + titleW + em + (16 + 3 + 2 + StringLen(symRight)) * em + pad;
    int    wantW    = (int)MathMax(NoticeWidth(), headW);
-   if(InpShowPlan) wantW = (int)MathMax(wantW, PlanWidthNeed());
-   g_panelW = wantW;
-   g_panelH = HEAD_H + TF_COUNT * 2 * rowH + 8
-              + (InpShowPlan ? (PLAN_SEP_H + TotalPlanLines() * rowH) : 0);
+   wantW           = (int)MathMax(wantW, PlanWidthNeed());
+   g_panelW        = wantW;
+   g_panelH        = HEAD_H + TF_COUNT * 2 * rowH + 8
+                     + PLAN_SEP_H + TotalPlanLines() * rowH;
    MakeRect("bg",  x, y, g_panelW, g_panelH, InpBgColor, clrDimGray);
    MakeRect("sep", x + 4, y + HEAD_H - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
 
@@ -3467,8 +3466,10 @@ void DrawSupportedPanel()
    }
 
    // ---- the trade plan: one block per timeframe below the rows -------
-   if(InpShowPlan) DrawPlanBlock(x, y);
-   else            DeletePlanObjects();
+   //  Always drawn: the plan is the panel's answer to "what will it do
+   //  next", and the auto-trader reads the same numbers, so hiding it
+   //  would only hide the working.
+   DrawPlanBlock(x, y);
 
    // ---- the 2nd panel (Autotrading): right of the Main Panel ---------
    DrawAutoPanel();
@@ -3519,8 +3520,6 @@ void PlanColumns(int &cA, int &vA, int &cB, int &vB, int &cC, int &vC)
 //+------------------------------------------------------------------+
 int TotalPlanLines()
 {
-   if(!InpShowPlan) return(0);
-
    int n = 0;
    for(int i = 0; i < TF_COUNT; i++)
       n += g_plans[i].lines;
@@ -3534,7 +3533,7 @@ int TotalPlanLines()
 //+------------------------------------------------------------------+
 int PlanWidthNeed()
 {
-   if(!InpShowPlan || !ChartSupported()) return(0);
+   if(!ChartSupported()) return(0);
 
    int cA, vA, cB, vB, cC, vC;
    PlanColumns(cA, vA, cB, vB, cC, vC);

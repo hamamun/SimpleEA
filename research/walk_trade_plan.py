@@ -80,7 +80,7 @@ class Panel:
     def __init__(self, symbol, spec, balance, tags=("M5", "M15", "M30"),
                  cur="USD", use_risk=True, use_min_lot=False, risk2=0.5, risk3=1.0,
                  sl_atr=None, tp_atr=None, pend_atr=0.5, valid_bars=3,
-                 valid_bars_range=8, show_plan=True,
+                 valid_bars_range=8,
                  atr=None):
         self.symbol, self.spec, self.balance, self.cur = symbol, spec, balance, cur
         self.tags = tags
@@ -88,7 +88,7 @@ class Panel:
         self.risk2, self.risk3 = risk2, risk3
         self.sl_atr = per_tf(sl_atr, SL_ATR)
         self.tp_atr = per_tf(tp_atr, TP_ATR)
-        self.pend_atr, self.valid_bars, self.show_plan = pend_atr, valid_bars, show_plan
+        self.pend_atr, self.valid_bars = pend_atr, valid_bars
         self.valid_bars_range = valid_bars_range       # InpValidBarsRange in the EA
         self.panel_w = 406
         self.panel_h = 130
@@ -270,12 +270,10 @@ class Panel:
         return cA, vA, cB, vB, cC, vC
 
     def total_plan_lines(self):
-        return 0 if not self.show_plan else sum(p["lines"] for p in self.plans.values())
+        return sum(p["lines"] for p in self.plans.values())
 
     # ---- PlanWidthNeed() ------------------------------------------------
     def plan_width_need(self):
-        if not self.show_plan:
-            return 0
         cA, vA, cB, vB, cC, vC = self.plan_columns()
         need = 44 + len("pending +3/3") * EM + 10
         for t, p in self.plans.items():
@@ -292,7 +290,7 @@ class Panel:
     def draw(self):
         row_h = FONT + 11
         self.panel_h = (HEAD_H + TF_COUNT * 2 * row_h + 8
-                        + (PLAN_SEP_H + self.total_plan_lines() * row_h if self.show_plan else 0))
+                        + PLAN_SEP_H + self.total_plan_lines() * row_h)
         # the real EA: NoticeWidth() is the floor for BOTH panels, then the
         # plan's own measured need (when it is shown) can only add to it
         sym_right = "|  %s  |  %s" % (self.symbol, self.tags[0])
@@ -301,8 +299,7 @@ class Panel:
         want = max(PLAN_W_MIN,
                    10 + len(NOTICE) * char_w(FONT + 1, DPI) + 10,
                    head_w)
-        if self.show_plan:
-            want = max(want, self.plan_width_need())
+        want = max(want, self.plan_width_need())
         self.panel_w = want
 
         w_cols = int((self.panel_w - 4) / CELL)    # usable half-glyph columns
@@ -359,25 +356,24 @@ class Panel:
             line += 1
 
         # ---- Group 2 -----------------------------------------------------
-        if self.show_plan:
-            separators.add(line)                     # the separator between groups
-            line += 1
-            cA, vA, cB, vB, cC, vC = self.plan_columns()
-            for t in self.tags:
-                p = self.plans[t]
-                put(p["head"], 10, line)
-                if p["kind"]:
-                    put(p["kind"], 44, line)
-                if p["lines"] == 1 and p["note"]:
-                    put(p["note"], cA, line)
-                for l in range(p["lines"]):
-                    for c in range(3):
-                        key = (l, c)
-                        if key not in p["lbl"]:
-                            continue
-                        put(p["lbl"][key], (cA, cB, cC)[c], line + l)
-                        put(p["val"][key], (vA, vB, vC)[c], line + l)
-                line += p["lines"]
+        separators.add(line)                     # the separator between groups
+        line += 1
+        cA, vA, cB, vB, cC, vC = self.plan_columns()
+        for t in self.tags:
+            p = self.plans[t]
+            put(p["head"], 10, line)
+            if p["kind"]:
+                put(p["kind"], 44, line)
+            if p["lines"] == 1 and p["note"]:
+                put(p["note"], cA, line)
+            for l in range(p["lines"]):
+                for c in range(3):
+                    key = (l, c)
+                    if key not in p["lbl"]:
+                        continue
+                    put(p["lbl"][key], (cA, cB, cC)[c], line + l)
+                    put(p["val"][key], (vA, vB, vC)[c], line + l)
+            line += p["lines"]
 
         rows = ["".join(r).rstrip() for r in grid]
         for r in separators:
@@ -533,10 +529,6 @@ def main():
                 symbol="EURUSD", spec=SYMBOLS["EURUSD-5d"], balance=800.0,
                 use_min_lot=True, price=1.08542,
                 atr={"M5": 0.00055, "M15": 0.00090, "M30": 0.00140})
-    bad += case("H)  InpShowPlan = false: Group 2 is not drawn at all",
-                {"M5":  dict(direction=1, score=3, trend="Going up", regime="Steady"),
-                 "M15": dict(direction=0, score=0),
-                 "M30": dict(direction=0, score=0)}, show_plan=False)
     bad += case("I)  Part 2: blocked rows say WHY; Signal shows the trade "
                 "they would have fired (greyed on the real panel)",
                 {"M5":  dict(direction=0, score=2, trend="Sideways", regime="Mixed",

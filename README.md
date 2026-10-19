@@ -292,8 +292,8 @@ band, stop = band + 1 ATR, target = half the box (the midpoint):
 **A HOLD or waiting timeframe takes a single line**, so the group is only as tall as it has
 content for — and the panel is only as wide as its widest line, measured before it is drawn.
 With no signals anywhere the group is three short lines and the box shrinks back to the width the
-header and the "Incompatible chart" notice need; with `InpShowPlan=false` the group is not drawn
-at all.
+header and the "Incompatible chart" notice need. The group is always drawn — it is the panel's
+answer to *what will it do next*, and the auto-trader reads the very same numbers from it.
 
 The width budget is one character = 0.55 em at the terminal's own screen DPI, which is exactly
 what the default font (`InpFont = "Consolas"`) occupies — so the panel is neither clipped nor
@@ -330,7 +330,6 @@ New inputs, all under *Trade plan*:
 
 | Input | Default | Meaning |
 |---|---|---|
-| `InpShowPlan` | true | Draw the second group at all |
 | `InpUseRisk` | true | Size by risk % of balance (false = balance ladder) |
 | `InpUseMinLot` | false | Always advise the symbol's minimum lot |
 | `InpRiskScore2` / `InpRiskScore3` | 0.5 / 1.0 | Risk % at score 2 and score 3 |
@@ -351,10 +350,10 @@ minimum/maximum lot, minimum stop distance, live spread, account balance and cur
 on 2- and 3-digit gold, FX, indices, cent accounts and non-USD accounts alike.
 
 The arithmetic is checked symbol by symbol in `research/verify_plan_math.py`, and
-`research/walk_trade_plan.py` renders the whole panel for ten states — all timeframes active,
-one active, none, a loading timeframe, a small account, a very large balance, min-lot mode,
-the plan switched off, blocked rows stating their reasons, and range fades on the box —
-failing if any line would overflow.
+`research/walk_trade_plan.py` renders the whole panel for every state it has to survive — all
+timeframes active, one active, none, a loading timeframe, a small account, a very large balance,
+min-lot mode, blocked rows stating their reasons, and range fades on the box — failing if any
+line would overflow.
 
 ---
 

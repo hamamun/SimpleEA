@@ -192,7 +192,7 @@ class AutoTraderSim:
                  use_stop_loss=True, use_trail_stop=True, trail_pct_tight=40,
                  trail_pct_steady=55, auto_panel_pos=AUTO_POS_RIGHT, panel_x=12, panel_y=24,
                  use_risk=True, use_min_lot=False, risk2=0.5, risk3=1.0,
-                 sl_atr=None, tp_atr=None, pend_atr=0.5, valid_bars=3, show_plan=True):
+                 sl_atr=None, tp_atr=None, pend_atr=0.5, valid_bars=3):
         self.symbol = symbol
         self.spec = spec or SYMBOLS["XAUUSD-2d"]
         self.balance = balance
@@ -216,7 +216,6 @@ class AutoTraderSim:
         self.pend_atr = pend_atr
         self.valid_bars = valid_bars
         self.valid_bars_range = 8
-        self.show_plan = show_plan
 
         self.bid = 4285.70
         self.ask = 4285.70
