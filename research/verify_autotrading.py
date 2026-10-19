@@ -188,6 +188,11 @@ class AutoSlot:
 class AutoTraderSim:
     """Full transcription of SimpleAdvisor.mq5's plan + autotrader + dual panels."""
 
+    #  NOTE: use_stop_loss defaults to True here because most checks below
+    #  assert the stop a freshly placed order carries.  The SHIPPED EA
+    #  default is false (InpUseStopLoss=false: the pre-TP1 trail places the
+    #  first SL); the no-SL behaviour is verified explicitly further down
+    #  with use_stop_loss=False.
     def __init__(self, symbol="XAUUSD", spec=None, balance=800.0, auto_trading=True,
                  use_stop_loss=True, use_trail_stop=True, trail_pct_tight=40,
                  trail_pct_steady=55, auto_panel_pos=AUTO_POS_RIGHT, panel_x=12, panel_y=24,
@@ -209,7 +214,7 @@ class AutoTraderSim:
         self.use_min_lot = use_min_lot
         self.risk2 = risk2
         self.risk3 = risk3
-        #  per-timeframe stop/target (InpSLATR_* / InpTPATR_*): None =
+        #  per-timeframe stop/target (SL_ATR_* / TP_ATR_*): None =
         #  the EA's shipped profile - scalp aims near, intraday aims far
         self.sl_atr = per_tf(sl_atr, SL_ATR)
         self.tp_atr = per_tf(tp_atr, TP_ATR)
@@ -1138,10 +1143,13 @@ def main():
     # ------------------------------------------------------------------
     # 3b. Per-timeframe stop/target profile: the three styles aim apart
     # ------------------------------------------------------------------
-    #  Shipped defaults (InpSLATR_* / InpTPATR_*): M5 1.0/0.9, M15 1.2/1.8,
+    #  Shipped profile (SL_ATR_* / TP_ATR_*): M5 1.0/0.9, M15 1.2/1.8,
     #  M30 1.5/3.0 ATR - on the sim's XAUUSD ATRs 0.28 / 0.85 / 1.70 that is
     #  stop/target 28/25, 102/153, 255/510 points -> R:R 1:0.89 / 1:1.5 / 1:2.
-    prof = AutoTraderSim(auto_trading=True)
+    #  This check is about the STOP the order carries at placement, so it
+    #  needs the initial-SL mode explicitly: the shipped default is false
+    #  (the pre-TP1 trail places the first SL instead).
+    prof = AutoTraderSim(auto_trading=True, use_stop_loss=True)
     prof.set_bar("M5", 1, 3, bar_time=1000)
     prof.set_bar("M15", 1, 3, bar_time=1000)
     prof.set_bar("M30", 1, 3, bar_time=1000)

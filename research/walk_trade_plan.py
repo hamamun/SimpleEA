@@ -44,7 +44,7 @@ CELL = RENDER_CW                      # the picture is one character per glyph
 MINUTES = {"M5": 5, "M15": 15, "M30": 30}
 HOLD, WAITING, ACTIVE = 0, 1, 2
 
-#  InpSLATR_* / InpTPATR_* in the EA: stop and target are set PER
+#  SL_ATR_* / TP_ATR_* (baked into the EA): stop and target are set PER
 #  TIMEFRAME, so the three styles aim apart - a scalp aims near and
 #  quick, an intraday trade aims far and lets the move run.
 SL_ATR = {"M5": 1.0, "M15": 1.2, "M30": 1.5}
@@ -529,7 +529,7 @@ def main():
                 symbol="EURUSD", spec=SYMBOLS["EURUSD-5d"], balance=800.0,
                 use_min_lot=True, price=1.08542,
                 atr={"M5": 0.00055, "M15": 0.00090, "M30": 0.00140})
-    bad += case("I)  Part 2: blocked rows say WHY; Signal shows the trade "
+    bad += case("H)  Part 2: blocked rows say WHY; Signal shows the trade "
                 "they would have fired (greyed on the real panel)",
                 {"M5":  dict(direction=0, score=2, trend="Sideways", regime="Mixed",
                              reason="mixed — no edge either way"),
@@ -537,7 +537,7 @@ def main():
                              reason="quiet — nothing worth trading"),
                  "M30": dict(direction=0, score=0, trend="Sideways", regime="Choppy",
                              reason="chop — nothing clears the spread")})
-    bad += case("J)  Part 2: range fades on two timeframes - limit at the "
+    bad += case("I)  Part 2: range fades on two timeframes - limit at the "
                 "opposite band, target = half the box",
                 {"M5":  dict(direction=-1, score=-1, trend="Going down", regime="Choppy",
                              mode=2, rng_top=4286.60, rng_bot=4284.60),
@@ -546,7 +546,7 @@ def main():
                              mode=2, rng_top=4290.00, rng_bot=4282.00)},
                 price=4285.70)
 
-    bad += case("K)  the time cell on live trades: Hold (bars held vs Reach) "
+    bad += case("J)  the time cell on live trades: Hold (bars held vs Reach) "
                 "instead of the signal leash",
                 {"M5":  dict(direction=1, score=3, trend="Going up", regime="Steady",
                              held=1),
