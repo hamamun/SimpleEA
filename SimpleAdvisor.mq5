@@ -55,7 +55,7 @@
 //|  Kaufman's Efficiency Ratio acts as a dead-market gate: below     |
 //|  InpERDead the market is not travelling anywhere, so any          |
 //|  directional read is meaningless and the row is forced to HOLD    |
-//|  with "dead market - nothing moves" on the plan block.            |
+//|  with "quiet - nothing worth trading" on the plan block.          |
 //|                                                                  |
 //|  Every calculation uses CLOSED bars only.  Nothing repaints and   |
 //|  a historical direction never changes after the fact.             |
@@ -77,8 +77,10 @@
 //|  same two-column style as the first: where to enter (market or      |
 //|  pending, decided by the score), the lot size, the stop and the     |
 //|  target (price, points, money and a rough bar count), and how many  |
-//|  bars the reading is worth acting on. A HOLD or waiting timeframe   |
-//|  takes a single line, so the group is only as tall as its content.  |
+//|  bars the reading is worth acting on - or, once a trade is open,    |
+//|  how long it has run against that Reach estimate. A HOLD or         |
+//|  waiting timeframe takes a single line, so the group is only as     |
+//|  tall as its content.                                               |
 //|                                                                  |
 //|  Nothing is calculated at all while the chart is on a wrong       |
 //|  timeframe, so no stale or out-of-context number can be read off  |
@@ -132,10 +134,10 @@
 //|        Controlled by InpAutoPanelPos (Right default, or Bottom).  |
 //|        Opens automatically when any market/pending order exists   |
 //|        and closes completely when flat.                           |
-//|        Header shows: Autotrading | Trailstop On/Off | Stoploss    |
-//|        On/Off | Symbol.                                           |
+//|        Header shows: Autotrading | Trailstop Off/On/Active        |
+//|        | Stoploss On/Off | Symbol.                                |
 //|        Each card shows TP1/TP2/TP3/SL prices (with USD) and       |
-//|        Distance from open price to TP1 -> TP2 -> TP3.             |
+//|        the live gap to TP1 -> TP2 -> TP3 in points.               |
 //|  -----------------------------------------------------------------|
 //|  HONEST NOTE ON EXPECTATION                                       |
 //|  -----------------------------------------------------------------|
@@ -314,6 +316,7 @@ struct SRow
    double         er;         // efficiency ratio
    bool           ok;         // data available?
    datetime       lastBar;    // last closed bar we have seen
+   datetime       sigBirth;   // closed bar where the current idea/leash was born
 };
 
 SRow g_rows[TF_COUNT];
@@ -353,6 +356,7 @@ void ConfigureRow(int i, ENUM_TIMEFRAMES tf, string tag, string style,
    g_rows[i].lastClose  = 0.0;
    g_rows[i].ok         = false;
    g_rows[i].lastBar    = 0;
+   g_rows[i].sigBirth   = 0;
 }
 
 //+------------------------------------------------------------------+
@@ -759,6 +763,7 @@ void EvaluateAll()
          g_rows[r].rngBot       = 0.0;
          g_rows[r].lastClose    = 0.0;
          g_rows[r].lastBar      = 0;
+         g_rows[r].sigBirth     = 0;
       }
       return;
    }
@@ -783,11 +788,16 @@ void EvaluateRow(int idx)
       g_rows[idx].rngTop       = 0.0;
       g_rows[idx].rngBot       = 0.0;
       g_rows[idx].lastClose    = 0.0;
+      g_rows[idx].sigBirth     = 0;
       return;
    }
 
    int n    = ArraySize(c);
    int last = n - 1;                               // most recently CLOSED bar
+
+   //  The idea's leash clock (the Valid cell): what the row said before
+   int prevDir  = g_rows[idx].direction;
+   int prevMode = g_rows[idx].mode;
 
    // ---- fresh state: nothing may leak from the previous bar --------
    g_rows[idx].mode        = 0;
@@ -836,7 +846,7 @@ void EvaluateRow(int idx)
    if(ER < InpERDead)
    {
       mode = 0;
-      g_rows[idx].blockReason = "dead market — nothing moves";
+      g_rows[idx].blockReason = "quiet — nothing worth trading";
    }
    else if(mode == 1)
    {
@@ -902,6 +912,25 @@ void EvaluateRow(int idx)
    //  a genuinely new closed bar from a tick on the bar it already scored
    //  (without this the panel re-read all three timeframes on every tick).
    g_rows[idx].lastBar   = LastClosedBarTime(_Symbol, g_rows[idx].tf);
+
+   // ---- signal leash birth (the Valid cell counts this) -------------
+   //  The idea is re-born when the direction changes, the game switches
+   //  (trend <-> range), or the old leash has run out - the very bars
+   //  the auto-trader expires and re-places a waiting order on.  A row
+   //  that stands aside carries no leash at all.
+   int  leash = (mode == 2) ? MathMax(1, InpValidBarsRange)
+                            : MathMax(1, InpValidBars);
+   int  tfSec = (int)PeriodSeconds(g_rows[idx].tf);
+   long age   = leash + 1;                        // unknown age: treat the leash as spent
+   if(g_rows[idx].sigBirth > 0 && tfSec > 0 &&
+      g_rows[idx].lastBar > g_rows[idx].sigBirth)
+      age = (long)((g_rows[idx].lastBar - g_rows[idx].sigBirth) / tfSec);
+
+   if(dir == 0)
+      g_rows[idx].sigBirth = 0;
+   else if(dir != prevDir || age > leash ||
+           (prevDir != 0 && (prevMode == 2) != (mode == 2)))
+      g_rows[idx].sigBirth = g_rows[idx].lastBar;
 }
 
 //==================================================================
@@ -1305,21 +1334,37 @@ void UpdatePlanRow(int i)
    g_plans[i].val[2][1] = StringFormat("%s %s", DoubleToString(rewardUSD, 2), cur);
    g_plans[i].clr[2][1] = InpBuyColor;
 
-   // ---- how much of that leash is left ------------------------------
-   //  A waiting pending order counts down from the bar it was placed on
-   //  - the same number the auto-trader expires it on.  Everything else
-   //  (fresh reading, open position) shows the full validity: for an
-   //  open trade the leash is irrelevant, its exits are SL/TP/the box.
-   int left  = vBars;
-   int tfSec = PeriodSeconds(g_rows[i].tf);
-   if(g_auto[i].active && !g_auto[i].isOpen && g_auto[i].placedBar > 0 &&
-      tfSec > 0 && g_rows[i].lastBar > g_auto[i].placedBar)
-      left = vBars - (int)((g_rows[i].lastBar - g_auto[i].placedBar) / tfSec);
-   left = (int)MathMax(0, MathMin(vBars, left));
+   // ---- the time cell: idea leash (Valid) or hold time (Hold) --------
+   //  A live position has no signal leash - its exits are SL, TP or the
+   //  box - so the time question flips to "how long has it run against
+   //  the Reach estimate above": Hold: N bars (est ~M).  Everything else
+   //  (advice plan, waiting pending) shows the idea's own leash counting
+   //  down: Valid: left/total bars, from the bar the idea was born - the
+   //  same bars the auto-trader expires and re-places a waiting order
+   //  on.  0/total is the rethink bar and shows for exactly one bar.
+   int  tfSec = (int)PeriodSeconds(g_rows[i].tf);
+   long age   = 0;
+   if(g_rows[i].sigBirth > 0 && tfSec > 0 && g_rows[i].lastBar > g_rows[i].sigBirth)
+      age = (long)((g_rows[i].lastBar - g_rows[i].sigBirth) / tfSec);
 
-   g_plans[i].lbl[2][2] = "Valid:";
-   g_plans[i].val[2][2] = StringFormat("%d/%d bars", left, vBars);
-   g_plans[i].clr[2][2] = clrSilver;
+   if(isOpenNow)
+   {
+      long held = 0;
+      datetime fillBar = (g_auto[i].fillBar > 0) ? g_auto[i].fillBar : g_auto[i].placedBar;
+      if(fillBar > 0 && tfSec > 0 && g_rows[i].lastBar > fillBar)
+         held = (long)((g_rows[i].lastBar - fillBar) / tfSec);
+      g_plans[i].lbl[2][2] = "Hold:";
+      g_plans[i].val[2][2] = StringFormat("%d bar%s (est ~%d)", (int)held,
+                                          (held == 1) ? "" : "s", etaBars);
+      g_plans[i].clr[2][2] = clrSilver;
+   }
+   else
+   {
+      int left = (int)MathMax(0, MathMin(vBars, vBars - (int)age));
+      g_plans[i].lbl[2][2] = "Valid:";
+      g_plans[i].val[2][2] = StringFormat("%d/%d bars", left, vBars);
+      g_plans[i].clr[2][2] = clrSilver;
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -1377,6 +1422,7 @@ struct SAutoState
    double   rngTop;        // range box upper band captured at placement (box-kill)
    double   rngBot;        // range box lower band captured at placement (box-kill)
    datetime placedBar;     // closed-bar timestamp when pending order was placed
+   datetime fillBar;       // closed-bar timestamp when the position filled/opened
    datetime lastEvalBar;   // last closed bar on which SL/TP update was evaluated
    datetime lastSignalBar; // closed-bar timestamp on which a trade was opened
    // ---- formatted cells for the 2nd Panel (Autotrading) ---------------
@@ -1487,6 +1533,7 @@ void ResetAutoSlot(int i, bool keepSignalBar)
    g_auto[i].rngTop        = 0.0;
    g_auto[i].rngBot        = 0.0;
    g_auto[i].placedBar     = 0;
+   g_auto[i].fillBar       = 0;
    g_auto[i].lastEvalBar   = 0;
    g_auto[i].lastSignalBar = sigBar;
    ClearAutoCells(i);
@@ -2079,6 +2126,8 @@ void SyncAutoState()
          g_auto[i].slPrice    = PositionGetDouble(POSITION_SL);
          g_auto[i].tpPrice    = PositionGetDouble(POSITION_TP);
          g_auto[i].profitUSD  = PositionGetDouble(POSITION_PROFIT);
+         if(!wasOpen)
+            g_auto[i].fillBar = g_rows[i].lastBar;   // fill noticed on this bar
 
          if(g_auto[i].slPrice > 0.0)
             g_auto[i].slPts = (int)MathRound(MathAbs(g_auto[i].entryPrice - g_auto[i].slPrice) / point);
@@ -2277,6 +2326,7 @@ bool PlacePlanOrder(int i)
       g_auto[i].rngTop        = 0.0;
       g_auto[i].rngBot        = 0.0;
       g_auto[i].placedBar     = g_rows[i].lastBar;
+      g_auto[i].fillBar       = g_rows[i].lastBar;
       g_auto[i].lastEvalBar   = g_rows[i].lastBar;
       g_auto[i].lastSignalBar = g_rows[i].lastBar;
       InitTrailState(i);          // market fill: freeze the trailstop % now
@@ -2830,10 +2880,13 @@ void UpdateAutoPanel()
          g_auto[i].clr[2][1] = clrSilver;
       }
 
-      // ---- Line 3: Status / Waiting distance & Distance from open price to TP1/TP2/TP3
-      string nextTpTag = !g_auto[i].tp1Hit ? "TP1" : (!g_auto[i].tp2Hit ? "TP2" : "TP3");
-      int    nextTpPts = !g_auto[i].tp1Hit ? g_auto[i].tp1Pts
-                                           : (!g_auto[i].tp2Hit ? g_auto[i].tp2Pts : g_auto[i].tp3Pts);
+      // ---- Line 3: Status / Waiting distance & LIVE gap to TP1/TP2/TP3
+      //  The Distance cell counts down in realtime: how far the live
+      //  close-side price still is from the next target (TP1 -> TP2 ->
+      //  TP3 as each one is hit), not the frozen entry->TP distance.
+      string nextTpTag   = !g_auto[i].tp1Hit ? "TP1" : (!g_auto[i].tp2Hit ? "TP2" : "TP3");
+      double nextTpPrice = !g_auto[i].tp1Hit ? tp1Price
+                           : (!g_auto[i].tp2Hit ? tp2Price : tp3Price);
 
       if(g_auto[i].isOpen)
       {
@@ -2852,7 +2905,10 @@ void UpdateAutoPanel()
       }
 
       g_auto[i].lbl[3][1] = "Distance:";
-      g_auto[i].val[3][1] = StringFormat("to %s %d pts", nextTpTag, nextTpPts);
+      int gapPts = (point > 0.0 && liveP > 0.0)
+                   ? (int)MathRound(MathAbs(nextTpPrice - liveP) / point)
+                   : 0;
+      g_auto[i].val[3][1] = StringFormat("to %s %d pts", nextTpTag, gapPts);
       g_auto[i].clr[3][1] = InpBuyColor;
 
       // ---- the trailstop % SimpleEA picked for this trade ----------
@@ -3625,7 +3681,7 @@ int AutoWidthNeed()
    int titleW = 11 * CharW(InpFontSize + 1);
 
    int headNeed = 10 + titleW + em
-                  + (14 + 3 + 1 + 13 + 3 + 2 + StringLen("|  " + _Symbol)) * em + 10;
+                  + (14 + 6 + 1 + 13 + 3 + 2 + StringLen("|  " + _Symbol)) * em + 10;
    int need = (int)MathMax(AUTO_W_MIN, headNeed);
    for(int i = 0; i < TF_COUNT; i++)
    {
@@ -3672,8 +3728,15 @@ void DrawAutoPanel()
    MakeAutoRect("bg",  x2, y2, g_autoW, g_autoH, InpBgColor, clrDimGray);
    MakeAutoRect("sep", x2 + 4, y2 + HEAD_H - 6, g_autoW - 8, 1, clrDimGray, clrDimGray);
 
-   bool tsOn   = AnyTrailstopOn();
-   bool slOn   = AnyStoplossOn();
+   //  The Trailstop header word has three states, so the switch and the
+   //  trades never lie about each other:
+   //     Off     InpUseTrailStop is false - the feature is disabled
+   //     On      enabled and armed, but no trade is trailing yet
+   //     Active  at least one trade is actually trailing right now
+   bool   tsLive = AnyTrailstopOn();
+   string tsText = !InpUseTrailStop ? "Off" : (tsLive ? "Active" : "On");
+   color  tsClr  = InpUseTrailStop ? InpBuyColor : InpSellColor;
+   bool   slOn   = AnyStoplossOn();
    int  em     = CharW(InpFontSize);
    int  titleW = 11 * CharW(InpFontSize + 1);
 
@@ -3683,9 +3746,9 @@ void DrawAutoPanel()
    MakeAutoLabel("tsCap", tsCapX, y2 + 8, "| Trailstop : ",
                  clrSilver, InpFontSize, false);
    int tsValX = tsCapX + 14 * em;
-   MakeAutoLabel("tsVal", tsValX, y2 + 8, tsOn ? "On" : "Off",
-                 tsOn ? InpBuyColor : InpSellColor, InpFontSize, false);
-   int slCapX = tsValX + 3 * em + em;
+   MakeAutoLabel("tsVal", tsValX, y2 + 8, tsText,
+                 tsClr, InpFontSize, false);
+   int slCapX = tsValX + 6 * em + em;   // value slot fits the widest state, "Active"
    MakeAutoLabel("slCap", slCapX, y2 + 8, "| Stoploss : ",
                  clrSilver, InpFontSize, false);
    int slValX = slCapX + 13 * em;

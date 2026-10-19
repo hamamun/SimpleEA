@@ -105,7 +105,7 @@ class Panel:
 
     def set_reading(self, tag, direction=0, score=0, trend="Sideways",
                     regime="Mixed", ok=True, mode=None, reason=None,
-                    rng_top=0.0, rng_bot=0.0):
+                    rng_top=0.0, rng_bot=0.0, held=None):
         #  mode mirrors SRow.mode: 0 stand aside, 1 trend, 2 range.  The
         #  EA only stores a non-zero mode when direction != 0, so a row
         #  that does not trade defaults to 0 here too.
@@ -125,7 +125,8 @@ class Panel:
                 reason = ""
         self.rows[tag].update(ok=ok, dir=direction, score=score,
                               trend=trend, regime=regime, mode=mode,
-                              reason=reason, rng_top=rng_top, rng_bot=rng_bot)
+                              reason=reason, rng_top=rng_top, rng_bot=rng_bot,
+                              held=held)
 
     # ---- UpdatePlanRow() ------------------------------------------------
     def update_plan_row(self, tag):
@@ -237,9 +238,17 @@ class Panel:
         p["lbl"][(2, 1)] = "Reward:"
         p["val"][(2, 1)] = "%.2f %s" % (reward_usd, self.cur)
         p["clr"][(2, 1)] = "buy"
+        #  Time cell: the idea's leash (Valid) or - for a live trade -
+        #  hold time against the Reach estimate (Hold).  The walk's
+        #  readings carry "held" for open-trade cases.
         vb = self.valid_bars_range if is_range else self.valid_bars
-        p["lbl"][(2, 2)] = "Valid:"
-        p["val"][(2, 2)] = "%d/%d bars" % (vb, vb)
+        if r.get("held") is not None:
+            p["lbl"][(2, 2)] = "Hold:"
+            p["val"][(2, 2)] = "%d bar%s (est ~%d)" % (r["held"],
+                                                       "" if r["held"] == 1 else "s", eta)
+        else:
+            p["lbl"][(2, 2)] = "Valid:"
+            p["val"][(2, 2)] = "%d/%d bars" % (vb, vb)
         p["clr"][(2, 2)] = "silver"
 
     def update_plan(self):
@@ -533,7 +542,7 @@ def main():
                 {"M5":  dict(direction=0, score=2, trend="Sideways", regime="Mixed",
                              reason="mixed — no edge either way"),
                  "M15": dict(direction=0, score=-3, trend="Sideways", regime="Steady",
-                             reason="dead market — nothing moves"),
+                             reason="quiet — nothing worth trading"),
                  "M30": dict(direction=0, score=0, trend="Sideways", regime="Choppy",
                              reason="chop — nothing clears the spread")})
     bad += case("J)  Part 2: range fades on two timeframes - limit at the "
@@ -543,6 +552,15 @@ def main():
                  "M15": dict(direction=0, score=0, trend="Sideways", regime="Steady"),
                  "M30": dict(direction=1, score=1, trend="Going up", regime="Choppy",
                              mode=2, rng_top=4290.00, rng_bot=4282.00)},
+                price=4285.70)
+
+    bad += case("K)  the time cell on live trades: Hold (bars held vs Reach) "
+                "instead of the signal leash",
+                {"M5":  dict(direction=1, score=3, trend="Going up", regime="Steady",
+                             held=1),
+                 "M15": dict(direction=0, score=0, trend="Sideways", regime="Mixed"),
+                 "M30": dict(direction=-1, score=-1, trend="Going down", regime="Choppy",
+                             mode=2, rng_top=4290.00, rng_bot=4282.00, held=12)},
                 price=4285.70)
 
     bad += [("sweep", 0.0, 0.0)] if sweep() else []
