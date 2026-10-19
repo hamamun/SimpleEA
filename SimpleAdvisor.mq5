@@ -206,6 +206,18 @@ input bool     InpUseMinLot    = false;      // Always advise the symbol's minim
 input double   InpRiskPct      = 0.5;        // Risk % per trade (score 3 risks double)
 
 input group "=== Shared engine settings ==="
+//  One filter for all three rows: M5, M15 and M30 run the same Precision
+//  Trend periods, each on its own timeframe's bars.  These used to be two
+//  inputs per timeframe - six knobs that all carried the same default and
+//  were never set apart - so they were collapsed into these.  A timeframe
+//  that genuinely needs its own eyes can still get them in code:
+//  ConfigureRow() in OnInit() hands each row its own copy, so passing a
+//  different period for one row costs one line and touches nothing else.
+//  The two periods stay inputs because they ARE symbol-sensitive - what
+//  counts as a trend on XAUUSD is not what counts on EURUSD - and the
+//  history pull above grows itself when you raise them.
+input int      InpTrendL1     = 150;         // Precision Trend long period  (all timeframes)
+input int      InpTrendL2     = 24;          // Precision Trend short period (all timeframes)
 input int      InpHurstWindow = 256;         // Hurst estimate window (bars)
 input int      InpERPeriod    = 20;          // Kaufman efficiency-ratio period
 input double   InpERDead      = 0.10;        // Efficiency below this => dead market, force HOLD
@@ -233,24 +245,6 @@ input group "=== Market closed detection ==="
 input bool     InpDetectClosed   = true;     // Detect a closed market, collapse the panel to "Market Closed"
 input int      InpClosedStaleMin = 30;       // Also closed: no quote for this many minutes (0 = off)
 
-input group "=== M5 engine (scalping) ==="
-input int      InpL1_M5          = 150;      // Trend filter long period
-input int      InpL2_M5          = 24;       // Trend filter short period
-input double   InpHurstTrendM5   = 0.55;     // H above this = persistent regime
-input double   InpHurstRevertM5  = 0.45;     // H below this = anti-persistent regime
-
-input group "=== M15 engine (short-term) ==="
-input int      InpL1_M15         = 150;
-input int      InpL2_M15         = 24;
-input double   InpHurstTrendM15  = 0.55;
-input double   InpHurstRevertM15 = 0.45;
-
-input group "=== M30 engine (intraday) ==="
-input int      InpL1_M30         = 150;
-input int      InpL2_M30         = 24;
-input double   InpHurstTrendM30  = 0.55;
-input double   InpHurstRevertM30 = 0.45;
-
 //==================================================================
 //  INTERNALS
 //==================================================================
@@ -274,6 +268,21 @@ input double   InpHurstRevertM30 = 0.45;
 #define TP_ATR_M15      1.8       // M15 short-term:  target = this many ATR (R:R 1:1.5)
 #define SL_ATR_M30      1.5       // M30 intraday:    stop   = this many ATR
 #define TP_ATR_M30      3.0       // M30 intraday:    target = this many ATR (R:R 1:2.0)
+//  ---- THE REGIME PROFILE (baked in: the tested boundaries) -----------
+//  Same reasoning as the block above, and for once the numbers are not
+//  even a calibration: H is a property of the series, not of the symbol.
+//  H > 0.5 means moves remember each other, H < 0.5 means they undo each
+//  other, and 0.55 / 0.45 is the band the literature uses either side of
+//  the 0.5 coin-flip before it will call a regime at all (SIGNAL_LOGIC.md
+//  section 4).  Nothing about gold, or about M5, moves those numbers -
+//  only a different estimator would - so they are not a dial.  The window
+//  the estimate is taken over IS a dial (InpHurstWindow): that one does
+//  depend on the timeframe, because 256 bars is five days on M30 and two
+//  days on M5.  Widen the band here and the panel goes quieter; narrow it
+//  and it trades more - which is exactly why it is not a user input.
+#define HURST_TREND     0.55      // H above this = persistent: play the trend game
+#define HURST_REVERT    0.45      // H below this = anti-persistent: play the range game
+
 #define PEND_ATR        0.5       // pending entry sits this many ATR from the market
 #define VALID_BARS      3         // trend reading's leash in bars (research/HORIZON.md)
 #define RISK_SCORE3_X   2.0       // score 3 risks this multiple of the score-2 percentage
@@ -368,10 +377,10 @@ int BarsNeeded()
 {
    int need = BARS_BASE;
 
-   //  Longest trend period across the three timeframes.  Clamped BEFORE
-   //  the multiply, so a typo (L1 = 900,000,000) cannot overflow the int
-   //  and hand the loader a negative count.
-   int l1max = MathMax(InpL1_M5, MathMax(InpL1_M15, InpL1_M30));
+   //  The trend filter's long period (shared by all three timeframes).
+   //  Clamped BEFORE the multiply, so a typo (L1 = 900,000,000) cannot
+   //  overflow the int and hand the loader a negative count.
+   int l1max = InpTrendL1;
    if(l1max < 1)          l1max = 1;
    if(l1max > BARS_MAX)   l1max = BARS_MAX;
    int l1need = MathMin(BARS_MAX, BARS_WARMUP_X * l1max);
@@ -425,17 +434,30 @@ void ConfigureRow(int i, ENUM_TIMEFRAMES tf, string tag, string style,
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   ConfigureRow(0, PERIOD_M5,  "M5",  "Scalp",      InpL1_M5,  InpL2_M5,
-                InpHurstTrendM5,  InpHurstRevertM5,  SL_ATR_M5,  TP_ATR_M5);
-   ConfigureRow(1, PERIOD_M15, "M15", "Short-term", InpL1_M15, InpL2_M15,
-                InpHurstTrendM15, InpHurstRevertM15, SL_ATR_M15, TP_ATR_M15);
-   ConfigureRow(2, PERIOD_M30, "M30", "Intraday",   InpL1_M30, InpL2_M30,
-                InpHurstTrendM30, InpHurstRevertM30, SL_ATR_M30, TP_ATR_M30);
+   //  One filter, one regime test, three timeframes: each row gets the
+   //  shared numbers and applies them to its own closed bars.  (Give a
+   //  row different numbers here and only that row changes.)
+   ConfigureRow(0, PERIOD_M5,  "M5",  "Scalp",      InpTrendL1, InpTrendL2,
+                HURST_TREND,    HURST_REVERT,    SL_ATR_M5,  TP_ATR_M5);
+   ConfigureRow(1, PERIOD_M15, "M15", "Short-term", InpTrendL1, InpTrendL2,
+                HURST_TREND,    HURST_REVERT,    SL_ATR_M15, TP_ATR_M15);
+   ConfigureRow(2, PERIOD_M30, "M30", "Intraday",   InpTrendL1, InpTrendL2,
+                HURST_TREND,    HURST_REVERT,    SL_ATR_M30, TP_ATR_M30);
 
-   if(InpL1_M5 < InpL2_M5 || InpL1_M15 < InpL2_M15 || InpL1_M30 < InpL2_M30)
+   if(InpTrendL1 < InpTrendL2)
    {
       Print("SimpleEA: the long trend period must be greater than the short one. ",
-            "Set L1 > L2 for every timeframe.");
+            "Set InpTrendL1 > InpTrendL2.");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+   //  The regime boundaries are baked in, so this can only trip for
+   //  someone who has just edited HURST_TREND / HURST_REVERT above - which
+   //  is exactly when a plain sentence beats a panel that labels every
+   //  market as both Steady and Choppy at once.
+   if(HURST_REVERT > HURST_TREND)
+   {
+      Print("SimpleEA: the anti-persistent threshold must sit below the persistent one. ",
+            "Set HURST_REVERT < HURST_TREND.");
       return(INIT_PARAMETERS_INCORRECT);
    }
 
