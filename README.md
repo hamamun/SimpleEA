@@ -356,7 +356,10 @@ read-only mode):
 | Input | Default | Meaning |
 |---|---|---|
 | `InpAutoTrading` | **true** | Full-auto execution on (`true`) or read-only (`false`) |
-| `InpUseStopLoss` | **true** | Place initial Stop Loss on order (`true` default); when `false`, no SL is placed initially, and when `TP1` hits a Stop Loss is placed at the entry point (Break-Even) |
+| `InpUseStopLoss` | **true** | Place initial Stop Loss on order (`true` default); when `false`, no SL is placed initially — the pre-TP1 trailstop places the first SL at activation (or TP1 places it at Break-Even if the trailstop is off) |
+| `InpUseTrailStop` | **true** | Pre-TP1 stepped trailstop on/off (Entry→TP1 only; hands off to the TP1 logic at TP1) |
+| `InpTrailPctTight` | **40** | Trailstop % used when the regime is NOT Steady (10–70, clamped) |
+| `InpTrailPctSteady` | **55** | Trailstop % used in a Steady regime with a clear trend in the trade's direction (10–70, clamped) |
 | `InpAutoPanelPos` | **Right** (`AUTO_POS_RIGHT`) | Second panel placement: **Right** (beside Main Panel) or **Bottom** (below Main Panel) |
 | `InpMagicBase` | 202610 | Base magic number (`+0` M5, `+1` M15, `+2` M30) |
 | `InpSlippagePts` | 20 | Maximum slippage in points for market orders |
@@ -378,10 +381,23 @@ read-only mode):
    - **TP3** = 100% of SimpleEA's advised target points.
    - **TP2** = 25% less than TP3 (`75%` of TP3).
    - **TP1** = 25% less than TP2 (`75%` of TP2 = `56.25%` of TP3).
-5. **Partial Closes, Break-Even Trailstop & Score Watcher:** *(trend trades — range fades are
-   exempt; see rule 7)*
-   - **At TP1 Hit:**
-     - Moves Stop Loss to **Entry (Break-Even)** and activates `Trailstop : On` in the top row (for both
+5. **Pre-TP1 Stepped Trailstop, Partial Closes & Score Watcher:**
+   - **Before TP1 (stepped trailstop, Entry→TP1 only):** one selected percentage `P` drives the
+     trail. When price has covered `P%` of the Entry→TP1 distance, the trailstop activates and
+     places/moves the SL `P%` of the activation→Entry distance back from the activation price
+     (default Tight `P=40`: activation at +40%, SL at +24%). Every further **+5%** of progress
+     jumps the SL another **+5%**, so the gap behind price stays constant. SimpleEA picks `P`
+     itself at fill: `InpTrailPctTight` (40) when the regime is not **Steady**,
+     `InpTrailPctSteady` (55) in a Steady regime with a clear trend in the trade's direction;
+     the gap behind price is widened **×1.25 on M15** and **×1.50 on M30** for breathing room.
+     All percentages use the Entry→TP1 distance **frozen at fill**, the SL only ever moves
+     forward, and with `InpUseStopLoss=false` the trailstop places the **first SL itself** at
+     activation. The card in the 2nd Panel shows the pick as `TS: 40% Tight` / `55% Steady`,
+     and the header `Trailstop :` turns **On** at activation. The signal/trend rules below
+     (HOLD-in-profit close, opposite-signal close) are unchanged and senior to the trailstop.
+   - **At TP1 Hit:** *(score watcher: trend trades only — range fades are exempt; see rule 7)*
+     - The trailstop hands off and its last SL **simply remains**; the SL is moved to
+       **Entry (Break-Even)** only if that is tighter than the trailed SL (for both
        minimum lot and `> minLot`).
      - If current lot > minimum lot, closes **70%** of the lot.
      - Activates the **Score & Direction Watcher** (for both minimum lot and `> minLot`): if the
