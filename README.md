@@ -222,7 +222,10 @@ reading never changes after the fact.
 | | `InpBgColor` | `48,48,48` (`#303030`) | panel background colour |
 | Thresholds | `InpBuyScore` | 2 | score ≥ this ⇒ BUY |
 | | `InpSellScore` | −2 | score ≤ this ⇒ SELL |
-| Shared | `InpHurstWindow` | 256 | Hurst estimate window in bars |
+| Shared | `InpTrendL1` / `InpTrendL2` | 150 / 24 | Precision Trend filter periods (all three timeframes) |
+| | `InpHurstTrend` | 0.55 | H above this ⇒ persistent regime (all three timeframes) |
+| | `InpHurstRevert` | 0.45 | H below this ⇒ anti-persistent regime (all three timeframes) |
+| | `InpHurstWindow` | 256 | Hurst estimate window in bars |
 | | `InpERPeriod` | 20 | efficiency-ratio period |
 | | `InpERDead` | 0.10 | below this ⇒ dead market, force HOLD (with reason) |
 | Range | `InpRangeMode` | **true** | range game on (false ⇒ every chop row says `chop — range mode is off`) |
@@ -231,9 +234,6 @@ reading never changes after the fact.
 | | `InpRangeSpreadX` | 3.0 | half-box target must clear at least this many spreads |
 | | `InpRangeERMax` | 0.40 | efficiency above this ⇒ a walk, not a box |
 | | `InpRangeSLATR` | 1.0 | range stop = opposite band + this many ATR |
-| Per TF | `InpL1_*` / `InpL2_*` | 150 / 24 | Precision Trend filter periods |
-| | `InpHurstTrend*` | 0.55 | persistent threshold |
-| | `InpHurstRevert*` | 0.45 | anti-persistent threshold |
 
 Raising `InpHurstTrend` makes the panel more selective (more HOLD, fewer calls). Raising
 `InpBuyScore` to 3 requires all three components to agree. The two gates are validated at load:
@@ -241,9 +241,19 @@ if `InpBuyScore` is not greater than `InpSellScore` the EA refuses to start, bec
 pair (say `-2` / `2` the wrong way round) would make score 0 pass the BUY test and the panel would
 call BUY forever.
 
+**One engine, three timeframes.** The trend filter and the regime test are shared: `InpTrendL1` /
+`InpTrendL2` and `InpHurstTrend` / `InpHurstRevert` are set once and used by M5, M15 and M30 alike —
+each row applies them to *its own* closed bars, which is what makes the three rows disagree. These
+used to be twelve inputs (four per timeframe) that all shipped with the same default and were never
+set apart; they are now four. If one timeframe ever genuinely needs its own filter, that is a
+one-line change in code, not an input: `OnInit()` calls `ConfigureRow()` once per row and hands each
+row its own copy, so passing a different period or threshold for row 0 leaves M15 and M30 untouched.
+The two H thresholds are also checked at load (`InpHurstRevert` must not sit above
+`InpHurstTrend`), because a crossed pair would label every market at once.
+
 **History depth is automatic.** There is no bars-to-load input. The EA pulls **700 closed bars per
 timeframe** as its floor and raises that number itself when your own periods need more: four times
-the longest trend period (`InpL1_*`), the Hurst window plus margin, or the range/ATR/E-R lookbacks
+the longest trend period (`InpTrendL1`), the Hurst window plus margin, or the range/ATR/E-R lookbacks
 (whichever is largest), capped at 50 000. Change `InpHurstWindow` to 900 or a trend period to 400
 and the pull follows on its own — there is nothing to keep in sync, and the panel still only ever
 reads closed, finished bars.

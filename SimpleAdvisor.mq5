@@ -206,6 +206,18 @@ input bool     InpUseMinLot    = false;      // Always advise the symbol's minim
 input double   InpRiskPct      = 0.5;        // Risk % per trade (score 3 risks double)
 
 input group "=== Shared engine settings ==="
+//  These four are SHARED: all three rows (M5 / M15 / M30) run the same
+//  filter and the same regime test, on their own timeframe's bars.  They
+//  used to be one set of four per timeframe - twelve knobs that all
+//  carried the same default and were never set apart - so they were
+//  collapsed into these.  A timeframe that genuinely needs its own eyes
+//  can still get them in code: ConfigureRow() in OnInit() hands each row
+//  its own copy, so passing a different l1/l2 or H threshold for one row
+//  there costs one line and touches nothing else.
+input int      InpTrendL1     = 150;         // Precision Trend long period  (all timeframes)
+input int      InpTrendL2     = 24;          // Precision Trend short period (all timeframes)
+input double   InpHurstTrend  = 0.55;        // H above this = persistent regime (all timeframes)
+input double   InpHurstRevert = 0.45;        // H below this = anti-persistent regime (all timeframes)
 input int      InpHurstWindow = 256;         // Hurst estimate window (bars)
 input int      InpERPeriod    = 20;          // Kaufman efficiency-ratio period
 input double   InpERDead      = 0.10;        // Efficiency below this => dead market, force HOLD
@@ -232,24 +244,6 @@ input group "=== Market closed detection ==="
 //  stands down until the market opens again.
 input bool     InpDetectClosed   = true;     // Detect a closed market, collapse the panel to "Market Closed"
 input int      InpClosedStaleMin = 30;       // Also closed: no quote for this many minutes (0 = off)
-
-input group "=== M5 engine (scalping) ==="
-input int      InpL1_M5          = 150;      // Trend filter long period
-input int      InpL2_M5          = 24;       // Trend filter short period
-input double   InpHurstTrendM5   = 0.55;     // H above this = persistent regime
-input double   InpHurstRevertM5  = 0.45;     // H below this = anti-persistent regime
-
-input group "=== M15 engine (short-term) ==="
-input int      InpL1_M15         = 150;
-input int      InpL2_M15         = 24;
-input double   InpHurstTrendM15  = 0.55;
-input double   InpHurstRevertM15 = 0.45;
-
-input group "=== M30 engine (intraday) ==="
-input int      InpL1_M30         = 150;
-input int      InpL2_M30         = 24;
-input double   InpHurstTrendM30  = 0.55;
-input double   InpHurstRevertM30 = 0.45;
 
 //==================================================================
 //  INTERNALS
@@ -368,10 +362,10 @@ int BarsNeeded()
 {
    int need = BARS_BASE;
 
-   //  Longest trend period across the three timeframes.  Clamped BEFORE
-   //  the multiply, so a typo (L1 = 900,000,000) cannot overflow the int
-   //  and hand the loader a negative count.
-   int l1max = MathMax(InpL1_M5, MathMax(InpL1_M15, InpL1_M30));
+   //  The trend filter's long period (shared by all three timeframes).
+   //  Clamped BEFORE the multiply, so a typo (L1 = 900,000,000) cannot
+   //  overflow the int and hand the loader a negative count.
+   int l1max = InpTrendL1;
    if(l1max < 1)          l1max = 1;
    if(l1max > BARS_MAX)   l1max = BARS_MAX;
    int l1need = MathMin(BARS_MAX, BARS_WARMUP_X * l1max);
@@ -425,17 +419,26 @@ void ConfigureRow(int i, ENUM_TIMEFRAMES tf, string tag, string style,
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   ConfigureRow(0, PERIOD_M5,  "M5",  "Scalp",      InpL1_M5,  InpL2_M5,
-                InpHurstTrendM5,  InpHurstRevertM5,  SL_ATR_M5,  TP_ATR_M5);
-   ConfigureRow(1, PERIOD_M15, "M15", "Short-term", InpL1_M15, InpL2_M15,
-                InpHurstTrendM15, InpHurstRevertM15, SL_ATR_M15, TP_ATR_M15);
-   ConfigureRow(2, PERIOD_M30, "M30", "Intraday",   InpL1_M30, InpL2_M30,
-                InpHurstTrendM30, InpHurstRevertM30, SL_ATR_M30, TP_ATR_M30);
+   //  One filter, one regime test, three timeframes: each row gets the
+   //  shared numbers and applies them to its own closed bars.  (Give a
+   //  row different numbers here and only that row changes.)
+   ConfigureRow(0, PERIOD_M5,  "M5",  "Scalp",      InpTrendL1, InpTrendL2,
+                InpHurstTrend,  InpHurstRevert,  SL_ATR_M5,  TP_ATR_M5);
+   ConfigureRow(1, PERIOD_M15, "M15", "Short-term", InpTrendL1, InpTrendL2,
+                InpHurstTrend,  InpHurstRevert,  SL_ATR_M15, TP_ATR_M15);
+   ConfigureRow(2, PERIOD_M30, "M30", "Intraday",   InpTrendL1, InpTrendL2,
+                InpHurstTrend,  InpHurstRevert,  SL_ATR_M30, TP_ATR_M30);
 
-   if(InpL1_M5 < InpL2_M5 || InpL1_M15 < InpL2_M15 || InpL1_M30 < InpL2_M30)
+   if(InpTrendL1 < InpTrendL2)
    {
       Print("SimpleEA: the long trend period must be greater than the short one. ",
-            "Set L1 > L2 for every timeframe.");
+            "Set InpTrendL1 > InpTrendL2.");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+   if(InpHurstRevert > InpHurstTrend)
+   {
+      Print("SimpleEA: the anti-persistent threshold must sit below the persistent one. ",
+            "Set InpHurstRevert < InpHurstTrend.");
       return(INIT_PARAMETERS_INCORRECT);
    }
 
