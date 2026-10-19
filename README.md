@@ -303,19 +303,19 @@ sizes 6–16 and prints the answer at the end of its run.
 
 | Your question | How the panel answers it |
 |---|---|
-| **1. Entry point** | `Entry:` is the price to use — the current ask/bid for that direction (market) or the pending price one `InpPendATR` step better. **The EA decides which, per timeframe, from the score**: `market -3/3` = all three components agree, go now; `pending +2/3` = only two agree, so the entry waits for a better price. In the **range game** the box decides instead: `range fade` = a limit at the **opposite band** of the box, no matter what the score says. |
+| **1. Entry point** | `Entry:` is the price to use — the current ask/bid for that direction (market) or the pending price half an ATR better (pushed out further only when the spread or the broker's stops level demands it). **The EA decides which, per timeframe, from the score**: `market -3/3` = all three components agree, go now; `pending +2/3` = only two agree, so the entry waits for a better price. In the **range game** the box decides instead: `range fade` = a limit at the **opposite band** of the box, no matter what the score says. |
 | **2. Lot size** | `Lot:` — from balance, score and that timeframe's own stop distance, snapped to your broker's lot step and clamped to its minimum and maximum. |
 | **3. Take profit** | `Target:` — price **and points**, with the same amount in account currency on the `Reward:` cell. |
 | **4. Stop loss** | `Stop:` — price **and points**, with the money on the `Risk:` cell. Widened automatically (and marked `(min)`) if your broker demands a minimum stop distance. |
 | **5. Reach** | `Reach:` — a rough bar count for how long the target may take (the target's own distance in ATR units, squared — a typical random walk, not a forecast). This is what makes scalp / short-term / intraday visibly different in **time**, not only in points. |
-| **6. Validity / Hold** | On an advice plan or a waiting pending order this is the idea's own leash: `InpValidBars` bars from the bar the idea was born (default 3 = the measured median, see below), shown as a live countdown `left/total bars`. **Range fades use `InpValidBarsRange`** (default 8) instead — the box-kill is their real invalidation, so a longer leash only removes the cancel/re-place churn while the box holds. The idea is re-born when the direction changes, the game switches (trend ↔ range), or the leash runs out — the `0/total` bar is the rethink bar, the same bars the auto-trader expires and re-places a waiting order on. Once a **trade is open** the signal's leash is spent and the cell switches to `Hold: N bars (est ~M)` — bars held against the Reach estimate. |
+| **6. Validity / Hold** | On an advice plan or a waiting pending order this is the idea's own leash: **3 bars** from the bar the idea was born (the measured median, see below), shown as a live countdown `left/total bars`. **Range fades use `InpValidBarsRange`** (default 8) instead — the box-kill is their real invalidation, so a longer leash only removes the cancel/re-place churn while the box holds. The idea is re-born when the direction changes, the game switches (trend ↔ range), or the leash runs out — the `0/total` bar is the rethink bar, the same bars the auto-trader expires and re-places a waiting order on. Once a **trade is open** the signal's leash is spent and the cell switches to `Hold: N bars (est ~M)` — bars held against the Reach estimate. |
 
 **Three sizing modes** (`InpUseRisk` / `InpUseMinLot`):
 
 | Mode | What it does |
 |---|---|
-| Risk (**default**, `InpUseRisk=true`) | Risks `InpRiskScore2` % of balance at score 2 and `InpRiskScore3` % at score 3 (defaults 0.5 / 1.0). The lot is whatever risks that much at that timeframe's stop — a wider stop automatically means a smaller lot. |
-| Risk-off (`InpUseRisk=false`) | Ignores the stop distance entirely: a balance ladder — one 0.01 lot per `InpBalPer001` of balance (default 1,000), multiplied by `InpScore3Factor` (1.5) when all three components agree. |
+| Risk (**default**, `InpUseRisk=true`) | Risks `InpRiskPct` % of balance at score 2 — default 0.5 — and **double that (1.0 %)** at score 3, the only reading where all three components agree. The lot is whatever risks that much at that timeframe's stop — a wider stop automatically means a smaller lot. |
+| Risk-off (`InpUseRisk=false`) | Ignores the stop distance entirely: a balance ladder — one 0.01 lot per **1,000** of balance, multiplied by **1.5** when all three components agree. |
 | Min lot (`InpUseMinLot=true`) | Always advises your symbol's smallest allowed lot, whatever the risk says. This overrides the other two. |
 
 Two honest touches: if the smallest lot risks **more** than your target percentage, the `Lot:` cell
@@ -326,24 +326,31 @@ the same level.
 **No order is ever sent.** The EA contains no `OrderSend`, no `CTrade`, no trade calls of any
 kind — this group only prints numbers for you to type in yourself.
 
-New inputs, all under *Trade plan*:
+Inputs, all under *Trade plan*:
 
 | Input | Default | Meaning |
 |---|---|---|
 | `InpUseRisk` | true | Size by risk % of balance (false = balance ladder) |
 | `InpUseMinLot` | false | Always advise the symbol's minimum lot |
-| `InpRiskScore2` / `InpRiskScore3` | 0.5 / 1.0 | Risk % at score 2 and score 3 |
-| `InpBalPer001` | 1000 | Risk-off mode: balance per 0.01 lot |
-| `InpScore3Factor` | 1.5 | Risk-off mode: multiplier at score 3 |
-| `InpATRPeriod` | 14 | ATR period, closed bars, each timeframe's own |
-| `InpSLATR_M5` / `InpTPATR_M5` | 1.0 / 0.9 | **M5 scalp:** stop and target in ATR — aims near and quick (R:R ≈ 1:0.9) |
-| `InpSLATR_M15` / `InpTPATR_M15` | 1.2 / 1.8 | **M15 short-term:** stop and target in ATR (R:R 1:1.5) |
-| `InpSLATR_M30` / `InpTPATR_M30` | 1.5 / 3.0 | **M30 intraday:** stop and target in ATR — aims far and lets the move run (R:R 1:2) |
-| `InpPendATR` | 0.5 | How far the pending entry sits from the market |
-| `InpValidBars` | 3 | How many bars a **trend** reading is worth acting on |
+| `InpRiskPct` | 0.5 | Risk % per trade; score 3 risks double (1.0 %) |
 | `InpValidBarsRange` | 8 | Validity of **range fades** in bars — the box-kill already guards them, they just live longer than trend pendings |
 | `InpDetectClosed` | true | Collapse the panel to `Market Closed` (and stop trading) while the symbol is not trading |
 | `InpClosedStaleMin` | 30 | Quote-age in minutes that also counts as closed (0 = off) |
+
+**The trade profile is baked in, not configurable.** These were inputs until they stopped earning a
+decision — they are the calibration the engine was measured with, and a wrong value here silently
+changes the strategy rather than a convenience:
+
+| Constant | Value | What it sets |
+|---|---|---|
+| ATR period | 14 | ATR on closed bars, each timeframe's own |
+| M5 stop / target | 1.0 / 0.9 ATR | scalp — aims near and quick (R:R ≈ 1:0.9) |
+| M15 stop / target | 1.2 / 1.8 ATR | short-term (R:R 1:1.5) |
+| M30 stop / target | 1.5 / 3.0 ATR | intraday — aims far and lets the move run (R:R 1:2) |
+| Pending offset | 0.5 ATR | half an ATR beyond the market, pushed out if the spread or stops level needs more |
+| Trend validity | 3 bars | the measured median life of a trend reading (`research/HORIZON.md`) |
+| Score-3 risk multiple | ×2 | score 3 risks twice the score-2 percentage |
+| Risk-off ladder | 1,000 / ×1.5 | per 0.01 lot, times 1.5 at score 3 |
 
 Everything is read from your broker's own contract data (tick value, tick size, lot step,
 minimum/maximum lot, minimum stop distance, live spread, account balance and currency), so the block is correct
@@ -431,7 +438,7 @@ slightly worse exit.
      `Entry`, `SL`, and `TP1 / TP2 / TP3` to the new plan. If the score upgrades from `2/3` to
      `3/3` in the same direction, deletes the waiting pending order and opens the **Market order**
      immediately. Cancels if the direction changes, drops to `HOLD`, or reaches its validity
-     expiry — `InpValidBars` closed bars for trend orders, `InpValidBarsRange` for range fades.
+     expiry — 3 closed bars for trend orders, `InpValidBarsRange` for range fades.
 7. **Range fades (Part 2 — Choppy rows):**
    - The order is **always a Pending Limit at the opposite band** of the box (never a market
      order — the score has no say in the entry), with `Stop = band + InpRangeSLATR × ATR` and

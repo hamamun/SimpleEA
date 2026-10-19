@@ -192,22 +192,11 @@ input int      InpSellScore   = -2;          // Score <= this  => SELL
 input group "=== Trade plan & sizing ==="
 input bool     InpUseRisk      = true;       // Size by RISK % of balance (false = balance+score ladder)
 input bool     InpUseMinLot    = false;      // Always advise the symbol's minimum lot
-input double   InpRiskScore2   = 0.5;        // Risk % when score is 2 (risk mode)
-input double   InpRiskScore3   = 1.0;        // Risk % when score is 3 (risk mode)
-input double   InpBalPer001    = 1000.0;     // Risk-off mode: balance per 0.01 lot
-input double   InpScore3Factor = 1.5;        // Risk-off mode: lot multiplier at score 3
-input int      InpATRPeriod    = 14;         // ATR period (closed bars, chart timeframe)
-//  Stop and target are set PER TIMEFRAME, so the three styles are told
-//  apart by their aim: a scalp aims near and quick, an intraday trade
-//  aims far and lets the move run.  R:R = target / stop (0.9 / 1.5 / 2.0).
-input double   InpSLATR_M5     = 1.0;        // M5 scalp:       stop   = this many ATR
-input double   InpTPATR_M5     = 0.9;        // M5 scalp:       target = this many ATR (R:R 1:0.9)
-input double   InpSLATR_M15    = 1.2;        // M15 short-term: stop   = this many ATR
-input double   InpTPATR_M15    = 1.8;        // M15 short-term: target = this many ATR (R:R 1:1.5)
-input double   InpSLATR_M30    = 1.5;        // M30 intraday:   stop   = this many ATR
-input double   InpTPATR_M30    = 3.0;        // M30 intraday:   target = this many ATR (R:R 1:2.0)
-input double   InpPendATR      = 0.5;        // Pending entry offset = this many ATR
-input int      InpValidBars    = 3;          // Trend signal validity in bars (see research/HORIZON.md)
+//  One risk number drives both scores: score 3 risks twice the score-2
+//  percentage, because it is the only reading where all three
+//  components agree.  The stop distance itself is never an input - it
+//  is measured from the market (ATR) and the broker (points).
+input double   InpRiskPct      = 0.5;        // Risk % per trade (score 3 risks double)
 
 input group "=== Shared engine settings ==="
 input int      InpHurstWindow = 256;         // Hurst estimate window (bars)
@@ -263,6 +252,26 @@ input double   InpHurstRevertM30 = 0.45;
 #define TF_COUNT    3
 #define TF_TEXT     "M5/M15/M30"
 #define TRAIL_STEP_PCT 5.0   // pre-TP1 trailstop: SL jumps this many % per step of progress
+
+//  ---- THE TRADE PROFILE (baked in: this is the tested set) ----------
+//  These were inputs until they stopped earning a decision.  None of
+//  them is a user preference - they are the calibration the engine was
+//  measured with, and a wrong value here silently changes the strategy
+//  rather than a convenience.  Stop and target are still PER TIMEFRAME,
+//  so the three styles keep their aim: a scalp aims near and quick, an
+//  intraday trade aims far and lets the move run.
+#define ATR_PERIOD      14        // ATR period, closed bars, each timeframe's own
+#define SL_ATR_M5       1.0       // M5  scalp:       stop   = this many ATR
+#define TP_ATR_M5       0.9       // M5  scalp:       target = this many ATR (R:R 1:0.9)
+#define SL_ATR_M15      1.2       // M15 short-term:  stop   = this many ATR
+#define TP_ATR_M15      1.8       // M15 short-term:  target = this many ATR (R:R 1:1.5)
+#define SL_ATR_M30      1.5       // M30 intraday:    stop   = this many ATR
+#define TP_ATR_M30      3.0       // M30 intraday:    target = this many ATR (R:R 1:2.0)
+#define PEND_ATR        0.5       // pending entry sits this many ATR from the market
+#define VALID_BARS      3         // trend reading's leash in bars (research/HORIZON.md)
+#define RISK_SCORE3_X   2.0       // score 3 risks this multiple of the score-2 percentage
+#define BAL_PER_001     1000.0    // risk-off mode: balance per 0.01 lot
+#define SCORE3_FACTOR   1.5       // risk-off mode: lot multiplier at score 3
 #define HEAD_H      34     // height of the header band (title + symbol line)
 #define PLAN_W_MIN  406    // panel width with no plan showing
 #define PLAN_LINES  3      // lines an ACTIVE timeframe uses (1 for HOLD)
@@ -363,7 +372,7 @@ int BarsNeeded()
 
    //  Short lookbacks: only matter if someone sets them very large.
    if(InpRangeBars + 5 > need) need = InpRangeBars + 5;
-   if(InpATRPeriod  + 5 > need) need = InpATRPeriod  + 5;
+   if(ATR_PERIOD    + 5 > need) need = ATR_PERIOD    + 5;
    if(InpERPeriod   + 5 > need) need = InpERPeriod   + 5;
 
    if(need > BARS_MAX) need = BARS_MAX;
@@ -404,11 +413,11 @@ void ConfigureRow(int i, ENUM_TIMEFRAMES tf, string tag, string style,
 int OnInit()
 {
    ConfigureRow(0, PERIOD_M5,  "M5",  "Scalp",      InpL1_M5,  InpL2_M5,
-                InpHurstTrendM5,  InpHurstRevertM5,  InpSLATR_M5,  InpTPATR_M5);
+                InpHurstTrendM5,  InpHurstRevertM5,  SL_ATR_M5,  TP_ATR_M5);
    ConfigureRow(1, PERIOD_M15, "M15", "Short-term", InpL1_M15, InpL2_M15,
-                InpHurstTrendM15, InpHurstRevertM15, InpSLATR_M15, InpTPATR_M15);
+                InpHurstTrendM15, InpHurstRevertM15, SL_ATR_M15, TP_ATR_M15);
    ConfigureRow(2, PERIOD_M30, "M30", "Intraday",   InpL1_M30, InpL2_M30,
-                InpHurstTrendM30, InpHurstRevertM30, InpSLATR_M30, InpTPATR_M30);
+                InpHurstTrendM30, InpHurstRevertM30, SL_ATR_M30, TP_ATR_M30);
 
    if(InpL1_M5 < InpL2_M5 || InpL1_M15 < InpL2_M15 || InpL1_M30 < InpL2_M30)
    {
@@ -435,6 +444,20 @@ int OnInit()
    if(InpBuyScore > 3 || InpSellScore < -3)
       PrintFormat("SimpleEA: note - the score only reaches -3..+3, so a gate of %d / %d "
                   "will never trigger.", InpBuyScore, InpSellScore);
+
+   //  One risk number now drives both scores.  Zero or negative would
+   //  silently fall back to the minimum lot on every trade, so refuse it;
+   //  anything above 5% per trade is legal but worth a single warning.
+   if(InpRiskPct <= 0.0)
+   {
+      Print("SimpleEA: InpRiskPct must be greater than 0 - it is the percentage "
+            "of balance risked per trade (0.5 is the default, score 3 risks double).");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+   if(InpRiskPct > 5.0)
+      PrintFormat("SimpleEA: note - risking %.2f%% per trade (%.2f%% at score 3) is "
+                  "far above the shipped 0.5%% / 1.0%%.", InpRiskPct,
+                  InpRiskPct * RISK_SCORE3_X);
 
    g_rowH   = InpFontSize + 11;
    // Each timeframe takes TWO lines: Trend/Regime on the first,
@@ -930,7 +953,7 @@ void EvaluateRow(int idx)
             if(h[k] > top) top = h[k];
             if(l[k] < bot) bot = l[k];
          }
-         double atr    = ATRClosed(g_rows[idx].tf, InpATRPeriod);
+         double atr    = ATRClosed(g_rows[idx].tf, ATR_PERIOD);
          double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
          double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
          double spread = ask - bid;
@@ -979,7 +1002,7 @@ void EvaluateRow(int idx)
    //  the auto-trader expires and re-places a waiting order on.  A row
    //  that stands aside carries no leash at all.
    int  leash = (mode == 2) ? MathMax(1, InpValidBarsRange)
-                            : MathMax(1, InpValidBars);
+                            : VALID_BARS;
    int  tfSec = (int)PeriodSeconds(g_rows[idx].tf);
    long age   = leash + 1;                        // unknown age: treat the leash as spent
    if(g_rows[idx].sigBirth > 0 && tfSec > 0 &&
@@ -1018,8 +1041,8 @@ void EvaluateRow(int idx)
 //  band of the box - the box decides the entry, the score has no say,
 //  and the target is half the box (band -> midpoint), never a wish.
 //  (Measured behaviour of both is in research/HORIZON.md; the pending price
-//   is one InpPendATR step beyond the market, which is the only place in
-//   this block where a choice - not a measurement - is being made.)
+//   is PEND_ATR (half an ATR) beyond the market, pushed out further only
+//   when the spread or the broker's stops level demands it.)
 //+------------------------------------------------------------------+
 //  ONE PLAN PER TIMEFRAME.  The second group is three blocks, one for M5,
 //  one for M15, one for M30 - because when autotrading arrives the panel
@@ -1209,7 +1232,7 @@ void UpdatePlanRow(int i)
       return;
    }
 
-   double atr   = ATRClosed(g_rows[i].tf, InpATRPeriod);
+   double atr   = ATRClosed(g_rows[i].tf, ATR_PERIOD);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -1231,7 +1254,14 @@ void UpdatePlanRow(int i)
    bool   isPendNow  = (g_auto[i].active && !g_auto[i].isOpen && g_auto[i].dir == dir &&
                         g_auto[i].entryPrice > 0.0);
    double entry      = (dir > 0) ? ask : bid;
-   double offset     = InpPendATR * atr;
+   //  Pending offset: half an ATR, but never inside the spread and never
+   //  inside the broker's minimum stop distance - on a wide-spread or a
+   //  thin symbol a bare half-ATR would sit where no limit order can
+   //  rest.  On a normal feed this is exactly PEND_ATR * ATR.
+   double offset     = PEND_ATR * atr;
+   double minOff     = MathMax(2.0 * (ask - bid),
+                               (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point);
+   if(offset < minOff) offset = minOff;
    double pend       = ValidLimitPrice(dir, (dir > 0) ? (entry - offset) : (entry + offset),
                                        bid, ask, point);
    double planEntry  = market ? entry : pend;
@@ -1294,16 +1324,16 @@ void UpdatePlanRow(int i)
    }
    else if(InpUseRisk)
    {
-      double pct = (MathAbs(score) >= 3) ? InpRiskScore3 : InpRiskScore2;
+      double pct = InpRiskPct;
+      if(MathAbs(score) >= 3) pct *= RISK_SCORE3_X;   // all three agree: double
       wantRisk   = balance * pct / 100.0;
       if(pv > 0.0 && slPts > 0)
          lots = wantRisk / ((double)slPts * pv);
    }
    else
    {
-      double step = (InpBalPer001 > 0.0) ? InpBalPer001 : 1000.0;
-      lots = (balance / step) * 0.01;
-      if(MathAbs(score) >= 3) lots *= InpScore3Factor;
+      lots = (balance / BAL_PER_001) * 0.01;
+      if(MathAbs(score) >= 3) lots *= SCORE3_FACTOR;
    }
 
    double lot       = NormalizeLots(lots);
@@ -1314,14 +1344,14 @@ void UpdatePlanRow(int i)
                        riskUSD > wantRisk * 1.05);
 
    // ---- how long this reading is worth acting on -------------------
-   //  Trend readings live InpValidBars closed bars (the measured median
+   //  Trend readings live VALID_BARS closed bars (the measured median
    //  life, research/HORIZON.md).  Range fades get InpValidBarsRange:
    //  the box is re-measured every bar and a close outside it already
    //  kills both the pending and the position, so a longer leash costs
    //  nothing - it only stops the cancel / re-place churn every 3 bars
    //  and the one-bar gap at the band that churn leaves behind.
    int vBars = (g_rows[i].mode == 2) ? MathMax(1, InpValidBarsRange)
-                                     : MathMax(1, InpValidBars);
+                                     : VALID_BARS;
    datetime until  = 0;
    datetime sigBar = LastClosedBarTime(_Symbol, g_rows[i].tf);
    if(sigBar > 0)
@@ -2641,7 +2671,7 @@ void ManageAutoBar()
          //  produced a cancel -> one-bar gap at the band -> re-place
          //  cycle while the thesis was intact.
          int  vBars   = g_auto[i].isRange ? MathMax(1, InpValidBarsRange)
-                                          : MathMax(1, InpValidBars);
+                                          : VALID_BARS;
          bool expired = (g_auto[i].placedBar > 0 && tfSec > 0 &&
                          g_rows[i].lastBar > g_auto[i].placedBar &&
                          ((int)((g_rows[i].lastBar - g_auto[i].placedBar) / tfSec) >= vBars));
