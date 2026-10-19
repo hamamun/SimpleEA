@@ -74,8 +74,8 @@ def plan(c, direction, atr, balance, use_risk=True, use_min_lot=False,
          range_sl_atr=1.0):
     """The plan numbers, exactly as UpdatePlanRow() computes them.
 
-    sl_atr / tp_atr stand for the EA's per-timeframe inputs
-    (InpSLATR_* / InpTPATR_*): the caller passes the pair belonging to
+    sl_atr / tp_atr stand for the EA's baked-in per-timeframe profile
+    (SL_ATR_* / TP_ATR_*): the caller passes the pair belonging to
     the row being built - M5 1.0/0.9, M15 1.2/1.8, M30 1.5/3.0.  The
     1.2/2.4 defaults below are only the classic single-pair arithmetic
     example the hand-derived checks in main() were written against.
@@ -261,7 +261,7 @@ def main():
           % (r10["pv"], r10["risk_usd"]))
 
     # --- per-timeframe profiles: the three styles must NOT share one aim -
-    # The EA ships InpSLATR_* / InpTPATR_* per timeframe (M5 1.0/0.9,
+    # The EA bakes in SL_ATR_* / TP_ATR_* per timeframe (M5 1.0/0.9,
     # M15 1.2/1.8, M30 1.5/3.0 ATR).  On the XAUUSD ATRs 0.28 / 0.85 / 1.70
     # that is stop/target 28/25, 102/153, 255/510 points - hand-checkable
     # and fanning out with the timeframe.
@@ -327,7 +327,7 @@ def main():
                sl_atr=1.5, tp_atr=3.0,          # M30's trend profile...
                box=(top, bot), entry=bot)       # ...must be ignored
     check(rb3["sl_pts"] == rb2["sl_pts"] and rb3["tp_pts"] == rb2["tp_pts"],
-          "the range branch must ignore InpSLATR/InpTPATR entirely")
+          "the range branch must ignore SL_ATR/TP_ATR entirely")
     print("  ok  BUY band %.2f -> stop %.2f  target %.2f (midpoint); trend profile ignored"
           % (bot, rb2["sl_price"], rb2["tp_price"]))
 

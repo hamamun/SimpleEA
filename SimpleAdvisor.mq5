@@ -9,9 +9,13 @@
 //|     Regime = how it is moving (Steady / Mixed / Choppy),         |
 //|  plus the original Signal (BUY / SELL / HOLD) and Score.         |
 //|                                                                  |
-//|  READ-ONLY.  This program contains no OrderSend / CTrade / trade  |
-//|  calls of any kind.  It cannot place, modify or close an order.   |
-//|  It only reads price history and draws text on the chart.         |
+//|  READ-ONLY OR LIVE?  The PANEL itself only reads price history    |
+//|  and draws text.  The EXECUTOR that ships with it DOES send       |
+//|  orders when InpAutoTrading = true - the shipped default.  Set    |
+//|  it to false for advice only, and nothing is ever sent.           |
+//|                                                                   |
+//|  With InpAutoTrading = false this program contains no trade       |
+//|  calls at all: it cannot place, modify or close an order.         |
 //|                                                                  |
 //|  -----------------------------------------------------------------|
 //|  SIGNAL ENGINE                                                    |
@@ -131,7 +135,7 @@
 //|                   limit order and opens Market order immediately. |
 //|        Direction changes / HOLD / expiry -> cancels pending.      |
 //|   - Second Panel ("Autotrading", right or bottom of Main Panel):  |
-//|        Controlled by InpAutoPanelPos (Right default, or Bottom).  |
+//|        Controlled by InpAutoPanelPos (Bottom default, or Right).  |
 //|        Opens automatically when any market/pending order exists   |
 //|        and closes completely when flat.                           |
 //|        Header shows: Autotrading | Trailstop Off/On/Active        |
@@ -149,7 +153,7 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "2.10"
+#property version   "2.11"
 #property description "Multi-timeframe BUY/SELL/HOLD direction panel, trade plan and full-auto executor. M5 / M15 / M30 charts only."
 
 #ifndef M_PI
@@ -167,20 +171,19 @@ enum ENUM_AUTO_PANEL_POS
 //==================================================================
 input group "=== Autotrading ==="
 input bool                InpAutoTrading  = true;            // Autotrading (true = full auto, false = read-only)
-input bool                InpUseStopLoss  = true;            // Stoploss (true = place initial SL, false = only when trailstop / TP1 places it)
+input bool                InpUseStopLoss  = false;           // Stoploss (true = place initial SL, false = only when trailstop / TP1 places it)
 input bool                InpUseTrailStop = true;            // Pre-TP1 stepped trailstop (true = on, Entry->TP1 only)
 input int                 InpTrailPctTight  = 40;            // Trailstop % when regime is NOT Steady (10-70)
 input int                 InpTrailPctSteady = 55;            // Trailstop % in a Steady, clear trend (10-70)
-input ENUM_AUTO_PANEL_POS InpAutoPanelPos = AUTO_POS_RIGHT;  // Right panel placement (Right or Bottom)
+input ENUM_AUTO_PANEL_POS InpAutoPanelPos = AUTO_POS_BOTTOM; // Right panel placement (Right or Bottom)
 input long                InpMagicBase    = 202610;          // Base magic number (+0 M5, +1 M15, +2 M30)
-input int                 InpSlippagePts  = 20;              // Max slippage in points for market orders
 
 input group "=== Panel appearance ==="
 input int      InpPanelX      = 12;          // Panel X offset (px)
 input int      InpPanelY      = 24;          // Panel Y offset (px)
 input int      InpFontSize    = 9;           // Font size
 input string   InpFont        = "Consolas";  // Font (monospaced aligns best)
-input color    InpBgColor     = C'18,18,24'; // Panel background
+input color    InpBgColor     = C'48,48,48'; // Panel background
 input color    InpTitleColor  = clrWhite;    // Title colour
 input color    InpBuyColor    = clrLime;     // "Going up" colour
 input color    InpSellColor   = clrTomato;   // "Going down" colour
@@ -189,28 +192,18 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 input group "=== Signal thresholds ==="
 input int      InpBuyScore    = 2;           // Score >= this  => BUY
 input int      InpSellScore   = -2;          // Score <= this  => SELL
-input int      InpBarsToLoad  = 700;         // Closed bars pulled per timeframe
 
 input group "=== Trade plan & sizing ==="
-input bool     InpShowPlan     = true;       // Show the trade plan block
-input bool     InpUseRisk      = true;       // Size by RISK % of balance (false = balance+score ladder)
+//  Sizing is one switch and one number:
+//     InpUseRisk  = true   -> risk InpRiskPct % of balance (score 3: double)
+//     InpUseRisk  = false  -> no risk % is applied: a fixed lot ladder,
+//                             0.01 lot per 1,000 of balance (score 3: x1.5)
+//     InpUseMinLot = true  -> overrides both: always the symbol's min lot
+//  The ladder's two numbers and the score-3 multiplier are baked in -
+//  they define the fallback, they are not a dial to tune.
+input bool     InpUseRisk      = true;       // Allow risk (false = no risk %, fixed lot ladder)
 input bool     InpUseMinLot    = false;      // Always advise the symbol's minimum lot
-input double   InpRiskScore2   = 0.5;        // Risk % when score is 2 (risk mode)
-input double   InpRiskScore3   = 1.0;        // Risk % when score is 3 (risk mode)
-input double   InpBalPer001    = 1000.0;     // Risk-off mode: balance per 0.01 lot
-input double   InpScore3Factor = 1.5;        // Risk-off mode: lot multiplier at score 3
-input int      InpATRPeriod    = 14;         // ATR period (closed bars, chart timeframe)
-//  Stop and target are set PER TIMEFRAME, so the three styles are told
-//  apart by their aim: a scalp aims near and quick, an intraday trade
-//  aims far and lets the move run.  R:R = target / stop (0.9 / 1.5 / 2.0).
-input double   InpSLATR_M5     = 1.0;        // M5 scalp:       stop   = this many ATR
-input double   InpTPATR_M5     = 0.9;        // M5 scalp:       target = this many ATR (R:R 1:0.9)
-input double   InpSLATR_M15    = 1.2;        // M15 short-term: stop   = this many ATR
-input double   InpTPATR_M15    = 1.8;        // M15 short-term: target = this many ATR (R:R 1:1.5)
-input double   InpSLATR_M30    = 1.5;        // M30 intraday:   stop   = this many ATR
-input double   InpTPATR_M30    = 3.0;        // M30 intraday:   target = this many ATR (R:R 1:2.0)
-input double   InpPendATR      = 0.5;        // Pending entry offset = this many ATR
-input int      InpValidBars    = 3;          // Trend signal validity in bars (see research/HORIZON.md)
+input double   InpRiskPct      = 0.5;        // Risk % per trade (score 3 risks double)
 
 input group "=== Shared engine settings ==="
 input int      InpHurstWindow = 256;         // Hurst estimate window (bars)
@@ -266,6 +259,26 @@ input double   InpHurstRevertM30 = 0.45;
 #define TF_COUNT    3
 #define TF_TEXT     "M5/M15/M30"
 #define TRAIL_STEP_PCT 5.0   // pre-TP1 trailstop: SL jumps this many % per step of progress
+
+//  ---- THE TRADE PROFILE (baked in: this is the tested set) ----------
+//  These were inputs until they stopped earning a decision.  None of
+//  them is a user preference - they are the calibration the engine was
+//  measured with, and a wrong value here silently changes the strategy
+//  rather than a convenience.  Stop and target are still PER TIMEFRAME,
+//  so the three styles keep their aim: a scalp aims near and quick, an
+//  intraday trade aims far and lets the move run.
+#define ATR_PERIOD      14        // ATR period, closed bars, each timeframe's own
+#define SL_ATR_M5       1.0       // M5  scalp:       stop   = this many ATR
+#define TP_ATR_M5       0.9       // M5  scalp:       target = this many ATR (R:R 1:0.9)
+#define SL_ATR_M15      1.2       // M15 short-term:  stop   = this many ATR
+#define TP_ATR_M15      1.8       // M15 short-term:  target = this many ATR (R:R 1:1.5)
+#define SL_ATR_M30      1.5       // M30 intraday:    stop   = this many ATR
+#define TP_ATR_M30      3.0       // M30 intraday:    target = this many ATR (R:R 1:2.0)
+#define PEND_ATR        0.5       // pending entry sits this many ATR from the market
+#define VALID_BARS      3         // trend reading's leash in bars (research/HORIZON.md)
+#define RISK_SCORE3_X   2.0       // score 3 risks this multiple of the score-2 percentage
+#define BAL_PER_001     1000.0    // risk-off mode: balance per 0.01 lot
+#define SCORE3_FACTOR   1.5       // risk-off mode: lot multiplier at score 3
 #define HEAD_H      34     // height of the header band (title + symbol line)
 #define PLAN_W_MIN  406    // panel width with no plan showing
 #define PLAN_LINES  3      // lines an ACTIVE timeframe uses (1 for HOLD)
@@ -286,6 +299,14 @@ input double   InpHurstRevertM30 = 0.45;
 #define AUTO_LBL_A  9      // label width in chars for Col A ("Waiting: ")
 #define AUTO_LBL_B  11     // label width in chars for Col B ("Distance: ")
 #define AUTO_LBL_C  5      // label width in chars for Col C ("Ask: " / "Bid: ")
+
+//  HISTORY DEPTH (no input - the engine sizes its own pull)
+//  BARS_BASE is the smallest pull and is enough for the default
+//  calibration.  BarsNeeded() raises it automatically whenever the
+//  user's own periods ask for more history than the base provides.
+#define BARS_BASE      700   // lowest number of closed bars pulled per timeframe
+#define BARS_WARMUP_X  4     // recursive filter warm-up: multiples of the longest period
+#define BARS_MAX       50000 // hard ceiling so a typo cannot ask for absurd history
 
 //  The only chart timeframes this engine is calibrated for.  Anything else
 //  is refused outright - see the CHART-TIMEFRAME RULE block in the header
@@ -329,6 +350,48 @@ datetime g_srvSaidClosedUntil = 0;  // server said "market closed": trust it for
 
 ENUM_TIMEFRAMES g_drawnTf = (ENUM_TIMEFRAMES)0;  // timeframe the header was drawn for
 
+//+------------------------------------------------------------------+
+//  HOW MANY CLOSED BARS THIS BUILD ACTUALLY NEEDS
+//
+//  Every consumer of history has a minimum:
+//     - Hurst          : its window, walked with block averages
+//     - PrecisionTrend : a recursive high-pass filter - it converges
+//                        over several multiples of the LONGEST period
+//     - E/R, ATR, range box : a handful of bars each
+//
+//  The pull is the largest of those, never below BARS_BASE.  So the
+//  default settings keep pulling 700, but raising the Hurst window to
+//  900 or a trend period to 400 raises the pull automatically -
+//  there is nothing to remember to change alongside them.
+//+------------------------------------------------------------------+
+int BarsNeeded()
+{
+   int need = BARS_BASE;
+
+   //  Longest trend period across the three timeframes.  Clamped BEFORE
+   //  the multiply, so a typo (L1 = 900,000,000) cannot overflow the int
+   //  and hand the loader a negative count.
+   int l1max = MathMax(InpL1_M5, MathMax(InpL1_M15, InpL1_M30));
+   if(l1max < 1)          l1max = 1;
+   if(l1max > BARS_MAX)   l1max = BARS_MAX;
+   int l1need = MathMin(BARS_MAX, BARS_WARMUP_X * l1max);
+   if(l1need > need) need = l1need;
+
+   //  Hurst window plus margin for the block averaging (same guard).
+   int hneed = InpHurstWindow;
+   if(hneed < 32)         hneed = 32;
+   if(hneed > BARS_MAX)   hneed = BARS_MAX;
+   if(hneed + 50 > need)  need = hneed + 50;
+
+   //  Short lookbacks: only matter if someone sets them very large.
+   if(InpRangeBars + 5 > need) need = InpRangeBars + 5;
+   if(ATR_PERIOD    + 5 > need) need = ATR_PERIOD    + 5;
+   if(InpERPeriod   + 5 > need) need = InpERPeriod   + 5;
+
+   if(need > BARS_MAX) need = BARS_MAX;
+   return(need);
+}
+
 //==================================================================
 //  SETUP
 //==================================================================
@@ -363,11 +426,11 @@ void ConfigureRow(int i, ENUM_TIMEFRAMES tf, string tag, string style,
 int OnInit()
 {
    ConfigureRow(0, PERIOD_M5,  "M5",  "Scalp",      InpL1_M5,  InpL2_M5,
-                InpHurstTrendM5,  InpHurstRevertM5,  InpSLATR_M5,  InpTPATR_M5);
+                InpHurstTrendM5,  InpHurstRevertM5,  SL_ATR_M5,  TP_ATR_M5);
    ConfigureRow(1, PERIOD_M15, "M15", "Short-term", InpL1_M15, InpL2_M15,
-                InpHurstTrendM15, InpHurstRevertM15, InpSLATR_M15, InpTPATR_M15);
+                InpHurstTrendM15, InpHurstRevertM15, SL_ATR_M15, TP_ATR_M15);
    ConfigureRow(2, PERIOD_M30, "M30", "Intraday",   InpL1_M30, InpL2_M30,
-                InpHurstTrendM30, InpHurstRevertM30, InpSLATR_M30, InpTPATR_M30);
+                InpHurstTrendM30, InpHurstRevertM30, SL_ATR_M30, TP_ATR_M30);
 
    if(InpL1_M5 < InpL2_M5 || InpL1_M15 < InpL2_M15 || InpL1_M30 < InpL2_M30)
    {
@@ -375,6 +438,41 @@ int OnInit()
             "Set L1 > L2 for every timeframe.");
       return(INIT_PARAMETERS_INCORRECT);
    }
+
+   //  The two score gates must not overlap.  With BUY <= SELL a score
+   //  that is both "high enough to buy" and "low enough to sell" would
+   //  take the BUY branch first and the panel would call BUY forever,
+   //  so the wrong pair is refused at load instead of traded.
+   if(InpBuyScore <= InpSellScore)
+   {
+      PrintFormat("SimpleEA: InpBuyScore (%d) must be greater than InpSellScore (%d). "
+                  "The score runs -3..+3, so a BUY gate of 2 and a SELL gate of -2 "
+                  "is the default; the two must never cross.",
+                  InpBuyScore, InpSellScore);
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+
+   //  Gates outside the reachable range are legal but can never fire;
+   //  say so once instead of leaving a silently dead panel.
+   if(InpBuyScore > 3 || InpSellScore < -3)
+      PrintFormat("SimpleEA: note - the score only reaches -3..+3, so a gate of %d / %d "
+                  "will never trigger.", InpBuyScore, InpSellScore);
+
+   //  The risk percentage only matters while risk mode is on.  Zero or
+   //  negative there would silently fall back to the minimum lot on every
+   //  trade, so refuse it; anything above 5% is legal but worth a warning.
+   //  With InpUseRisk=false the ladder ignores the number entirely, so it
+   //  is not validated - an unused value must not stop the EA loading.
+   if(InpUseRisk && InpRiskPct <= 0.0)
+   {
+      Print("SimpleEA: InpRiskPct must be greater than 0 - it is the percentage "
+            "of balance risked per trade (0.5 is the default, score 3 risks double).");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+   if(InpUseRisk && InpRiskPct > 5.0)
+      PrintFormat("SimpleEA: note - risking %.2f%% per trade (%.2f%% at score 3) is "
+                  "far above the shipped 0.5%% / 1.0%%.", InpRiskPct,
+                  InpRiskPct * RISK_SCORE3_X);
 
    g_rowH   = InpFontSize + 11;
    // Each timeframe takes TWO lines: Trend/Regime on the first,
@@ -777,7 +875,7 @@ void EvaluateRow(int idx)
 {
    double c[], h[], l[];
 
-   int want = MathMax(InpBarsToLoad, InpHurstWindow + 50);
+   int want = BarsNeeded();   // 700 minimum, raised automatically by the periods above
    if(!LoadClosed(_Symbol, g_rows[idx].tf, want, c, h, l))
    {
       g_rows[idx].ok           = false;
@@ -870,7 +968,7 @@ void EvaluateRow(int idx)
             if(h[k] > top) top = h[k];
             if(l[k] < bot) bot = l[k];
          }
-         double atr    = ATRClosed(g_rows[idx].tf, InpATRPeriod);
+         double atr    = ATRClosed(g_rows[idx].tf, ATR_PERIOD);
          double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
          double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
          double spread = ask - bid;
@@ -919,7 +1017,7 @@ void EvaluateRow(int idx)
    //  the auto-trader expires and re-places a waiting order on.  A row
    //  that stands aside carries no leash at all.
    int  leash = (mode == 2) ? MathMax(1, InpValidBarsRange)
-                            : MathMax(1, InpValidBars);
+                            : VALID_BARS;
    int  tfSec = (int)PeriodSeconds(g_rows[idx].tf);
    long age   = leash + 1;                        // unknown age: treat the leash as spent
    if(g_rows[idx].sigBirth > 0 && tfSec > 0 &&
@@ -958,12 +1056,12 @@ void EvaluateRow(int idx)
 //  band of the box - the box decides the entry, the score has no say,
 //  and the target is half the box (band -> midpoint), never a wish.
 //  (Measured behaviour of both is in research/HORIZON.md; the pending price
-//   is one InpPendATR step beyond the market, which is the only place in
-//   this block where a choice - not a measurement - is being made.)
+//   is PEND_ATR (half an ATR) beyond the market, pushed out further only
+//   when the spread or the broker's stops level demands it.)
 //+------------------------------------------------------------------+
 //  ONE PLAN PER TIMEFRAME.  The second group is three blocks, one for M5,
-//  one for M15, one for M30 - because when autotrading arrives the panel
-//  has to be able to say "buy M5, sell M30" and the executor acts per row.
+//  one for M15, one for M30 - because the executor acts per row and the
+//  panel has to be able to say "buy M5, sell M30".
 struct SPlanRow
 {
    int      state;                // 0 HOLD, 1 waiting for data, 2 active
@@ -1149,7 +1247,7 @@ void UpdatePlanRow(int i)
       return;
    }
 
-   double atr   = ATRClosed(g_rows[i].tf, InpATRPeriod);
+   double atr   = ATRClosed(g_rows[i].tf, ATR_PERIOD);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -1171,7 +1269,14 @@ void UpdatePlanRow(int i)
    bool   isPendNow  = (g_auto[i].active && !g_auto[i].isOpen && g_auto[i].dir == dir &&
                         g_auto[i].entryPrice > 0.0);
    double entry      = (dir > 0) ? ask : bid;
-   double offset     = InpPendATR * atr;
+   //  Pending offset: half an ATR, but never inside the spread and never
+   //  inside the broker's minimum stop distance - on a wide-spread or a
+   //  thin symbol a bare half-ATR would sit where no limit order can
+   //  rest.  On a normal feed this is exactly PEND_ATR * ATR.
+   double offset     = PEND_ATR * atr;
+   double minOff     = MathMax(2.0 * (ask - bid),
+                               (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point);
+   if(offset < minOff) offset = minOff;
    double pend       = ValidLimitPrice(dir, (dir > 0) ? (entry - offset) : (entry + offset),
                                        bid, ask, point);
    double planEntry  = market ? entry : pend;
@@ -1234,16 +1339,16 @@ void UpdatePlanRow(int i)
    }
    else if(InpUseRisk)
    {
-      double pct = (MathAbs(score) >= 3) ? InpRiskScore3 : InpRiskScore2;
+      double pct = InpRiskPct;
+      if(MathAbs(score) >= 3) pct *= RISK_SCORE3_X;   // all three agree: double
       wantRisk   = balance * pct / 100.0;
       if(pv > 0.0 && slPts > 0)
          lots = wantRisk / ((double)slPts * pv);
    }
    else
    {
-      double step = (InpBalPer001 > 0.0) ? InpBalPer001 : 1000.0;
-      lots = (balance / step) * 0.01;
-      if(MathAbs(score) >= 3) lots *= InpScore3Factor;
+      lots = (balance / BAL_PER_001) * 0.01;
+      if(MathAbs(score) >= 3) lots *= SCORE3_FACTOR;
    }
 
    double lot       = NormalizeLots(lots);
@@ -1254,14 +1359,14 @@ void UpdatePlanRow(int i)
                        riskUSD > wantRisk * 1.05);
 
    // ---- how long this reading is worth acting on -------------------
-   //  Trend readings live InpValidBars closed bars (the measured median
+   //  Trend readings live VALID_BARS closed bars (the measured median
    //  life, research/HORIZON.md).  Range fades get InpValidBarsRange:
    //  the box is re-measured every bar and a close outside it already
    //  kills both the pending and the position, so a longer leash costs
    //  nothing - it only stops the cancel / re-place churn every 3 bars
    //  and the one-bar gap at the band that churn leaves behind.
    int vBars = (g_rows[i].mode == 2) ? MathMax(1, InpValidBarsRange)
-                                     : MathMax(1, InpValidBars);
+                                     : VALID_BARS;
    datetime until  = 0;
    datetime sigBar = LastClosedBarTime(_Symbol, g_rows[i].tf);
    if(sigBar > 0)
@@ -1565,6 +1670,54 @@ ENUM_ORDER_TYPE_FILLING FillingMode()
    if((filling & SYMBOL_FILLING_FOK) != 0) return(ORDER_FILLING_FOK);
    if((filling & SYMBOL_FILLING_IOC) != 0) return(ORDER_FILLING_IOC);
    return(ORDER_FILLING_RETURN);
+}
+
+//+------------------------------------------------------------------+
+//  AUTO SLIPPAGE ALLOWANCE  (no input - derived per order)
+//
+//  One fixed point number cannot be right on every symbol: 20 points
+//  is 2 pips on a 5-digit FX pair, but a fraction of the spread on a
+//  3-digit gold quote or an index.  So the allowance is computed at
+//  the moment of the order from live market data:
+//
+//     allowance = 2.5 x max(current spread, broker stops level)
+//
+//  - the spread is what the fill can realistically drift through;
+//  - the broker's SYMBOL_TRADE_STOPS_LEVEL protects thin/synthetic
+//    symbols where the minimum distance is the real constraint;
+//  - clamped to 5..50 points for entries (a wide-spread symbol simply
+//    stops trading rather than accepting a bad fill), and to
+//    8..75 points x the same rule for CLOSES, because a rejected close
+//    is worse than a slightly worse exit.
+//
+//  Works unchanged on 2-, 3- and 5-digit symbols, FX, metals,
+//  indices, crypto and cent accounts - nothing to configure.
+//+------------------------------------------------------------------+
+ulong AutoSlippagePts(bool closing)
+{
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0) return(closing ? 30 : 20);
+
+   double spreadPts = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   if(spreadPts <= 0.0)
+   {
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      if(ask > 0.0 && bid > 0.0) spreadPts = (ask - bid) / point;
+   }
+
+   double stopsPts = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double base     = MathMax(MathMax(spreadPts, stopsPts), 1.0);
+
+   double dev = MathRound(2.5 * base);
+   if(closing) dev *= 1.5;
+
+   double lo = closing ? 8.0 : 5.0;
+   double hi = (closing ? MathMax(75.0, 3.0 * base)
+                        : MathMax(50.0, 2.0 * base));
+   if(dev < lo) dev = lo;
+   if(dev > hi) dev = hi;
+   return((ulong)dev);
 }
 
 //+------------------------------------------------------------------+
@@ -1897,7 +2050,7 @@ bool TradeOpenMarket(int i, int dir, double lot, double sl, double tp, ulong &ou
    req.price        = NormPrice((dir > 0) ? ask : bid);
    req.sl           = (sl > 0.0) ? NormPrice(sl) : 0.0;
    req.tp           = (tp > 0.0) ? NormPrice(tp) : 0.0;
-   req.deviation    = (ulong)MathMax(0, InpSlippagePts);
+   req.deviation    = AutoSlippagePts(false);   // open: live spread based
    req.magic        = MagicForTF(i);
    req.comment      = "SimpleEA_" + g_rows[i].tag;
    req.type_filling = FillingMode();
@@ -2004,7 +2157,7 @@ bool TradeClosePosition(ulong posTicket, int dir, double volume, long magic)
    req.volume       = volume;
    req.type         = (dir > 0) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
    req.price        = NormPrice((dir > 0) ? bid : ask);
-   req.deviation    = (ulong)MathMax(0, InpSlippagePts);
+   req.deviation    = AutoSlippagePts(true);    // close: slightly looser
    req.magic        = magic;
    req.type_filling = FillingMode();
 
@@ -2533,7 +2686,7 @@ void ManageAutoBar()
          //  produced a cancel -> one-bar gap at the band -> re-place
          //  cycle while the thesis was intact.
          int  vBars   = g_auto[i].isRange ? MathMax(1, InpValidBarsRange)
-                                          : MathMax(1, InpValidBars);
+                                          : VALID_BARS;
          bool expired = (g_auto[i].placedBar > 0 && tfSec > 0 &&
                          g_rows[i].lastBar > g_auto[i].placedBar &&
                          ((int)((g_rows[i].lastBar - g_auto[i].placedBar) / tfSec) >= vBars));
@@ -3276,10 +3429,10 @@ void DrawSupportedPanel()
    string symRight = "|  " + _Symbol + "  |  " + ChartTimeframeText();
    int    headW    = pad + titleW + em + (16 + 3 + 2 + StringLen(symRight)) * em + pad;
    int    wantW    = (int)MathMax(NoticeWidth(), headW);
-   if(InpShowPlan) wantW = (int)MathMax(wantW, PlanWidthNeed());
-   g_panelW = wantW;
-   g_panelH = HEAD_H + TF_COUNT * 2 * rowH + 8
-              + (InpShowPlan ? (PLAN_SEP_H + TotalPlanLines() * rowH) : 0);
+   wantW           = (int)MathMax(wantW, PlanWidthNeed());
+   g_panelW        = wantW;
+   g_panelH        = HEAD_H + TF_COUNT * 2 * rowH + 8
+                     + PLAN_SEP_H + TotalPlanLines() * rowH;
    MakeRect("bg",  x, y, g_panelW, g_panelH, InpBgColor, clrDimGray);
    MakeRect("sep", x + 4, y + HEAD_H - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
 
@@ -3358,8 +3511,10 @@ void DrawSupportedPanel()
    }
 
    // ---- the trade plan: one block per timeframe below the rows -------
-   if(InpShowPlan) DrawPlanBlock(x, y);
-   else            DeletePlanObjects();
+   //  Always drawn: the plan is the panel's answer to "what will it do
+   //  next", and the auto-trader reads the same numbers, so hiding it
+   //  would only hide the working.
+   DrawPlanBlock(x, y);
 
    // ---- the 2nd panel (Autotrading): right of the Main Panel ---------
    DrawAutoPanel();
@@ -3410,8 +3565,6 @@ void PlanColumns(int &cA, int &vA, int &cB, int &vB, int &cC, int &vC)
 //+------------------------------------------------------------------+
 int TotalPlanLines()
 {
-   if(!InpShowPlan) return(0);
-
    int n = 0;
    for(int i = 0; i < TF_COUNT; i++)
       n += g_plans[i].lines;
@@ -3425,7 +3578,7 @@ int TotalPlanLines()
 //+------------------------------------------------------------------+
 int PlanWidthNeed()
 {
-   if(!InpShowPlan || !ChartSupported()) return(0);
+   if(!ChartSupported()) return(0);
 
    int cA, vA, cB, vB, cC, vC;
    PlanColumns(cA, vA, cB, vB, cC, vC);

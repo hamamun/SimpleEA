@@ -1,7 +1,9 @@
 # SimpleEA — multi-timeframe direction panel (MT5)
 
-A very simple, read-only Expert Advisor that shows, in plain words, what price is doing on
-**M5 (scalping)**, **M15 (short-term)** and **M30 (intraday)** on **any symbol**. Each
+A very simple Expert Advisor that shows, in plain words, what price is doing on
+**M5 (scalping)**, **M15 (short-term)** and **M30 (intraday)** on **any symbol**. The panel is
+read-only; the full-auto executor that ships with it is switched on by `InpAutoTrading`
+(default `true`, so set it to `false` for advice only). Each
 timeframe gets two lines — the plain words first, then the original trading read underneath,
 so nothing from the first panel is lost:
 
@@ -92,13 +94,14 @@ changes the chart timeframe through H1 → M15 → M1 → D1 → H4 → M30 and 
 at every step. The rule itself is verified state by state in
 `research/verify_timeframe_gate.py`.
 
-**It contains no order-sending code.** It cannot place, modify or close a trade, so it is safe to
-leave on a live chart.
+**Read-only unless you ask otherwise.** The panel itself never trades: with
+`InpAutoTrading = false` the EA cannot place, modify or close anything and is safe to leave on a
+live chart. With the shipped default `InpAutoTrading = true` it *does* run its own orders (one per
+timeframe, magic-number tagged), so treat it as a live trader and start on demo.
 
-> **Algo Trading:** because the EA never trades, it also works with the *Algo Trading* button off.
-> If the panel does **not** appear, that button is the usual cause — turn it on, or right-click the
-> chart → *Expert Advisors* → *Properties* → *Common* → tick **Allow Algo Trading**. Turning it on
-> is harmless here: there is no trade code for it to enable.
+> **Algo Trading:** the panel appears with the *Algo Trading* button off, but an EA cannot send
+> orders without it. If nothing trades, that button is the usual cause — turn it on, or right-click
+> the chart → *Expert Advisors* → *Properties* → *Common* → tick **Allow Algo Trading**.
 
 ---
 
@@ -216,9 +219,9 @@ reading never changes after the fact.
 |---|---|---|---|
 | Panel | `InpPanelX/Y` | 12 / 24 | position in pixels |
 | | `InpFontSize` | 9 | font size |
+| | `InpBgColor` | `48,48,48` (`#303030`) | panel background colour |
 | Thresholds | `InpBuyScore` | 2 | score ≥ this ⇒ BUY |
 | | `InpSellScore` | −2 | score ≤ this ⇒ SELL |
-| | `InpBarsToLoad` | 700 | closed bars pulled per timeframe |
 | Shared | `InpHurstWindow` | 256 | Hurst estimate window in bars |
 | | `InpERPeriod` | 20 | efficiency-ratio period |
 | | `InpERDead` | 0.10 | below this ⇒ dead market, force HOLD (with reason) |
@@ -233,16 +236,26 @@ reading never changes after the fact.
 | | `InpHurstRevert*` | 0.45 | anti-persistent threshold |
 
 Raising `InpHurstTrend` makes the panel more selective (more HOLD, fewer calls). Raising
-`InpBuyScore` to 3 requires all three components to agree.
+`InpBuyScore` to 3 requires all three components to agree. The two gates are validated at load:
+if `InpBuyScore` is not greater than `InpSellScore` the EA refuses to start, because an overlapping
+pair (say `-2` / `2` the wrong way round) would make score 0 pass the BUY test and the panel would
+call BUY forever.
+
+**History depth is automatic.** There is no bars-to-load input. The EA pulls **700 closed bars per
+timeframe** as its floor and raises that number itself when your own periods need more: four times
+the longest trend period (`InpL1_*`), the Hurst window plus margin, or the range/ATR/E-R lookbacks
+(whichever is largest), capped at 50 000. Change `InpHurstWindow` to 900 or a trend period to 400
+and the pull follows on its own — there is nothing to keep in sync, and the panel still only ever
+reads closed, finished bars.
 
 ---
 
-### Trade plan — the second group (advice only, the EA still never sends an order)
+### Trade plan — the second group (what the executor will do, and what you can copy)
 
 Below the three timeframe rows, separated by a single line, comes a **second group with one block
 per timeframe**. Same two-column style as the group above it, and no heading line — the `M5` /
 `M15` / `M30` at the start of each block says what it is. The point of the per-timeframe shape is
-this: when autotrading arrives, the executor reads one row and acts on that timeframe.
+this: the executor reads one row and acts on that timeframe.
 
 ```
  ┌──────────────────────────────────────────────────────────────────────────────────────┐
@@ -282,8 +295,8 @@ band, stop = band + 1 ATR, target = half the box (the midpoint):
 **A HOLD or waiting timeframe takes a single line**, so the group is only as tall as it has
 content for — and the panel is only as wide as its widest line, measured before it is drawn.
 With no signals anywhere the group is three short lines and the box shrinks back to the width the
-header and the "Incompatible chart" notice need; with `InpShowPlan=false` the group is not drawn
-at all.
+header and the "Incompatible chart" notice need. The group is always drawn — it is the panel's
+answer to *what will it do next*, and the auto-trader reads the very same numbers from it.
 
 The width budget is one character = 0.55 em at the terminal's own screen DPI, which is exactly
 what the default font (`InpFont = "Consolas"`) occupies — so the panel is neither clipped nor
@@ -293,58 +306,65 @@ sizes 6–16 and prints the answer at the end of its run.
 
 | Your question | How the panel answers it |
 |---|---|
-| **1. Entry point** | `Entry:` is the price to use — the current ask/bid for that direction (market) or the pending price one `InpPendATR` step better. **The EA decides which, per timeframe, from the score**: `market -3/3` = all three components agree, go now; `pending +2/3` = only two agree, so the entry waits for a better price. In the **range game** the box decides instead: `range fade` = a limit at the **opposite band** of the box, no matter what the score says. |
+| **1. Entry point** | `Entry:` is the price to use — the current ask/bid for that direction (market) or the pending price half an ATR better (pushed out further only when the spread or the broker's stops level demands it). **The EA decides which, per timeframe, from the score**: `market -3/3` = all three components agree, go now; `pending +2/3` = only two agree, so the entry waits for a better price. In the **range game** the box decides instead: `range fade` = a limit at the **opposite band** of the box, no matter what the score says. |
 | **2. Lot size** | `Lot:` — from balance, score and that timeframe's own stop distance, snapped to your broker's lot step and clamped to its minimum and maximum. |
 | **3. Take profit** | `Target:` — price **and points**, with the same amount in account currency on the `Reward:` cell. |
 | **4. Stop loss** | `Stop:` — price **and points**, with the money on the `Risk:` cell. Widened automatically (and marked `(min)`) if your broker demands a minimum stop distance. |
 | **5. Reach** | `Reach:` — a rough bar count for how long the target may take (the target's own distance in ATR units, squared — a typical random walk, not a forecast). This is what makes scalp / short-term / intraday visibly different in **time**, not only in points. |
-| **6. Validity / Hold** | On an advice plan or a waiting pending order this is the idea's own leash: `InpValidBars` bars from the bar the idea was born (default 3 = the measured median, see below), shown as a live countdown `left/total bars`. **Range fades use `InpValidBarsRange`** (default 8) instead — the box-kill is their real invalidation, so a longer leash only removes the cancel/re-place churn while the box holds. The idea is re-born when the direction changes, the game switches (trend ↔ range), or the leash runs out — the `0/total` bar is the rethink bar, the same bars the auto-trader expires and re-places a waiting order on. Once a **trade is open** the signal's leash is spent and the cell switches to `Hold: N bars (est ~M)` — bars held against the Reach estimate. |
+| **6. Validity / Hold** | On an advice plan or a waiting pending order this is the idea's own leash: **3 bars** from the bar the idea was born (the measured median, see below), shown as a live countdown `left/total bars`. **Range fades use `InpValidBarsRange`** (default 8) instead — the box-kill is their real invalidation, so a longer leash only removes the cancel/re-place churn while the box holds. The idea is re-born when the direction changes, the game switches (trend ↔ range), or the leash runs out — the `0/total` bar is the rethink bar, the same bars the auto-trader expires and re-places a waiting order on. Once a **trade is open** the signal's leash is spent and the cell switches to `Hold: N bars (est ~M)` — bars held against the Reach estimate. |
 
-**Three sizing modes** (`InpUseRisk` / `InpUseMinLot`):
+**Sizing: one switch and one number** (`InpUseRisk` / `InpUseMinLot`):
 
 | Mode | What it does |
 |---|---|
-| Risk (**default**, `InpUseRisk=true`) | Risks `InpRiskScore2` % of balance at score 2 and `InpRiskScore3` % at score 3 (defaults 0.5 / 1.0). The lot is whatever risks that much at that timeframe's stop — a wider stop automatically means a smaller lot. |
-| Risk-off (`InpUseRisk=false`) | Ignores the stop distance entirely: a balance ladder — one 0.01 lot per `InpBalPer001` of balance (default 1,000), multiplied by `InpScore3Factor` (1.5) when all three components agree. |
-| Min lot (`InpUseMinLot=true`) | Always advises your symbol's smallest allowed lot, whatever the risk says. This overrides the other two. |
+| **Allow risk** — `InpUseRisk=true` (**default**) | Risks `InpRiskPct` % of balance at score 2 — default 0.5 — and **double that (1.0 %)** at score 3, the only reading where all three components agree. The lot is whatever risks that much at that timeframe's stop — a wider stop automatically means a smaller lot. |
+| No risk % — `InpUseRisk=false` | The percentage is not applied at all. Size comes from a **fixed ladder** baked into the EA: one 0.01 lot per **1,000** of balance, ×**1.5** when all three components agree. It ignores the stop distance, so the money at risk varies by timeframe. |
+| Min lot — `InpUseMinLot=true` | Always advises your symbol's smallest allowed lot, whatever the risk says. This overrides the other two — the smallest position the broker permits, which is as close to "no risk" as a trade can get. |
 
 Two honest touches: if the smallest lot risks **more** than your target percentage, the `Lot:` cell
 says so (`0.01 (min, 3.36 USD)`) instead of quietly over-risking; and every level is snapped onto
 the broker's point grid first, so the printed points, prices and money are three views of exactly
 the same level.
 
-**No order is ever sent.** The EA contains no `OrderSend`, no `CTrade`, no trade calls of any
-kind — this group only prints numbers for you to type in yourself.
+**The block is both a plan and a report.** With `InpAutoTrading = false` it prints numbers for you
+to type in yourself — nothing is sent. With it on, the executor places exactly these numbers, and
+the block keeps showing them while the trade runs (Entry/SL/TP from the live position).
 
-New inputs, all under *Trade plan*:
+Inputs, all under *Trade plan*:
 
 | Input | Default | Meaning |
 |---|---|---|
-| `InpShowPlan` | true | Draw the second group at all |
-| `InpUseRisk` | true | Size by risk % of balance (false = balance ladder) |
+| `InpUseRisk` | true | **Allow risk** — risk % of balance; false = no risk %, fixed lot ladder |
 | `InpUseMinLot` | false | Always advise the symbol's minimum lot |
-| `InpRiskScore2` / `InpRiskScore3` | 0.5 / 1.0 | Risk % at score 2 and score 3 |
-| `InpBalPer001` | 1000 | Risk-off mode: balance per 0.01 lot |
-| `InpScore3Factor` | 1.5 | Risk-off mode: multiplier at score 3 |
-| `InpATRPeriod` | 14 | ATR period, closed bars, each timeframe's own |
-| `InpSLATR_M5` / `InpTPATR_M5` | 1.0 / 0.9 | **M5 scalp:** stop and target in ATR — aims near and quick (R:R ≈ 1:0.9) |
-| `InpSLATR_M15` / `InpTPATR_M15` | 1.2 / 1.8 | **M15 short-term:** stop and target in ATR (R:R 1:1.5) |
-| `InpSLATR_M30` / `InpTPATR_M30` | 1.5 / 3.0 | **M30 intraday:** stop and target in ATR — aims far and lets the move run (R:R 1:2) |
-| `InpPendATR` | 0.5 | How far the pending entry sits from the market |
-| `InpValidBars` | 3 | How many bars a **trend** reading is worth acting on |
+| `InpRiskPct` | 0.5 | Risk % per trade; score 3 risks double (1.0 %) |
 | `InpValidBarsRange` | 8 | Validity of **range fades** in bars — the box-kill already guards them, they just live longer than trend pendings |
 | `InpDetectClosed` | true | Collapse the panel to `Market Closed` (and stop trading) while the symbol is not trading |
 | `InpClosedStaleMin` | 30 | Quote-age in minutes that also counts as closed (0 = off) |
 
+**The trade profile is baked in, not configurable.** These were inputs until they stopped earning a
+decision — they are the calibration the engine was measured with, and a wrong value here silently
+changes the strategy rather than a convenience:
+
+| Constant | Value | What it sets |
+|---|---|---|
+| ATR period | 14 | ATR on closed bars, each timeframe's own |
+| M5 stop / target | 1.0 / 0.9 ATR | scalp — aims near and quick (R:R ≈ 1:0.9) |
+| M15 stop / target | 1.2 / 1.8 ATR | short-term (R:R 1:1.5) |
+| M30 stop / target | 1.5 / 3.0 ATR | intraday — aims far and lets the move run (R:R 1:2) |
+| Pending offset | 0.5 ATR | half an ATR beyond the market, pushed out if the spread or stops level needs more |
+| Trend validity | 3 bars | the measured median life of a trend reading (`research/HORIZON.md`) |
+| Score-3 risk multiple | ×2 | score 3 risks twice the score-2 percentage |
+| Risk-off ladder | 1,000 / ×1.5 | per 0.01 lot, times 1.5 at score 3 |
+
 Everything is read from your broker's own contract data (tick value, tick size, lot step,
-minimum/maximum lot, minimum stop distance, account balance and currency), so the block is correct
+minimum/maximum lot, minimum stop distance, live spread, account balance and currency), so the block is correct
 on 2- and 3-digit gold, FX, indices, cent accounts and non-USD accounts alike.
 
 The arithmetic is checked symbol by symbol in `research/verify_plan_math.py`, and
-`research/walk_trade_plan.py` renders the whole panel for ten states — all timeframes active,
-one active, none, a loading timeframe, a small account, a very large balance, min-lot mode,
-the plan switched off, blocked rows stating their reasons, and range fades on the box —
-failing if any line would overflow.
+`research/walk_trade_plan.py` renders the whole panel for every state it has to survive — all
+timeframes active, one active, none, a loading timeframe, a small account, a very large balance,
+min-lot mode, blocked rows stating their reasons, and range fades on the box — failing if any
+line would overflow.
 
 ---
 
@@ -356,13 +376,17 @@ read-only mode):
 | Input | Default | Meaning |
 |---|---|---|
 | `InpAutoTrading` | **true** | Full-auto execution on (`true`) or read-only (`false`) |
-| `InpUseStopLoss` | **true** | Place initial Stop Loss on order (`true` default); when `false`, no SL is placed initially — the pre-TP1 trailstop places the first SL at activation (or TP1 places it at Break-Even if the trailstop is off) |
+| `InpUseStopLoss` | **false** | Place initial Stop Loss on order when `true` (default is `false`): no SL is placed at entry — the pre-TP1 trailstop places the first SL at activation (or TP1 places it at Break-Even if the trailstop is off) |
 | `InpUseTrailStop` | **true** | Pre-TP1 stepped trailstop on/off (Entry→TP1 only; hands off to the TP1 logic at TP1) |
 | `InpTrailPctTight` | **40** | Trailstop % used when the regime is NOT Steady (10–70, clamped) |
 | `InpTrailPctSteady` | **55** | Trailstop % used in a Steady regime with a clear trend in the trade's direction (10–70, clamped) |
-| `InpAutoPanelPos` | **Right** (`AUTO_POS_RIGHT`) | Second panel placement: **Right** (beside Main Panel) or **Bottom** (below Main Panel) |
+| `InpAutoPanelPos` | **Bottom** (`AUTO_POS_BOTTOM`) | Second panel placement: **Right** (beside Main Panel) or **Bottom** (below Main Panel) |
 | `InpMagicBase` | 202610 | Base magic number (`+0` M5, `+1` M15, `+2` M30) |
-| `InpSlippagePts` | 20 | Maximum slippage in points for market orders |
+
+There is no slippage input. The allowance is derived per order from the live market, so one EA is
+correct on every symbol: `2.5 × max(current spread, broker stops level)`, clamped to 5–50 points
+for entries and 8–75 points (and ×1.5) for closes, because a rejected close is worse than a
+slightly worse exit.
 
 #### Execution & Trade Management Rules
 
@@ -418,7 +442,7 @@ read-only mode):
      `Entry`, `SL`, and `TP1 / TP2 / TP3` to the new plan. If the score upgrades from `2/3` to
      `3/3` in the same direction, deletes the waiting pending order and opens the **Market order**
      immediately. Cancels if the direction changes, drops to `HOLD`, or reaches its validity
-     expiry — `InpValidBars` closed bars for trend orders, `InpValidBarsRange` for range fades.
+     expiry — 3 closed bars for trend orders, `InpValidBarsRange` for range fades.
 7. **Range fades (Part 2 — Choppy rows):**
    - The order is **always a Pending Limit at the opposite band** of the box (never a market
      order — the score has no say in the entry), with `Stop = band + InpRangeSLATR × ATR` and
