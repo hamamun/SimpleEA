@@ -170,7 +170,7 @@ The Hurst exponent measures long-range memory in the price series:
 **The regime decides the game, per row (Part 2).** It is no longer just a vote that can go
 quiet: each timeframe's regime picks between the trend game (Steady), the range game
 (Choppy) and standing aside (Mixed), and every refusal is written on that row's plan line —
-`mixed — no edge either way`, `dead market — nothing moves`, `chop — range mode is off`,
+`mixed — no edge either way`, `quiet — nothing worth trading`, `chop — range mode is off`,
 `chop — no valid box yet`, `chop — nothing clears the spread`. The decision is strictly
 per-timeframe: no row's regime can veto another.
 
@@ -197,7 +197,7 @@ from the score). A **Mixed** row stands aside whatever the score says.
 
 Kaufman's **Efficiency Ratio** is a dead-market gate: if ER is below `InpERDead` (default 0.10)
 the instrument is not travelling anywhere, so the row is forced to `HOLD` regardless of score —
-and now says so: `dead market — nothing moves`.
+and now says so: `quiet — nothing worth trading`.
 
 On the chart those three outcomes are spelled out as **Going up** / **Going down** /
 **Sideways**, and the Hurst read above is spelled out as **Steady** / **Mixed** / **Choppy**.
@@ -298,7 +298,7 @@ sizes 6–16 and prints the answer at the end of its run.
 | **3. Take profit** | `Target:` — price **and points**, with the same amount in account currency on the `Reward:` cell. |
 | **4. Stop loss** | `Stop:` — price **and points**, with the money on the `Risk:` cell. Widened automatically (and marked `(min)`) if your broker demands a minimum stop distance. |
 | **5. Reach** | `Reach:` — a rough bar count for how long the target may take (the target's own distance in ATR units, squared — a typical random walk, not a forecast). This is what makes scalp / short-term / intraday visibly different in **time**, not only in points. |
-| **6. Validity** | `Valid:` — `InpValidBars` bars from the close of that timeframe's signal bar (default 3 = the measured median, see below), shown as a live countdown `left/total bars`. A waiting pending order counts down from the bar it was placed on; **range fades use `InpValidBarsRange`** (default 8) instead — the box-kill is their real invalidation, so a longer leash only removes the cancel/re-place churn while the box holds. |
+| **6. Validity / Hold** | On an advice plan or a waiting pending order this is the idea's own leash: `InpValidBars` bars from the bar the idea was born (default 3 = the measured median, see below), shown as a live countdown `left/total bars`. **Range fades use `InpValidBarsRange`** (default 8) instead — the box-kill is their real invalidation, so a longer leash only removes the cancel/re-place churn while the box holds. The idea is re-born when the direction changes, the game switches (trend ↔ range), or the leash runs out — the `0/total` bar is the rethink bar, the same bars the auto-trader expires and re-places a waiting order on. Once a **trade is open** the signal's leash is spent and the cell switches to `Hold: N bars (est ~M)` — bars held against the Reach estimate. |
 
 **Three sizing modes** (`InpUseRisk` / `InpUseMinLot`):
 
@@ -393,8 +393,10 @@ read-only mode):
      All percentages use the Entry→TP1 distance **frozen at fill**, the SL only ever moves
      forward, and with `InpUseStopLoss=false` the trailstop places the **first SL itself** at
      activation. The card in the 2nd Panel shows the pick as `TS: 40% Tight` / `55% Steady`,
-     and the header `Trailstop :` turns **On** at activation. The signal/trend rules below
-     (HOLD-in-profit close, opposite-signal close) are unchanged and senior to the trailstop.
+     and the header `Trailstop :` reads **On** while armed and turns **Active** the moment a
+     trade is actually trailing (it reads **Off** only when `InpUseTrailStop=false`). The
+     signal/trend rules below (HOLD-in-profit close, opposite-signal close) are unchanged and
+     senior to the trailstop.
    - **At TP1 Hit:** *(score watcher: trend trades only — range fades are exempt; see rule 7)*
      - The trailstop hands off and its last SL **simply remains**; the SL is moved to
        **Entry (Break-Even)** only if that is tighter than the trailed SL (for both
@@ -438,17 +440,17 @@ trade or pending order is open:
 
 ```
  ┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
- │  Autotrading   | Trailstop : On  | Stoploss : On                                                 |  XAUUSD  │
+ │  Autotrading   | Trailstop : Active | Stoploss : On                                              |  XAUUSD  │
  ├─────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
  │  M5  | OPEN SELL      Lot @    0.09                        Entry:     4285.70                  Ask: 4285.56 │
  │                       TP1:     4285.56 (1.26 USD) [HIT]    TP2:       4285.51 (1.71 USD)                    │
  │                       TP3:     4285.45 (2.25 USD)          SL:        4285.70 (0.00 USD) [BE]               │
- │                       Status:  P/L +1.26 USD               Distance:  to TP2 19 pts                         │
+ │                       Status:  P/L +1.26 USD               Distance:  to TP2 5 pts                          │
  ├─────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
  │  M30 | BUY LIMIT      Lot @    0.01                        Entry:     4284.85                  Ask: 4285.56 │
  │                       TP1:     4287.72 (2.87 USD)          TP2:       4288.68 (3.83 USD)                    │
  │                       TP3:     4289.95 (5.10 USD)          SL:        4282.30 (2.55 USD)                    │
- │                       Waiting: distance 71 pts             Distance:  to TP1 287 pts                        │
+ │                       Waiting: distance 71 pts             Distance:  to TP1 216 pts                        │
  └─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -598,5 +600,5 @@ M5 entirely unless you are on a raw-spread account where the cost can drop to ~0
 market that is honest about when the market has no memory. It no longer sits back in chop —
 when the box gates clear it trades the range with calculative numbers, and when they do not it
 tells you *why* (`mixed — no edge either way`, `chop — nothing clears the spread`,
-`dead market — nothing moves`) instead of a blank HOLD. That refusal, roughly 55–60% of
+`quiet — nothing worth trading`) instead of a blank HOLD. That refusal, roughly 55–60% of
 readings in my sampling, is still a feature — it just comes with receipts now.

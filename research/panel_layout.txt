@@ -180,7 +180,7 @@ I)  Part 2: blocked rows say WHY; Signal shows the trade they would have fired (
   |                        Signal: HOLD        Score: +0 / 3     |
   | ------------------------------------------------------------ |
   |   M5   HOLD            mixed — no edge either way            |
-  |   M15  HOLD            dead market — nothing moves           |
+  |   M15  HOLD            quiet — nothing worth trading         |
   |   M30  HOLD            chop — nothing clears the spread      |
   +------------------------------------------------------------+
   panel: 406 x 236 px   (one character = 6.6 px)

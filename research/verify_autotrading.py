@@ -17,14 +17,15 @@ line and verifies every rule:
           on flip/HOLD/expiry
   Rule 8  M5 trades its own signal directly; M15 and M30 require matching
           trend direction between M15 and M30
-  Rule 10 2nd Panel header: "Autotrading | Trailstop : Off/On | Stoploss : On/Off | SYMBOL"
+  Rule 10 2nd Panel header: "Autotrading | Trailstop : Off/On/Active | Stoploss : On/Off | SYMBOL"
           Main Panel header: "SimpleEA | Autotrading : On/Off | SYMBOL | TF" + full-width sep
   Rule 11 2nd Panel placement input InpAutoPanelPos (AUTO_POS_RIGHT default, or
           AUTO_POS_BOTTOM below Main Panel); opens when orders exist and closes
           completely (0 objects) when no trade/order is open
   Rule 12 2nd Panel rows: TF | OPEN/LIMIT | Lot @ | Entry | Ask/Bid | TP1/TP2/TP3
           prices (USD) | SL price (USD) or -- (Ask/Bid) | Status / Waiting
-          distance | Distance: to TP1 -> to TP2 (when TP1 hit) -> to TP3 (when TP2 hit),
+          distance | Distance: live gap to TP1 -> to TP2 (when TP1 hit) -> to TP3
+          (when TP2 hit), counted down in points from the current Ask/Bid,
           plus [OPEN]/[PLACED] on Main Panel
   Rule 13 Pre-TP1 stepped trailstop (Entry -> TP1 only): the selected %
           (Tight 40 when the regime is not Steady, Steady 55 in a clear
@@ -37,6 +38,13 @@ line and verifies every rule:
           trailed SL.  With InpUseStopLoss=false the trail places the
           first SL itself at activation.  The card shows "TS: 40% Tight"
           / "55% Steady".
+  Rule 14 Time cells: an advice plan or a waiting pending order shows
+          the idea's leash counting down (Valid: left/total bars - 3 for
+          trend rows, 8 for range fades), re-born when the direction
+          changes, the game switches, or the leash runs out (0/total is
+          the rethink bar and shows for exactly one bar).  A live trade
+          switches to Hold: N bars (est ~M) - bars held against the
+          Reach estimate.
 
   Part 2 (the regime now DECIDES instead of abstaining):
           Steady rows trade the trend game exactly as above; Choppy rows
@@ -169,6 +177,7 @@ class AutoSlot:
         self.rng_top = 0.0
         self.rng_bot = 0.0
         self.placed_bar = 0
+        self.fill_bar = 0
         self.last_eval_bar = 0
         self.last_signal_bar = sig_bar
         self.head = ""
@@ -206,6 +215,7 @@ class AutoTraderSim:
         self.tp_atr = per_tf(tp_atr, TP_ATR)
         self.pend_atr = pend_atr
         self.valid_bars = valid_bars
+        self.valid_bars_range = 8
         self.show_plan = show_plan
 
         self.bid = 4285.70
@@ -222,6 +232,7 @@ class AutoTraderSim:
                               sl_pts=0, tp_pts=0, tp1_pts=0, tp2_pts=0, tp3_pts=0,
                               lbl={}, val={}) for t in TAGS}
         self.auto = {t: AutoSlot() for t in TAGS}
+        self.sig_birth = {t: 0 for t in TAGS}
         self.next_ticket = 100
         self.panel_w = PLAN_W_MIN
         self.panel_h = 130
@@ -242,6 +253,7 @@ class AutoTraderSim:
         if atr is not None:
             self.atr[tag] = atr
         r = self.rows[tag]
+        prev_dir, prev_mode = r["dir"], r["mode"]
         #  mode / reason mirror SRow.mode / SRow.blockReason as
         #  EvaluateRow() writes them (the walk carries the same rules):
         #  Mixed and Choppy rows that do not trade always carry their
@@ -268,6 +280,22 @@ class AutoTraderSim:
         r["last_close"] = self.bid if close is None else close
         if bar_time is not None:
             r["last_bar"] = bar_time
+
+        #  Signal leash birth (EvaluateRow in SimpleAdvisor.mq5): the idea
+        #  is re-born when the direction changes, the game switches (trend
+        #  <-> range), or the old leash has run out; a row that stands
+        #  aside carries no leash at all.
+        if direction == 0:
+            self.sig_birth[tag] = 0
+        else:
+            vb = self.valid_bars_range if mode == 2 else self.valid_bars
+            if self.sig_birth[tag] > 0 and r["last_bar"] > self.sig_birth[tag]:
+                age = (r["last_bar"] - self.sig_birth[tag]) // TF_SEC[tag]
+            else:
+                age = vb + 1
+            if (direction != prev_dir or age > vb
+                    or (prev_dir != 0 and (prev_mode == 2) != (mode == 2))):
+                self.sig_birth[tag] = r["last_bar"]
 
     def trend_match_for_tf(self, tag):
         """TrendMatchForTF() in SimpleAdvisor.mq5 (Rule 8)."""
@@ -494,8 +522,23 @@ class AutoTraderSim:
             p["val"][(2, 0)] = "%.2f %s" % (risk_usd, self.cur)
             p["lbl"][(2, 1)] = "Reward:"
             p["val"][(2, 1)] = "%.2f %s" % (reward_usd, self.cur)
-            p["lbl"][(2, 2)] = "Valid:"
-            p["val"][(2, 2)] = "%d bars -> 14:30" % self.valid_bars
+            #  Time cell: the idea's own leash counting down (Valid) or,
+            #  once a trade is live, hold time against the Reach estimate
+            #  (Hold) - UpdatePlanRow() in SimpleAdvisor.mq5.
+            vbars = self.valid_bars_range if is_range else self.valid_bars
+            if self.sig_birth[t] > 0 and r["last_bar"] > self.sig_birth[t]:
+                age = (r["last_bar"] - self.sig_birth[t]) // TF_SEC[t]
+            else:
+                age = 0
+            if is_open_now:
+                fill = a.fill_bar if a.fill_bar > 0 else a.placed_bar
+                held = max(0, (r["last_bar"] - fill) // TF_SEC[t]) if fill > 0 else 0
+                p["lbl"][(2, 2)] = "Hold:"
+                p["val"][(2, 2)] = "%d bar%s (est ~%d)" % (held, "" if held == 1 else "s", eta)
+            else:
+                left = max(0, min(vbars, vbars - age))
+                p["lbl"][(2, 2)] = "Valid:"
+                p["val"][(2, 2)] = "%d/%d bars" % (left, vbars)
 
     def place_plan_order(self, tag):
         if not self.auto_trading:
@@ -536,6 +579,7 @@ class AutoTraderSim:
             a.rng_top = 0.0
             a.rng_bot = 0.0
             a.placed_bar = r["last_bar"]
+            a.fill_bar = r["last_bar"]
             a.last_eval_bar = r["last_bar"]
             a.last_signal_bar = r["last_bar"]
             self.init_trail(tag)      # market fill: freeze the trailstop % now
@@ -672,8 +716,9 @@ class AutoTraderSim:
             # CASE B: Waiting Pending Limit Order
             if a.active and not a.is_open:
                 tf_sec = TF_SEC[t]
+                leash = self.valid_bars_range if a.is_range else self.valid_bars
                 expired = (a.placed_bar > 0 and r["last_bar"] > a.placed_bar
-                           and ((r["last_bar"] - a.placed_bar) // tf_sec) >= self.valid_bars)
+                           and ((r["last_bar"] - a.placed_bar) // tf_sec) >= leash)
 
                 # 0) RANGE FADE: a closed bar outside the trade's box cancels the pending
                 if (a.is_range and r["ok"]
@@ -736,6 +781,7 @@ class AutoTraderSim:
                 if not a.is_open:
                     if (a.dir > 0 and ask <= a.entry_price) or (a.dir < 0 and bid >= a.entry_price):
                         a.is_open = True
+                        a.fill_bar = self.rows[t]["last_bar"]
                         self.init_trail(t)   # pending fill: freeze the trailstop %
                         self.refresh_live_pnl()
                     else:
@@ -807,6 +853,14 @@ class AutoTraderSim:
     def any_trailstop_on(self):
         return any(self.auto[t].active and self.auto[t].trail_active for t in TAGS)
 
+    def trailstop_label(self):
+        """Trailstop word on the 2nd Panel header (DrawAutoPanel in SimpleAdvisor.mq5):
+        'Off' = InpUseTrailStop is false, 'On' = armed but nothing is trailing yet,
+        'Active' = at least one trade is actually trailing."""
+        if not self.use_trail_stop:
+            return "Off"
+        return "Active" if self.any_trailstop_on() else "On"
+
     def any_stoploss_on(self):
         return any(self.auto[t].active and self.auto[t].sl_price > 0.0 for t in TAGS)
 
@@ -864,7 +918,7 @@ class AutoTraderSim:
                 a.val[(2, 1)] = "-- (%s %.*f)" % (live_l, dg, live_p)
 
             next_tp_tag = "TP1" if not a.tp1_hit else ("TP2" if not a.tp2_hit else "TP3")
-            next_tp_pts = a.tp1_pts if not a.tp1_hit else (a.tp2_pts if not a.tp2_hit else a.tp3_pts)
+            next_tp_price = tp1_price if not a.tp1_hit else (tp2_price if not a.tp2_hit else tp3_price)
 
             if a.is_open:
                 a.lbl[(3, 0)] = "Status:"
@@ -874,8 +928,9 @@ class AutoTraderSim:
                 a.lbl[(3, 0)] = "Waiting:"
                 a.val[(3, 0)] = "distance %d pts" % wait_pts
 
+            gap_pts = int(round(abs(next_tp_price - live_p) / point)) if point > 0.0 and live_p > 0.0 else 0
             a.lbl[(3, 1)] = "Distance:"
-            a.val[(3, 1)] = "to %s %d pts" % (next_tp_tag, next_tp_pts)
+            a.val[(3, 1)] = "to %s %d pts" % (next_tp_tag, gap_pts)
 
             a.lbl[(3, 2)] = "TS:"
             if not a.is_open or a.trail_pct <= 0:
@@ -905,7 +960,7 @@ class AutoTraderSim:
         cA, vA, cB, vB, cC, vC = self.auto_columns()
         title_w = 11 * char_w(FONT + 1, DPI)
         head_need = (10 + title_w + EM
-                     + (14 + 3 + 1 + 13 + 3 + 2 + len("|  " + self.symbol)) * EM + 10)
+                     + (14 + 6 + 1 + 13 + 3 + 2 + len("|  " + self.symbol)) * EM + 10)
         need = max(AUTO_W_MIN, head_need)
         for a in self.auto.values():
             if not a.active:
@@ -963,17 +1018,17 @@ class AutoTraderSim:
             placed.append((line, x_px, x_px + len(text) * RENDER_CW, text))
 
         title_w = 11 * char_w(FONT + 1, DPI)
-        ts_on = self.any_trailstop_on()
+        ts_text = self.trailstop_label()
         sl_on = self.any_stoploss_on()
         ts_cap_x = 10 + title_w + EM
         ts_val_x = ts_cap_x + 14 * EM
-        sl_cap_x = ts_val_x + 3 * EM + EM
+        sl_cap_x = ts_val_x + 6 * EM + EM
         sl_val_x = sl_cap_x + 13 * EM
         sym_right = "|  " + self.symbol
 
         put("Autotrading", 10, 0)
         put("| Trailstop :", ts_cap_x, 0)
-        put("On" if ts_on else "Off", ts_val_x, 0)
+        put(ts_text, ts_val_x, 0)
         put("| Stoploss :", sl_cap_x, 0)
         put("On" if sl_on else "Off", sl_val_x, 0)
         put(sym_right, self.auto_w - 10 - len(sym_right) * RENDER_CW, 0)
@@ -1138,8 +1193,8 @@ def main():
           "M5 SL must show price 4285.98 (7.84 USD); got %r" % sim.auto["M5"].val[(2, 1)])
     check(sim.auto["M5"].lbl[(3, 1)] == "Distance:" and sim.auto["M5"].val[(3, 1)] == "to TP1 14 pts",
           "Before TP1 hit, M5 Distance must show 'to TP1 14 pts'; got %r" % sim.auto["M5"].val[(3, 1)])
-    check(not sim.any_trailstop_on() and sim.any_stoploss_on(),
-          "Before TP1 hit, header must report Trailstop Off and Stoploss On")
+    check(sim.trailstop_label() == "On" and sim.any_stoploss_on(),
+          "Before TP1 hit, header must report Trailstop On (armed) and Stoploss On")
 
     # Tick moves Bid down to TP1 4285.56 -> hits TP1!  The Row was Steady,
     # so the pre-TP1 trail picked 55% at fill; at TP1 its final stepped SL
@@ -1154,8 +1209,8 @@ def main():
     sim.manage_auto_tick(bid=4285.54, ask=4285.56)
     check(sim.auto["M5"].tp1_hit and sim.auto["M5"].trail_active,
           "At TP1 hit, tp1_hit and trail_active must be True")
-    check(sim.any_trailstop_on() and sim.any_stoploss_on(),
-          "At TP1 hit, header must report Trailstop On and Stoploss On")
+    check(sim.trailstop_label() == "Active" and sim.any_stoploss_on(),
+          "At TP1 hit, header must report Trailstop Active and Stoploss On")
     check(abs(sim.auto["M5"].cur_lot - 0.09) < 1e-6,
           "At TP1 hit on 0.28 lot, 70%% (0.19) closes leaving 0.09 lot; got %.2f" % sim.auto["M5"].cur_lot)
     check(abs(sim.auto["M5"].sl_price - 4285.60) < 1e-6,
@@ -1164,10 +1219,10 @@ def main():
     check(sim.auto["M5"].val[(2, 1)] == "4285.60 (0.90 USD)",
           "At TP1 hit, SL cell must show the trailed SL '4285.60 (0.90 USD)'; got %r"
           % sim.auto["M5"].val[(2, 1)])
-    check(sim.auto["M5"].val[(3, 1)] == "to TP2 19 pts",
-          "After TP1 hit, M5 Distance must advance to 'to TP2 19 pts'; got %r" % sim.auto["M5"].val[(3, 1)])
+    check(sim.auto["M5"].val[(3, 1)] == "to TP2 5 pts",
+          "After TP1 hit, M5 Distance must show the live gap 'to TP2 5 pts'; got %r" % sim.auto["M5"].val[(3, 1)])
 
-    over = sim.render_both_panels("State 2: M5 Hits TP1 (70% Closed -> 0.09 Lot Left, Trailed SL Remains, Trailstop On)")
+    over = sim.render_both_panels("State 2: M5 Hits TP1 (70% Closed -> 0.09 Lot Left, Trailed SL Remains, Trailstop Active)")
     check(not over, "2nd panel overflowed: %s" % (over,))
 
     # Tick moves Bid down to TP2 4285.51 -> hits TP2!
@@ -1177,12 +1232,12 @@ def main():
           "At TP2 hit, lot must reduce to minimum lot (0.01); got %.2f" % sim.auto["M5"].cur_lot)
     check(abs(sim.auto["M5"].sl_price - (4285.70 - 0.14)) < 1e-6,
           "At TP2 hit, SL locks to TP1 price (4285.56); got %.2f" % sim.auto["M5"].sl_price)
-    check(sim.auto["M5"].val[(3, 1)] == "to TP3 25 pts",
-          "After TP2 hit, M5 Distance must advance to 'to TP3 25 pts'; got %r" % sim.auto["M5"].val[(3, 1)])
+    check(sim.auto["M5"].val[(3, 1)] == "to TP3 6 pts",
+          "After TP2 hit, M5 Distance must show the live gap 'to TP3 6 pts'; got %r" % sim.auto["M5"].val[(3, 1)])
 
     # Check Bottom placement option (AUTO_POS_BOTTOM)
     sim.auto_panel_pos = AUTO_POS_BOTTOM
-    over_bot = sim.render_both_panels("State 2b: M5 Hits TP2 (Bottom Placement Below Main Panel, Distance -> to TP3 25 pts)")
+    over_bot = sim.render_both_panels("State 2b: M5 Hits TP2 (Bottom Placement Below Main Panel, Distance -> to TP3 6 pts)")
     check(not over_bot, "2nd panel overflowed in Bottom placement: %s" % (over_bot,))
     check(sim.auto_x == sim.panel_x and sim.auto_y == sim.panel_y + sim.panel_h + AUTO_GAP_Y,
           "AUTO_POS_BOTTOM must place 2nd panel directly below Main Panel")
@@ -1342,16 +1397,21 @@ def main():
           "Tight 40%% on M5 must leave a 16%% gap behind price; got %.2f" % a_tr.trail_gap_pct)
     check(a_tr.val[(3, 2)] == "40% Tight",
           "the card must show 'TS: 40%% Tight'; got %r" % a_tr.val.get((3, 2)))
-    check(not tr.any_trailstop_on(),
-          "before activation the header must still report Trailstop Off")
+    check(tr.trailstop_label() == "On",
+          "before activation the header must report Trailstop On (armed), not Active")
 
     # +6 pts = 42.9% of TP1: activation step 40 -> SL at +24% (4285.73)
     tr.manage_auto_tick(bid=4285.76, ask=4285.78)
-    check(a_tr.trail_started and a_tr.trail_active and tr.any_trailstop_on(),
-          "crossing 40%% of Entry->TP1 must activate the trailstop")
+    check(a_tr.trail_started and a_tr.trail_active and tr.trailstop_label() == "Active",
+          "crossing 40%% of Entry->TP1 must activate the trailstop (header: Active)")
     check(abs(a_tr.sl_price - 4285.73) < 1e-6,
           "at activation the trail must place SL at +24%% (4285.73); got %.2f" % a_tr.sl_price)
     check(not a_tr.tp1_hit, "trail activation happens BEFORE TP1 (tp1_hit must stay False)")
+
+    tr.use_trail_stop = False
+    check(tr.trailstop_label() == "Off",
+          "with InpUseTrailStop=false the header must report Off even while a trade trails")
+    tr.use_trail_stop = True
 
     # +7 pts = 50%: two 5% steps landed -> SL at +34% (4285.75)
     tr.manage_auto_tick(bid=4285.77, ask=4285.79)
@@ -1398,8 +1458,8 @@ def main():
     check(sim_nosl.auto["M5"].active and sim_nosl.auto["M5"].is_open, "M5 BUY opened with InpUseStopLoss=false")
     check(sim_nosl.auto["M5"].sl_price == 0.0 and sim_nosl.auto["M5"].sl_pts == 0,
           "When InpUseStopLoss=false, no initial SL may be placed on the order")
-    check(not sim_nosl.any_stoploss_on() and not sim_nosl.any_trailstop_on(),
-          "Before TP1 hit with InpUseStopLoss=false, header must show Trailstop : Off | Stoploss : Off")
+    check(sim_nosl.trailstop_label() == "On" and not sim_nosl.any_stoploss_on(),
+          "Before TP1 hit with InpUseStopLoss=false, header must show Trailstop : On | Stoploss : Off")
     check(sim_nosl.auto["M5"].val[(2, 1)].startswith("-- ("),
           "Before TP1 hit with InpUseStopLoss=false, SL cell must show '-- (Bid: ...)'; got %r"
           % sim_nosl.auto["M5"].val[(2, 1)])
@@ -1422,8 +1482,8 @@ def main():
     check(abs(sim_nosl.auto["M5"].sl_price - 4285.80) < 1e-6,
           "When TP1 hits with InpUseStopLoss=false, the final trailed SL (4285.80) must remain; got %.2f"
           % sim_nosl.auto["M5"].sl_price)
-    check(sim_nosl.any_trailstop_on() and sim_nosl.any_stoploss_on(),
-          "After TP1 hits with InpUseStopLoss=false, header must show Trailstop : On | Stoploss : On")
+    check(sim_nosl.trailstop_label() == "Active" and sim_nosl.any_stoploss_on(),
+          "After TP1 hits with InpUseStopLoss=false, header must show Trailstop : Active | Stoploss : On")
     print("  ok  InpUseStopLoss=false: no SL placed initially; the trail places it and TP1 keeps the trailed SL")
 
     print("  ok  Rule 4, 7, 10, 11, 12: Candle updates, 2/3->3/3 upgrade, HOLD-in-profit close, and 2nd panel auto-close")
@@ -1435,7 +1495,7 @@ def main():
     rng = AutoTraderSim(auto_trading=True)
     rng.set_bar("M5", 0, 2, regime="Mixed", bar_time=1000)
     rng.set_bar("M15", 0, -3, regime="Steady", bar_time=1000,
-                reason="dead market — nothing moves")
+                reason="quiet — nothing worth trading")
     rng.set_bar("M30", 0, 0, regime="Choppy", bar_time=1000)
     rng.update_plan()
     check(rng.plans["M5"]["kind"] == "HOLD" and rng.plans["M5"]["state"] == 0,
@@ -1443,8 +1503,8 @@ def main():
           % (rng.plans["M5"],))
     check(rng.plans["M5"]["note"] == "mixed — no edge either way",
           "Mixed row must say why; got %r" % rng.plans["M5"]["note"])
-    check(rng.plans["M15"]["note"] == "dead market — nothing moves",
-          "dead row must say why; got %r" % rng.plans["M15"]["note"])
+    check(rng.plans["M15"]["note"] == "quiet — nothing worth trading",
+          "quiet row must say why; got %r" % rng.plans["M15"]["note"])
     check(rng.plans["M30"]["note"] == "chop — no valid box yet",
           "gated chop row must say why; got %r" % rng.plans["M30"]["note"])
     rng.manage_auto_bar()
@@ -1530,6 +1590,46 @@ def main():
     check(rng3.auto["M5"].active,
           "range fades are exempt from the score watcher - box, stop and box-kill govern them")
     print("  ok  Part 2 score watcher: trend rows watch the score, range fades do not")
+
+    # ------------------------------------------------------------------
+    # 9. Rule 14: the time cells - Valid countdown & Hold (open trade)
+    # ------------------------------------------------------------------
+    # 9a. Advice-only (no order anywhere): the idea's own leash counts
+    #     down in closed bars and re-births exactly where the auto-trader
+    #     would expire / re-place a waiting order.
+    lt = AutoTraderSim(auto_trading=False)
+    for bar, want in ((1000, "3/3 bars"), (1300, "2/3 bars"), (1600, "1/3 bars"),
+                      (1900, "0/3 bars"), (2200, "3/3 bars")):
+        lt.set_bar("M5", 1, 3, regime="Steady", bar_time=bar)
+        lt.update_plan()
+        check(lt.plans["M5"]["val"][(2, 2)] == want,
+              "advice Valid at bar %d must show %r; got %r"
+              % (bar, want, lt.plans["M5"]["val"][(2, 2)]))
+    lt.set_bar("M5", -1, -3, regime="Steady", bar_time=2500)
+    lt.update_plan()
+    check(lt.plans["M5"]["val"][(2, 2)] == "3/3 bars",
+          "a direction change must re-birth the leash; got %r"
+          % lt.plans["M5"]["val"][(2, 2)])
+
+    # 9b. Open trade: Hold bars held vs the Reach estimate (no leash)
+    ht = AutoTraderSim(auto_trading=True)
+    ht.set_bar("M5", 1, 3, regime="Steady", atr=0.28, bar_time=1000)
+    ht.update_plan()
+    ht.manage_auto_bar()
+    ht.update_plan()
+    check(ht.plans["M5"]["lbl"][(2, 2)] == "Hold:",
+          "a live trade must switch the time cell to Hold; got %r"
+          % ht.plans["M5"]["lbl"][(2, 2)])
+    check(ht.plans["M5"]["val"][(2, 2)] == "0 bars (est ~1)",
+          "a just-opened trade must show '0 bars (est ~1)'; got %r"
+          % ht.plans["M5"]["val"][(2, 2)])
+    ht.set_bar("M5", 1, 3, regime="Steady", atr=0.28, bar_time=1300)
+    ht.update_plan()
+    check(ht.plans["M5"]["val"][(2, 2)] == "1 bar (est ~1)",
+          "held bars must count up per closed bar; got %r"
+          % ht.plans["M5"]["val"][(2, 2)])
+    print("  ok  Rule 14: Valid counts the idea's leash (0/x rethink bar), "
+          "Hold shows bars held vs Reach")
 
     print("\nall autotrading and 2nd-panel checks passed")
 
