@@ -223,8 +223,6 @@ reading never changes after the fact.
 | Thresholds | `InpBuyScore` | 2 | score ≥ this ⇒ BUY |
 | | `InpSellScore` | −2 | score ≤ this ⇒ SELL |
 | Shared | `InpTrendL1` / `InpTrendL2` | 150 / 24 | Precision Trend filter periods (all three timeframes) |
-| | `InpHurstTrend` | 0.55 | H above this ⇒ persistent regime (all three timeframes) |
-| | `InpHurstRevert` | 0.45 | H below this ⇒ anti-persistent regime (all three timeframes) |
 | | `InpHurstWindow` | 256 | Hurst estimate window in bars |
 | | `InpERPeriod` | 20 | efficiency-ratio period |
 | | `InpERDead` | 0.10 | below this ⇒ dead market, force HOLD (with reason) |
@@ -235,21 +233,30 @@ reading never changes after the fact.
 | | `InpRangeERMax` | 0.40 | efficiency above this ⇒ a walk, not a box |
 | | `InpRangeSLATR` | 1.0 | range stop = opposite band + this many ATR |
 
-Raising `InpHurstTrend` makes the panel more selective (more HOLD, fewer calls). Raising
-`InpBuyScore` to 3 requires all three components to agree. The two gates are validated at load:
-if `InpBuyScore` is not greater than `InpSellScore` the EA refuses to start, because an overlapping
-pair (say `-2` / `2` the wrong way round) would make score 0 pass the BUY test and the panel would
-call BUY forever.
+Raising `InpBuyScore` to 3 requires all three components to agree. The two gates are validated at
+load: if `InpBuyScore` is not greater than `InpSellScore` the EA refuses to start, because an
+overlapping pair (say `-2` / `2` the wrong way round) would make score 0 pass the BUY test and the
+panel would call BUY forever.
 
-**One engine, three timeframes.** The trend filter and the regime test are shared: `InpTrendL1` /
-`InpTrendL2` and `InpHurstTrend` / `InpHurstRevert` are set once and used by M5, M15 and M30 alike —
-each row applies them to *its own* closed bars, which is what makes the three rows disagree. These
-used to be twelve inputs (four per timeframe) that all shipped with the same default and were never
-set apart; they are now four. If one timeframe ever genuinely needs its own filter, that is a
-one-line change in code, not an input: `OnInit()` calls `ConfigureRow()` once per row and hands each
-row its own copy, so passing a different period or threshold for row 0 leaves M15 and M30 untouched.
-The two H thresholds are also checked at load (`InpHurstRevert` must not sit above
-`InpHurstTrend`), because a crossed pair would label every market at once.
+**One engine, three timeframes.** The trend filter is shared: `InpTrendL1` / `InpTrendL2` are set
+once and used by M5, M15 and M30 alike — each row applies them to *its own* closed bars, which is
+what makes the three rows disagree. These used to be two inputs per timeframe (six in all) that all
+shipped with the same default and were never set apart. They stay inputs because the periods are the
+one genuinely symbol-sensitive number in the engine: what counts as a trend on XAUUSD is not what
+counts on EURUSD. If one timeframe ever needs its own filter, that is a one-line change in code, not
+an input: `OnInit()` calls `ConfigureRow()` once per row and hands each row its own copy, so passing
+a different period for row 0 leaves M15 and M30 untouched.
+
+**The regime boundaries are not inputs, and that is deliberate.** `H > 0.55` is *Steady*,
+`H < 0.45` is *Choppy*, and everything between the two is *Mixed* — stand aside. Those two numbers
+are baked in (`HURST_TREND` / `HURST_REVERT` beside the trade profile in the source) because H is a
+property of the series, not of the symbol: 0.5 is the coin-flip, and 0.55 / 0.45 is the band the
+literature uses either side of it before it will call a regime at all (see `SIGNAL_LOGIC.md` §4).
+The measurement backs that up rather than assuming it — on real data H spans ~0.35–0.62 at p10–p90,
+so those two numbers land near the 30th/70th percentiles of the real distribution instead of being
+invented (§4.3). Only a different estimator moves them, not a different chart. What *is* an input is
+`InpHurstWindow` — how many bars the estimate is taken over — because that number does depend on the
+timeframe: 256 bars is five days on M30 and two days on M5.
 
 **History depth is automatic.** There is no bars-to-load input. The EA pulls **700 closed bars per
 timeframe** as its floor and raises that number itself when your own periods need more: four times
