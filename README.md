@@ -218,7 +218,7 @@ reading never changes after the fact.
 | Group | Input | Default | Meaning |
 |---|---|---|---|
 | Panel | `InpPanelX/Y` | 12 / 24 | position in pixels |
-| | `InpFontSize` | 9 | font size |
+| | `InpFontSize` | **10** | font size — every column, the row height and the panel's own width scale with it, so a bigger font widens the grid instead of crowding the text |
 | | `InpBgColor` | `48,48,48` (`#303030`) | panel background colour |
 | Thresholds | `InpBuyScore` | 2 | score ≥ this ⇒ BUY |
 | | `InpSellScore` | −2 | score ≤ this ⇒ SELL |
@@ -281,24 +281,24 @@ per timeframe**. Same two-column style as the group above it, and no heading lin
 this: the executor reads one row and acts on that timeframe.
 
 ```
- ┌──────────────────────────────────────────────────────────────────────────────────────┐
- │  SimpleEA  | Autotrading : On                                     |  XAUUSD  |  M5   │
- ├──────────────────────────────────────────────────────────────────────────────────────┤
- │  M5   Scalp         Trend: Going down      Regime: Steady                            │
- │                     Signal: SELL           Score: -3 / 3                             │
- │  M15  Short-term    Trend: Sideways        Regime: Mixed                             │
- │                     Signal: BUY            Score: +2 / 3                             │
- │  M30  Intraday      Trend: Going down      Regime: Steady                            │
- │                     Signal: SELL           Score: -2 / 3                             │
- ├──────────────────────────────────────────────────────────────────────────────────────┤
- │  M5   market -3/3   Entry:  4285.70        Lot:     0.28                             │
- │                     Stop:   4285.98 28pts  Target:  4285.45 25pts   Reach: ~1 bar    │
- │                     Risk:   7.84 USD       Reward:  7.00 USD        Valid: 3/3 bars  │
- │  M15  HOLD          mixed — no edge either way                                       │
- │  M30  pending -2/3  Entry:  4286.55        Lot:     0.01                             │
- │                     Stop:   4289.10 255pts Target:  4281.45 510pts  Reach: ~9 bars   │
- │                     Risk:   2.55 USD       Reward:  5.10 USD        Valid: 3/3 bars  │
- └──────────────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│  SimpleEA   | Autotrading :   On                                             |  XAUUSD  |  M5 │
+├─────────────────────────────────────────────────────────────────────────────────────────────┤
+│  M5   Scalp            Trend:   Going down       Regime:  Steady                              │
+│                        Signal:  SELL             Score:   -3 / 3                              │
+│  M15  Short-term       Trend:   Sideways         Regime:  Mixed                               │
+│                        Signal:  BUY              Score:   +2 / 3                              │
+│  M30  Intraday         Trend:   Going down       Regime:  Steady                              │
+│                        Signal:  SELL             Score:   -2 / 3                              │
+├─────────────────────────────────────────────────────────────────────────────────────────────┤
+│  M5    market -3/3     Entry:   4285.70          Lot:     0.28                                │
+│                        Stop:    4285.98 28pts    Target:  4285.45 25pts     Reach:  ~1 bar    │
+│                        Risk:    7.84 USD         Reward:  7.00 USD          Valid:  3/3 bars  │
+│  M15   HOLD            mixed — no edge either way                                             │
+│  M30   pending -2/3    Entry:   4286.55          Lot:     0.01                                │
+│                        Stop:    4289.10 255pts   Target:  4281.45 510pts    Reach:  ~9 bars   │
+│                        Risk:    2.55 USD         Reward:  5.10 USD          Valid:  3/3 bars  │
+└─────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Two Part 2 readings are visible at once: M15's Mixed regime **blocks** its `+2 / 3` score —
@@ -308,11 +308,11 @@ takes the range game instead, the block carries the box's own numbers — entry 
 band, stop = band + 1 ATR, target = half the box (the midpoint):
 
 ```
- ┌──────────────────────────────────────────────────────────────────────────────────────┐
- │  M5   range fade    Entry:  4286.60        Lot:     0.14                             │
- │                     Stop:   4286.88 28pts  Target:  4285.60 100pts  Reach: ~13 bars  │
- │                     Risk:   3.92 USD       Reward:  14.00 USD       Valid: 8/8 bars  │
- └──────────────────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────────────────────┐
+│  M5    range fade      Entry:   4286.60         Lot:     0.14                               │
+│                        Stop:    4286.88 28pts   Target:  4285.60 100pts   Reach:   ~13 bars │
+│                        Risk:    3.92 USD        Reward:  14.00 USD        Valid:   8/8 bars │
+└───────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **A HOLD or waiting timeframe takes a single line**, so the group is only as tall as it has
@@ -326,6 +326,15 @@ what the default font (`InpFont = "Consolas"`) occupies — so the panel is neit
 padded. A wider monospaced face (Courier New, Lucida Console, ~0.60 em) on a big font can make a
 long line touch the border: `research/walk_trade_plan.py` measures that across DPI 72–192 and
 sizes 6–16 and prints the answer at the end of its run.
+
+**The whole grid is sized by the font.** `CharW()` turns `InpFontSize` into the pixel advance of
+one character, and every x in the panel is derived from it: the three column anchors are the
+9-point design scaled by `ColX()`, a value always starts 8 characters (the widest caption plus a
+space) after its label, and the panel is measured from the same numbers before anything is
+drawn. That is what makes 10 the shipped default — at the old fixed 150 / 282 / 414 px columns a
+10-point `Signal:` alone was 7 characters wide and ran into its own value. `walk_trade_plan.py`
+now checks every rendered case for both a right-edge overflow *and* two pieces of text sharing a
+pixel, so a crowded column fails the run instead of the eye.
 
 | Your question | How the panel answers it |
 |---|---|

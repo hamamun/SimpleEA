@@ -181,7 +181,7 @@ input long                InpMagicBase    = 202610;          // Base magic numbe
 input group "=== Panel appearance ==="
 input int      InpPanelX      = 12;          // Panel X offset (px)
 input int      InpPanelY      = 24;          // Panel Y offset (px)
-input int      InpFontSize    = 9;           // Font size
+input int      InpFontSize    = 10;          // Font size
 input string   InpFont        = "Consolas";  // Font (monospaced aligns best)
 input color    InpBgColor     = C'48,48,48'; // Panel background
 input color    InpTitleColor  = clrWhite;    // Title colour
@@ -314,6 +314,11 @@ input int      InpClosedStaleMin = 30;       // Also closed: no quote for this m
 #define HEAD_H      34     // height of the header band (title + symbol line)
 #define PLAN_W_MIN  406    // panel width with no plan showing
 #define PLAN_LINES  3      // lines an ACTIVE timeframe uses (1 for HOLD)
+//  The three column anchors are the FONT-9 design, not raw pixels: ColX()
+//  scales them by em / em(9), so they are the same columns at every font
+//  size and the two groups keep lining up.  PLAN_LBL_C is what guarantees
+//  the gap - a value starts 8 characters (widest caption + a space) after
+//  its label.
 #define PLAN_COL_A  150    // first cell column: aligns with "Trend:" above
 #define PLAN_COL_B  282    // second cell column: aligns with "Regime:" above
 #define PLAN_COL_C  414    // third cell column: used by the "Valid" cell
@@ -325,9 +330,9 @@ input int      InpClosedStaleMin = 30;       // Also closed: no quote for this m
 #define AUTO_W_MIN  420    // minimum width for the 2nd Panel
 #define AUTO_LINES  4      // lines per active trade/order card in the 2nd Panel
 #define AUTO_SEP_H  10     // gap between cards in the 2nd Panel
-#define AUTO_COL_A  150    // first cell column in the 2nd Panel
-#define AUTO_COL_B  320    // second cell column in the 2nd Panel
-#define AUTO_COL_C  480    // third cell column in the 2nd Panel
+#define AUTO_COL_A  150    // first cell column in the 2nd Panel (font-9 anchors,
+#define AUTO_COL_B  320    // second cell column - scaled by ColX() like the
+#define AUTO_COL_C  480    // third cell column - main panel's columns)
 #define AUTO_LBL_A  9      // label width in chars for Col A ("Waiting: ")
 #define AUTO_LBL_B  11     // label width in chars for Col B ("Distance: ")
 #define AUTO_LBL_C  5      // label width in chars for Col C ("Ask: " / "Bid: ")
@@ -3386,6 +3391,34 @@ int CharW(int size)
 }
 
 //+------------------------------------------------------------------+
+//  THE COLUMN GRID - every x in the panel, scaled by the font size.
+//
+//  The panel is a monospaced table, so one number sizes everything: em,
+//  the pixel advance of one character (CharW).  Before this, the column
+//  anchors were raw pixels tuned at the old 9-point default - which is
+//  fine until the font grows: at 10 points "Signal:" alone is 7 em wide
+//  and the value still started at x+192, so the caption ran into its
+//  own value by a few pixels and the panel looked crowded.
+//
+//  Now the font-9 design (150 / 282 / 414, and the kind column at 5 em)
+//  is only a set of reference anchors: ColX() scales them around the left
+//  padding by em / em(9), so raising the font widens every column in
+//  proportion instead of squeezing text into the next label.  The value
+//  x of a column is its label x plus PLAN_LBL_C (the widest label plus
+//  a space), which is what actually guarantees the gap.
+//+------------------------------------------------------------------+
+int EmBase()
+{
+   int b = CharW(9);                 // the point size the anchors were drawn at
+   return((b > 0) ? b : 1);
+}
+
+int ColX(int designPx)
+{
+   return(10 + (designPx - 10) * CharW(InpFontSize) / EmBase());
+}
+
+//+------------------------------------------------------------------+
 //  Remove one panel object by short name.  Safe to call whether or not
 //  the object exists, so callers never have to check first.
 //+------------------------------------------------------------------+
@@ -3494,6 +3527,13 @@ void DrawSupportedPanel()
              InpTitleColor, InpFontSize, true);
 
    // ---- two lines per timeframe -------------------------------------
+   //  One column grid for both groups: the plan's captions and the row's
+   //  "Trend:" / "Regime:" / "Signal:" / "Score:" labels share these x
+   //  positions, so the two groups line up at every font size.
+   int cA, vA, cB, vB, cC, vC;
+   PlanColumns(cA, vA, cB, vB, cC, vC);
+   int styleX = pad + 4 * em;        // clear of the 3-char timeframe tag
+
    //  Line 1 (plain words, every value NAMED so nothing is ambiguous):
    //     Trend: Going up      Regime: Steady
    //  Line 2 (the original trading read, kept from the first panel):
@@ -3507,23 +3547,23 @@ void DrawSupportedPanel()
 
       MakeLabel("tf" + sfx,    x + pad,      ry, g_rows[i].tag,
                 clrWhite, InpFontSize, false);
-      MakeLabel("style" + sfx, x + pad + 34, ry, g_rows[i].style,
+      MakeLabel("style" + sfx, x + styleX, ry, g_rows[i].style,
                 clrGray, InpFontSize, false);
 
-      MakeLabel("trendCap" + sfx,  x + 150, ry, "Trend:",
+      MakeLabel("trendCap" + sfx,  x + cA, ry, "Trend:",
                 clrGray, InpFontSize, false);
-      MakeLabel("regimeCap" + sfx, x + 282, ry, "Regime:",
+      MakeLabel("regimeCap" + sfx, x + cB, ry, "Regime:",
                 clrGray, InpFontSize, false);
-      MakeLabel("signalCap" + sfx, x + 150, ry + rowH, "Signal:",
+      MakeLabel("signalCap" + sfx, x + cA, ry + rowH, "Signal:",
                 clrGray, InpFontSize, false);
-      MakeLabel("scoreCap" + sfx,  x + 282, ry + rowH, "Score:",
+      MakeLabel("scoreCap" + sfx,  x + cB, ry + rowH, "Score:",
                 clrGray, InpFontSize, false);
 
       if(g_rows[i].ok)
       {
-         MakeLabel("dir" + sfx, x + 192, ry, PlainTrendText(g_rows[i].direction),
+         MakeLabel("dir" + sfx, x + vA, ry, PlainTrendText(g_rows[i].direction),
                    DirectionColor(g_rows[i].direction), InpFontSize + 1, false);
-         MakeLabel("regimeVal" + sfx, x + 330, ry, RegimeText(i),
+         MakeLabel("regimeVal" + sfx, x + vB, ry, RegimeText(i),
                    RegimeColor(i), InpFontSize + 1, false);
          //  Part 2: a blocked row shows the trade it WOULD have fired,
          //  greyed out - the gate now has a word and a colour instead of
@@ -3535,22 +3575,22 @@ void DrawSupportedPanel()
             if(g_rows[i].score >= InpBuyScore)       { sigDir = 1;  greyed = true; }
             else if(g_rows[i].score <= InpSellScore) { sigDir = -1; greyed = true; }
          }
-         MakeLabel("signal" + sfx, x + 192, ry + rowH,
+         MakeLabel("signal" + sfx, x + vA, ry + rowH,
                    DirectionText(sigDir),
                    greyed ? clrGray : DirectionColor(sigDir), InpFontSize + 1, false);
-         MakeLabel("score" + sfx, x + 330, ry + rowH,
+         MakeLabel("score" + sfx, x + vB, ry + rowH,
                    StringFormat("%+d / 3", g_rows[i].score),
                    greyed ? clrGray : DirectionColor(sigDir), InpFontSize + 1, false);
       }
       else
       {
-         MakeLabel("dir" + sfx,       x + 192, ry, "Waiting",
+         MakeLabel("dir" + sfx,       x + vA, ry, "Waiting",
                    clrDimGray, InpFontSize, false);
-         MakeLabel("regimeVal" + sfx, x + 330, ry, "...",
+         MakeLabel("regimeVal" + sfx, x + vB, ry, "...",
                    clrDimGray, InpFontSize, false);
-         MakeLabel("signal" + sfx,    x + 192, ry + rowH, "...",
+         MakeLabel("signal" + sfx,    x + vA, ry + rowH, "...",
                    clrDimGray, InpFontSize, false);
-         MakeLabel("score" + sfx,     x + 330, ry + rowH, "...",
+         MakeLabel("score" + sfx,     x + vB, ry + rowH, "...",
                    clrDimGray, InpFontSize, false);
       }
    }
@@ -3581,25 +3621,47 @@ void PlanColumns(int &cA, int &vA, int &cB, int &vB, int &cC, int &vC)
 {
    int em = CharW(InpFontSize);
 
-   cA = PLAN_COL_A;
+   //  The anchors are the font-9 design; ColX() scales them by the font
+   //  the user actually picked.  The value x of each column is its label
+   //  x + PLAN_LBL_C em (the widest caption plus a space), so a value can
+   //  never start inside its own label - that was the 9-point-only gap.
+
+   //  Column A also has to clear the decision word that sits left of it
+   //  ("pending -2/3", or the same plus "[PLACED]" on a one-line block),
+   //  which starts at 5 em.  At a small font the scaled anchor alone is
+   //  not wide enough for both.
+   int kindW = StringLen("pending -2/3");
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      int w = StringLen(g_plans[i].kind);
+      string tag = AutoStatusTag(i);
+      if(tag != "" && g_plans[i].lines == 1)
+         w += 1 + StringLen(tag);
+      kindW = (int)MathMax(kindW, w);
+   }
+
+   cA = (int)MathMax(ColX(PLAN_COL_A), 10 + 5 * em + kindW * em + em);
    vA = cA + em * PLAN_LBL_C;
 
-   int wA = 0;
+   //  Seed with the widest GROUP-1 values in this column ("Going down" is
+   //  10 chars; the Signal cell is 4), then let the plan cells push the
+   //  next column right only if they are wider still.
+   int wA = 10 * em;
    for(int i = 0; i < TF_COUNT; i++)
       for(int l = 0; l < g_plans[i].lines; l++)
          if(g_plans[i].lbl[l][0] != "")
             wA = (int)MathMax(wA, StringLen(g_plans[i].val[l][0]) * em);
 
-   cB = (int)MathMax(PLAN_COL_B, vA + wA + em * 2);
+   cB = (int)MathMax(ColX(PLAN_COL_B), vA + wA + em * 2);
    vB = cB + em * PLAN_LBL_C;
 
-   int wB = 0;
+   int wB = 6 * em;                  // "Choppy" / "+3 / 3" from the rows
    for(int i = 0; i < TF_COUNT; i++)
       for(int l = 0; l < g_plans[i].lines; l++)
          if(g_plans[i].lbl[l][1] != "")
             wB = (int)MathMax(wB, StringLen(g_plans[i].val[l][1]) * em);
 
-   cC = (int)MathMax(PLAN_COL_C, vB + wB + em * 2);
+   cC = (int)MathMax(ColX(PLAN_COL_C), vB + wB + em * 2);
    vC = cC + em * PLAN_LBL_C;
 }
 
@@ -3629,8 +3691,14 @@ int PlanWidthNeed()
    PlanColumns(cA, vA, cB, vB, cC, vC);
    int em = CharW(InpFontSize);
 
-   //  timeframe tag at x+10 and the kind ("pending +3/3") at x+44
-   int need = 44 + StringLen("pending +3/3") * em + 10;
+   //  timeframe tag at x+10 and the kind ("pending +3/3") at x+5 em
+   int need = 10 + 5 * em + StringLen("pending +3/3") * em + 10;
+
+   //  Group 1 draws on this same grid, so its widest cell has a say too.
+   //  Sizing the panel from the plan alone clipped a reading at 10 points
+   //  ("Choppy" / "+3 / 3" are the last cells of the two line 2s).
+   need = (int)MathMax(need, vA + 5 * em + 10);      // "SELL" / "HOLD" / "Waiting"
+   need = (int)MathMax(need, vB + 6 * em + 10);      // "Choppy" / "+3 / 3"
 
    for(int i = 0; i < TF_COUNT; i++)
    {
@@ -3676,6 +3744,7 @@ void DrawPlanBlock(int x, int y)
 
    int cA, vA, cB, vB, cC, vC;
    PlanColumns(cA, vA, cB, vB, cC, vC);
+   int kindX = 10 + 5 * CharW(InpFontSize);     // clear of the "M30" tag
 
    int line = 0;
    for(int i = 0; i < TF_COUNT; i++)
@@ -3700,7 +3769,7 @@ void DrawPlanBlock(int x, int y)
       }
 
       if(kindTxt != "")
-         MakeLabel("planKind" + sfx, x + 44, ry, kindTxt, kc, InpFontSize, false);
+         MakeLabel("planKind" + sfx, x + kindX, ry, kindTxt, kc, InpFontSize, false);
       else
          DeleteObject("planKind" + sfx);
 
@@ -3709,7 +3778,7 @@ void DrawPlanBlock(int x, int y)
       if(autoTag != "" && g_plans[i].lines > 1)
       {
          color stClr = (g_auto[i].dir > 0) ? InpBuyColor : InpSellColor;
-         MakeLabel(stName, x + 44, ry + rowH, autoTag, stClr, InpFontSize, false);
+         MakeLabel(stName, x + kindX, ry + rowH, autoTag, stClr, InpFontSize, false);
       }
       else
          DeleteObject(stName);
@@ -3840,7 +3909,7 @@ void AutoColumns(int &cA, int &vA, int &cB, int &vB, int &cC, int &vC)
 {
    int em = CharW(InpFontSize);
 
-   cA = (int)MathMax(AUTO_COL_A, 10 + (int)StringLen("M30 | SELL LIMIT") * em + em * 2);
+   cA = (int)MathMax(ColX(AUTO_COL_A), 10 + (int)StringLen("M30 | SELL LIMIT") * em + em * 2);
    vA = cA + em * AUTO_LBL_A;
 
    int wA = 0;
@@ -3852,7 +3921,7 @@ void AutoColumns(int &cA, int &vA, int &cB, int &vB, int &cC, int &vC)
             wA = (int)MathMax(wA, StringLen(g_auto[i].val[l][0]) * em);
    }
 
-   cB = (int)MathMax(AUTO_COL_B, vA + wA + em * 2);
+   cB = (int)MathMax(ColX(AUTO_COL_B), vA + wA + em * 2);
    vB = cB + em * AUTO_LBL_B;
 
    int wB = 0;
@@ -3864,7 +3933,7 @@ void AutoColumns(int &cA, int &vA, int &cB, int &vB, int &cC, int &vC)
             wB = (int)MathMax(wB, StringLen(g_auto[i].val[l][1]) * em);
    }
 
-   cC = (int)MathMax(AUTO_COL_C, vB + wB + em * 2);
+   cC = (int)MathMax(ColX(AUTO_COL_C), vB + wB + em * 2);
    vC = cC + em * AUTO_LBL_C;
 }
 
@@ -4046,7 +4115,10 @@ void DrawNoticePanel(const string noticeTxt)
    //  notice on the line where the first timeframe row would have started,
    //  so an unsupported chart reads as the panel collapsing to its header
    //  rather than as a different widget appearing.
-   int noticeH = HEAD_H + 2 + (InpFontSize + 1) + 6;
+   //  the notice is drawn at font+1, so its own line needs that much room
+   //  plus a margin - at 10 points the old +6 left the text 2 px from the
+   //  bottom edge
+   int noticeH = HEAD_H + 2 + (InpFontSize + 1) + 8;
 
    MakeRect("bg", x, y, g_panelW, noticeH, InpBgColor, clrDimGray);
 

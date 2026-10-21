@@ -67,7 +67,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from verify_plan_math import SYMBOLS, point_value_per_lot, normalize_lots  # noqa: E402
 from walk_trade_plan import (HEAD_H, TF_COUNT, PLAN_SEP_H, PLAN_COL_A,
                              PLAN_COL_B, PLAN_COL_C, PLAN_W_MIN, PLAN_LBL_C,
-                             NOTICE, FONT, DPI, RENDER_CW, CELL, char_w,
+                             NOTICE, FONT, DPI, RENDER_CW, CELL, char_w, col_x,
                              SL_ATR, TP_ATR, RANGE_SL_ATR, per_tf)  # noqa: E402
 
 AUTO_POS_RIGHT = 0
@@ -946,15 +946,15 @@ class AutoTraderSim:
         self.auto_shown = self.any_auto_active()
 
     def auto_columns(self):
-        cA = max(AUTO_COL_A, 10 + len("M30 | SELL LIMIT") * EM + EM * 2)
+        cA = max(col_x(AUTO_COL_A), 10 + len("M30 | SELL LIMIT") * EM + EM * 2)
         vA = cA + EM * AUTO_LBL_A
         wA = max([len(a.val[(l, 0)]) for a in self.auto.values() if a.active
                   for l in range(AUTO_LINES) if (l, 0) in a.val] or [0])
-        cB = max(AUTO_COL_B, vA + wA * EM + EM * 2)
+        cB = max(col_x(AUTO_COL_B), vA + wA * EM + EM * 2)
         vB = cB + EM * AUTO_LBL_B
         wB = max([len(a.val[(l, 1)]) for a in self.auto.values() if a.active
                   for l in range(AUTO_LINES) if (l, 1) in a.val] or [0])
-        cC = max(AUTO_COL_C, vB + wB * EM + EM * 2)
+        cC = max(col_x(AUTO_COL_C), vB + wB * EM + EM * 2)
         vC = cC + EM * AUTO_LBL_C
         return cA, vA, cB, vB, cC, vC
 
@@ -1014,7 +1014,6 @@ class AutoTraderSim:
             if not text:
                 return
             col = max(0, int(round(x_px / CELL)))
-            col = max(col, last_col.get(line, -1) + 2)
             for k, ch in enumerate(text):
                 if col + k < w_cols:
                     grid[line][col + k] = ch
@@ -1075,6 +1074,20 @@ class AutoTraderSim:
               % (pos_txt, self.auto_x, self.auto_y, self.auto_w, self.auto_h))
 
         over = [(ln, txt, x_end) for ln, _, x_end, txt in placed if x_end > self.auto_w - 3]
+        for ln, txt, x_end in over:
+            print("  !! line %d ends at %.0f px in a %d px panel: %r"
+                  % (ln, x_end, self.auto_w, txt))
+        #  and no two pieces of text may share a pixel on the same line
+        by_line = {}
+        for ln, x0, x_end, txt in placed:
+            by_line.setdefault(ln, []).append((x0, x_end, txt))
+        for ln, spans in sorted(by_line.items()):
+            spans.sort()
+            for (a0, a1, at), (b0, b1, bt) in zip(spans, spans[1:]):
+                if b0 < a1 - 0.5:
+                    over.append((ln, "%s | %s" % (at, bt), b0 - a1))
+                    print("  !! line %d: %r overlaps %r by %.1f px"
+                          % (ln, at, bt, a1 - b0))
         return over
 
 
