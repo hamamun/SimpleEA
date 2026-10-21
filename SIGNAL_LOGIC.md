@@ -156,8 +156,8 @@ engine only ever *confirms* a trend in a persistent regime, or **abstains**.
 **Superseded by Part 2** (the v1 paragraph above stays for the record): the `InpFadeInRange`
 input has been **removed**. An anti-persistent row is never faded against anymore — it plays the
 **range game** (the box trade: entry at the opposite band, target = the midpoint, stop =
-band + `InpRangeSLATR` ATR, with the half-box ≥ `InpRangeSpreadX` spreads / box ≥
-`InpRangeMinATR` ATR / ER < `InpRangeERMax` / bid-inside-box gates all-must-pass), or it stands
+band + `RANGE_SL_ATR` ATR, with the half-box ≥ `RANGE_SPREAD_X` spreads / box ≥
+`RANGE_MIN_ATR` ATR / ER < `RANGE_ER_MAX` / bid-inside-box gates all-must-pass), or it stands
 aside and says why (`chop — nothing clears the spread`, etc.). The 2015 inversion above is
 exactly why the box trade should be journalled and pre-validated (band touch → midpoint hit
 before band break) before real money goes on it.

@@ -49,7 +49,7 @@ line and verifies every rule:
   Part 2 (the regime now DECIDES instead of abstaining):
           Steady rows trade the trend game exactly as above; Choppy rows
           place a RANGE FADE - a limit at the opposite band of the box,
-          target = half the box (midpoint), stop = band + InpRangeSLATR
+          target = half the box (midpoint), stop = band + RANGE_SL_ATR
           ATR, kind "range fade"; Mixed / dead / gated chop rows place
           nothing and the plan block says why.  A closed bar outside
           the trade's box kills it (cancel pending / close open), range
@@ -224,7 +224,7 @@ class AutoTraderSim:
 
         self.bid = 4285.70
         self.ask = 4285.70
-        #  InpRangeSLATR: the range game's stop is band + this many ATR
+        #  RANGE_SL_ATR: the range game's stop is band + this many ATR
         self.range_sl_atr = RANGE_SL_ATR
         self.atr = {"M5": 0.28, "M15": 0.85, "M30": 1.70}
         self.rows = {t: dict(ok=True, dir=0, score=0, trend="Sideways",
@@ -444,7 +444,7 @@ class AutoTraderSim:
             plan_entry = entry if market else pend
 
             #  trend rows keep the per-timeframe profiles; range rows are
-            #  pure box geometry (band entry, stop = band + InpRangeSLATR
+            #  pure box geometry (band entry, stop = band + RANGE_SL_ATR
             #  ATR, target = half the box) - never shrunk by hand
             if is_range:
                 plan_entry = r["rng_bot"] if dir_ > 0 else r["rng_top"]

@@ -13,7 +13,7 @@ Part 2 mirrors, also line for line:
   - a blocked row shows the trade it WOULD have fired, greyed out
   - the HOLD note carries the row's block reason ("mixed ...", "chop ...")
   - range rows build their plan from the box: limit entry at the
-    opposite band, stop = band + InpRangeSLATR ATR, target = half the
+    opposite band, stop = band + RANGE_SL_ATR ATR, target = half the
     box, kind "range fade"
 
 The walk renders the panel on a character grid where one character is one
@@ -49,8 +49,9 @@ HOLD, WAITING, ACTIVE = 0, 1, 2
 #  quick, an intraday trade aims far and lets the move run.
 SL_ATR = {"M5": 1.0, "M15": 1.2, "M30": 1.5}
 TP_ATR = {"M5": 0.9, "M15": 1.8, "M30": 3.0}
-#  InpRangeSLATR in the EA (Part 2): the range game's stop is band +
-#  this many ATR - one value for every timeframe, like the EA input.
+#  RANGE_SL_ATR in the EA (Part 2, now baked in like the trade profile):
+#  the range game's stop is band + this many ATR - one value for every
+#  timeframe.
 RANGE_SL_ATR = 1.0
 
 
@@ -89,7 +90,7 @@ class Panel:
         self.sl_atr = per_tf(sl_atr, SL_ATR)
         self.tp_atr = per_tf(tp_atr, TP_ATR)
         self.pend_atr, self.valid_bars = pend_atr, valid_bars
-        self.valid_bars_range = valid_bars_range       # InpValidBarsRange in the EA
+        self.valid_bars_range = valid_bars_range       # RANGE_VALID_BARS in the EA
         self.panel_w = 406
         self.panel_h = 130
         # g_rows: tag -> the row fields UpdatePlanRow() reads
@@ -159,7 +160,7 @@ class Panel:
 
         # stop / target: trend rows keep the per-timeframe ATR profiles;
         # range rows are pure box geometry (band entry, stop = band +
-        # InpRangeSLATR ATR, target = half the box) - never shrunk by hand
+        # RANGE_SL_ATR ATR, target = half the box) - never shrunk by hand
         if is_range:
             plan_entry = r["rng_bot"] if dir_ > 0 else r["rng_top"]
             sl_pts = max(1, int(round(RANGE_SL_ATR * atr / point)))

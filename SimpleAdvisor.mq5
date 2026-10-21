@@ -227,15 +227,14 @@ input group "=== Range mode (choppy markets) ==="
 //  play the trend game as before; Choppy rows (H below the revert
 //  threshold - moves genuinely come back) play the RANGE game: entry at
 //  the box band, target at the box midpoint, stop beyond the band.  All
-//  numbers below are gates, not guesses - every one must pass or the
+//  the box numbers are gates, not guesses - every one must pass or the
 //  row stands aside and the plan block says why.
+//  Only the on/off switch is an input: "do I want chop traded at all" is
+//  a user preference.  The six numbers that define the box were inputs
+//  too until they stopped earning a decision - they are calibration, so
+//  they now live in THE RANGE PROFILE below, one value for all three
+//  timeframes, exactly like the trade profile.
 input bool     InpRangeMode    = true;       // Range mode: trade the box when choppy (default ON)
-input int      InpRangeBars    = 20;         // Range box = last N closed bars
-input double   InpRangeMinATR  = 2.0;        // Box must be at least this many ATR tall
-input double   InpRangeSpreadX = 3.0;        // Half-box target must be >= this many spreads
-input double   InpRangeERMax   = 0.40;       // Efficiency above this => a trend, not a box
-input double   InpRangeSLATR   = 1.0;        // Range stop = band + this many ATR
-input int      InpValidBarsRange = 8;        // Range fade validity in bars (the box-kill is its real guard)
 
 input group "=== Market closed detection ==="
 //  While the symbol cannot be traded (weekend, daily break, symbol halt)
@@ -282,6 +281,30 @@ input int      InpClosedStaleMin = 30;       // Also closed: no quote for this m
 //  and it trades more - which is exactly why it is not a user input.
 #define HURST_TREND     0.55      // H above this = persistent: play the trend game
 #define HURST_REVERT    0.45      // H below this = anti-persistent: play the range game
+
+//  ---- THE RANGE PROFILE (baked in: the tested box geometry) ----------
+//  Same reasoning as the two blocks above: these are the calibration the
+//  box trade was measured with, one set for all three timeframes, and
+//  none of them is a preference.  They used to be six inputs; only the
+//  on/off switch is still one.  If your broker's spread is genuinely
+//  not the one this was measured on, the single number worth
+//  re-exposing is RANGE_SPREAD_X - the cost gate is the only one that
+//  is account-specific rather than a property of the price series.
+#define RANGE_BARS      20        // range box = the last N closed bars' highs/lows
+#define RANGE_SL_ATR    1.0       // range stop = opposite band + this many ATR
+#define RANGE_MIN_RR    1.0       // box must be tall enough that half-box >= stop risk
+//  The height gate is DERIVED, never typed twice: half the box is the
+//  target (box/2 ATR) and the stop is RANGE_SL_ATR, so requiring
+//  half-box >= RANGE_MIN_RR x stop is the same as box >= 2 x 1.0 x 1.0
+//  ATR.  Change RANGE_SL_ATR and the height floor follows it; the RR
+//  cannot silently drop because two numbers drifted apart.
+#define RANGE_MIN_ATR   (2.0 * RANGE_SL_ATR * RANGE_MIN_RR)
+#define RANGE_SPREAD_X  3.0       // half-box target must clear at least this many spreads
+#define RANGE_ER_MAX    0.40      // efficiency above this = a walk, not a box
+//  NOT HURST_REVERT on purpose: H reads ~256 bars of memory, the E/R
+//  reads the box's own 20.  Reusing 0.45 here would let 0.40-0.45 walks
+//  in as boxes - a different question, a different window.
+#define RANGE_VALID_BARS 8        // range fade leash in bars (the box-kill is the real guard)
 
 #define PEND_ATR        0.5       // pending entry sits this many ATR from the market
 #define VALID_BARS      3         // trend reading's leash in bars (research/HORIZON.md)
@@ -393,7 +416,7 @@ int BarsNeeded()
    if(hneed + 50 > need)  need = hneed + 50;
 
    //  Short lookbacks: only matter if someone sets them very large.
-   if(InpRangeBars + 5 > need) need = InpRangeBars + 5;
+   if(RANGE_BARS    + 5 > need) need = RANGE_BARS    + 5;
    if(ATR_PERIOD    + 5 > need) need = ATR_PERIOD    + 5;
    if(InpERPeriod   + 5 > need) need = InpERPeriod   + 5;
 
@@ -981,7 +1004,7 @@ void EvaluateRow(int idx)
       else
       {
          // ---- the box: actual highs and lows of the last N closed bars
-         int    nb   = MathMax(5, InpRangeBars);
+         int    nb   = MathMax(5, RANGE_BARS);
          int    from = MathMax(0, n - nb);
          double top  = -DBL_MAX;
          double bot  =  DBL_MAX;
@@ -1000,13 +1023,13 @@ void EvaluateRow(int idx)
          string why = "";
          if(atr <= 0.0 || spread < 0.0 || n < nb || top <= bot)
             why = "chop — no valid box yet";      // data or geometry not there
-         else if(top - bot < InpRangeMinATR * atr)
+         else if(top - bot < RANGE_MIN_ATR * atr)
             why = "chop — no valid box yet";      // box too flat to trade
-         else if(ER >= InpRangeERMax)
+         else if(ER >= RANGE_ER_MAX)
             why = "chop — no valid box yet";      // it is a walk, not a box
          else if(bid > top || bid < bot)
             why = "chop — no valid box yet";      // price broke the box
-         else if(half < InpRangeSpreadX * spread)
+         else if(half < RANGE_SPREAD_X * spread)
             why = "chop — nothing clears the spread";   // the cost gate
 
          if(why != "")
@@ -1038,7 +1061,7 @@ void EvaluateRow(int idx)
    //  (trend <-> range), or the old leash has run out - the very bars
    //  the auto-trader expires and re-places a waiting order on.  A row
    //  that stands aside carries no leash at all.
-   int  leash = (mode == 2) ? MathMax(1, InpValidBarsRange)
+   int  leash = (mode == 2) ? MathMax(1, RANGE_VALID_BARS)
                             : VALID_BARS;
    int  tfSec = (int)PeriodSeconds(g_rows[idx].tf);
    long age   = leash + 1;                        // unknown age: treat the leash as spent
@@ -1306,14 +1329,14 @@ void UpdatePlanRow(int i)
    // ---- stop and target ---------------------------------------------
    //  Trend rows keep the per-timeframe ATR profiles (scalp aims near,
    //  intraday aims far).  Range rows are pure box geometry: entry at
-   //  the OPPOSITE band, stop = band + InpRangeSLATR ATR, target =
+   //  the OPPOSITE band, stop = band + RANGE_SL_ATR ATR, target =
    //  half the box (band -> midpoint).  Neither is ever shrunk by hand.
    int slPts, tpPts;
    if(isRange)
    {
       planEntry = ValidLimitPrice(dir, (dir > 0) ? g_rows[i].rngBot : g_rows[i].rngTop,
                                   bid, ask, point);
-      slPts = (int)MathMax(1.0, MathRound(InpRangeSLATR * atr / point));
+      slPts = (int)MathMax(1.0, MathRound(RANGE_SL_ATR * atr / point));
       tpPts = (int)MathMax(1.0, MathRound(0.5 * (g_rows[i].rngTop - g_rows[i].rngBot) / point));
    }
    else
@@ -1382,12 +1405,12 @@ void UpdatePlanRow(int i)
 
    // ---- how long this reading is worth acting on -------------------
    //  Trend readings live VALID_BARS closed bars (the measured median
-   //  life, research/HORIZON.md).  Range fades get InpValidBarsRange:
+   //  life, research/HORIZON.md).  Range fades get RANGE_VALID_BARS:
    //  the box is re-measured every bar and a close outside it already
    //  kills both the pending and the position, so a longer leash costs
    //  nothing - it only stops the cancel / re-place churn every 3 bars
    //  and the one-bar gap at the band that churn leaves behind.
-   int vBars = (g_rows[i].mode == 2) ? MathMax(1, InpValidBarsRange)
+   int vBars = (g_rows[i].mode == 2) ? MathMax(1, RANGE_VALID_BARS)
                                      : VALID_BARS;
    datetime until  = 0;
    datetime sigBar = LastClosedBarTime(_Symbol, g_rows[i].tf);
@@ -2701,13 +2724,13 @@ void ManageAutoBar()
       {
          int  dir     = g_auto[i].dir;
          int  tfSec   = PeriodSeconds(g_rows[i].tf);
-         //  Range fades live on InpValidBarsRange: the box-kill above
+         //  Range fades live on RANGE_VALID_BARS: the box-kill above
          //  (a close outside the box) is their real invalidation, and
          //  the pending is refreshed to the new plan on every closed
          //  bar anyway.  Expiring them on the 3-bar trend leash only
          //  produced a cancel -> one-bar gap at the band -> re-place
          //  cycle while the thesis was intact.
-         int  vBars   = g_auto[i].isRange ? MathMax(1, InpValidBarsRange)
+         int  vBars   = g_auto[i].isRange ? MathMax(1, RANGE_VALID_BARS)
                                           : VALID_BARS;
          bool expired = (g_auto[i].placedBar > 0 && tfSec > 0 &&
                          g_rows[i].lastBar > g_auto[i].placedBar &&

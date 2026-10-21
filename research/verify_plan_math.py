@@ -82,7 +82,7 @@ def plan(c, direction, atr, balance, use_risk=True, use_min_lot=False,
 
     box=(top, bot) switches to the Part 2 RANGE branch of UpdatePlanRow():
     sl_atr / tp_atr are then ignored, exactly as the MQL ignores them -
-    the stop is range_sl_atr (InpRangeSLATR) * ATR and the target is
+    the stop is range_sl_atr (RANGE_SL_ATR) * ATR and the target is
     half the box, no matter what the timeframe's trend profile says.
     """
     pv = point_value_per_lot(c)
@@ -292,7 +292,7 @@ def main():
 
     # --- range fade (Part 2): the box decides every number ---------------
     # Box top/bot are actual highs and lows; the plan takes entry at the
-    # opposite band, stop = band + InpRangeSLATR (1.0) ATR, target =
+    # opposite band, stop = band + RANGE_SL_ATR (1.0) ATR, target =
     # half the box (band -> midpoint).  Hand-derived on XAUUSD 2-digit.
     print("\nRange fade - box geometry, not an opinion")
     top, bot = 4286.60, 4284.60                 # 2.00 price units tall
