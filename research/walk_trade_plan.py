@@ -13,7 +13,7 @@ Part 2 mirrors, also line for line:
   - a blocked row shows the trade it WOULD have fired, greyed out
   - the HOLD note carries the row's block reason ("mixed ...", "chop ...")
   - range rows build their plan from the box: limit entry at the
-    opposite band, stop = band + InpRangeSLATR ATR, target = half the
+    opposite band, stop = band + RANGE_SL_ATR ATR, target = half the
     box, kind "range fade"
 
 The walk renders the panel on a character grid where one character is one
@@ -35,10 +35,13 @@ PLAN_W_MIN = 406
 # IncompatibleNotice() in the EA, verbatim
 NOTICE = "Incompatible chart. Switch to M5/M15/M30."
 PLAN_LBL_C = 8
-FONT = 9
+FONT = 10                              # InpFontSize: the EA's shipped default
 EM_EST = 0.55      # CharW(): what the EA budgets per character
 DPI = 96
-RENDER_CW = 9 * 96 / 72.0 * 0.55      # what one glyph really occupies (6.6 px)
+#  Consolas' real advance is 0.5498 em, slightly under the 0.55 budget -
+#  that is what one glyph really occupies on screen (7.33 px at 10 pt/96 dpi)
+ADV_CONSOLAS = 0.5498
+RENDER_CW = FONT * DPI / 72.0 * ADV_CONSOLAS
 CELL = RENDER_CW                      # the picture is one character per glyph
 
 MINUTES = {"M5": 5, "M15": 15, "M30": 30}
@@ -49,8 +52,9 @@ HOLD, WAITING, ACTIVE = 0, 1, 2
 #  quick, an intraday trade aims far and lets the move run.
 SL_ATR = {"M5": 1.0, "M15": 1.2, "M30": 1.5}
 TP_ATR = {"M5": 0.9, "M15": 1.8, "M30": 3.0}
-#  InpRangeSLATR in the EA (Part 2): the range game's stop is band +
-#  this many ATR - one value for every timeframe, like the EA input.
+#  RANGE_SL_ATR in the EA (Part 2, now baked in like the trade profile):
+#  the range game's stop is band + this many ATR - one value for every
+#  timeframe.
 RANGE_SL_ATR = 1.0
 
 
@@ -68,6 +72,15 @@ def per_tf(value, default):
 def char_w(size=FONT, dpi=DPI):
     """CharW() in the EA: points -> pixels at the real screen DPI."""
     return int(math.ceil(size * dpi / 72.0 * EM_EST))
+
+
+EM_BASE = char_w(9, DPI)              # EmBase(): the point size of the anchors
+
+
+def col_x(design_px, em=None):
+    """ColX() in the EA: a font-9 anchor scaled to the current font."""
+    em = EM if em is None else em
+    return 10 + (design_px - 10) * em // EM_BASE
 
 
 EM = char_w()
@@ -89,7 +102,7 @@ class Panel:
         self.sl_atr = per_tf(sl_atr, SL_ATR)
         self.tp_atr = per_tf(tp_atr, TP_ATR)
         self.pend_atr, self.valid_bars = pend_atr, valid_bars
-        self.valid_bars_range = valid_bars_range       # InpValidBarsRange in the EA
+        self.valid_bars_range = valid_bars_range       # RANGE_VALID_BARS in the EA
         self.panel_w = 406
         self.panel_h = 130
         # g_rows: tag -> the row fields UpdatePlanRow() reads
@@ -159,7 +172,7 @@ class Panel:
 
         # stop / target: trend rows keep the per-timeframe ATR profiles;
         # range rows are pure box geometry (band entry, stop = band +
-        # InpRangeSLATR ATR, target = half the box) - never shrunk by hand
+        # RANGE_SL_ATR ATR, target = half the box) - never shrunk by hand
         if is_range:
             plan_entry = r["rng_bot"] if dir_ > 0 else r["rng_top"]
             sl_pts = max(1, int(round(RANGE_SL_ATR * atr / point)))
@@ -257,15 +270,21 @@ class Panel:
 
     # ---- PlanColumns() --------------------------------------------------
     def plan_columns(self):
-        cA, cB, cC = PLAN_COL_A, PLAN_COL_B, PLAN_COL_C
+        #  The anchors are the font-9 design, scaled by ColX(); a value
+        #  starts PLAN_LBL_C em after its label, and column A also clears
+        #  the decision word to its left - the EA measures all of it the
+        #  same way, which is what keeps the two groups aligned.
+        kind_len = max([len("pending -2/3")] +
+                       [len(p["kind"]) for p in self.plans.values() if p["kind"]] or [0])
+        cA = max(col_x(PLAN_COL_A), 10 + 5 * EM + kind_len * EM + EM)
         vA = cA + EM * PLAN_LBL_C
-        wA = max([len(p["val"][(l, 0)]) for t, p in self.plans.items()
-                  for l in range(p["lines"]) if (l, 0) in p["val"]] or [0])
-        cB = max(cB, vA + wA * EM + EM * 2)
+        wA = max([10] + [len(p["val"][(l, 0)]) for t, p in self.plans.items()
+                         for l in range(p["lines"]) if (l, 0) in p["val"]]) * EM
+        cB = max(col_x(PLAN_COL_B), vA + wA + EM * 2)
         vB = cB + EM * PLAN_LBL_C
-        wB = max([len(p["val"][(l, 1)]) for t, p in self.plans.items()
-                  for l in range(p["lines"]) if (l, 1) in p["val"]] or [0])
-        cC = max(cC, vB + wB * EM + EM * 2)
+        wB = max([6] + [len(p["val"][(l, 1)]) for t, p in self.plans.items()
+                        for l in range(p["lines"]) if (l, 1) in p["val"]]) * EM
+        cC = max(col_x(PLAN_COL_C), vB + wB + EM * 2)
         vC = cC + EM * PLAN_LBL_C
         return cA, vA, cB, vB, cC, vC
 
@@ -275,7 +294,9 @@ class Panel:
     # ---- PlanWidthNeed() ------------------------------------------------
     def plan_width_need(self):
         cA, vA, cB, vB, cC, vC = self.plan_columns()
-        need = 44 + len("pending +3/3") * EM + 10
+        need = 10 + 5 * EM + len("pending +3/3") * EM + 10
+        #  Group 1 shares the grid, so its last cells count too
+        need = max(need, vA + 5 * EM + 10, vB + 6 * EM + 10)
         for t, p in self.plans.items():
             if p["lines"] == 1:
                 if p["note"]:
@@ -311,14 +332,13 @@ class Panel:
             if not text:
                 return
             col = max(0, int(round(x_px / CELL)))
-            #  keep labels and values visually apart: the real panel leaves a
-            #  few pixels between them, and whole-character rounding can
-            #  swallow that gap ("Trend:" + its value would read as one word)
-            col = max(col, last_col.get(line, -1) + 2)
             for k, ch in enumerate(text):
                 if col + k < w_cols:
                     grid[line][col + k] = ch
             last_col[line] = col + len(text) - 1
+            #  the honest span, in pixels: the overlap check below compares
+            #  these, so a caption that runs into its value cannot hide
+            #  behind whole-character rounding
             placed.append((line, x_px, x_px + len(text) * RENDER_CW, text))
 
         separators = set()
@@ -331,16 +351,18 @@ class Panel:
         put(sym_right, self.panel_w - 10 - len(sym_right) * RENDER_CW, 0)
         separators.add(1)
         line = 2
+        cA, vA, cB, vB, cC, vC = self.plan_columns()
         for t in self.tags:
             r = self.rows[t]
             put(t, 10, line)
-            put({"M5": "Scalp", "M15": "Short-term", "M30": "Intraday"}[t], 44, line)
-            put("Trend:", 150, line)
-            put(r["trend"], 192, line)
-            put("Regime:", 282, line)
-            put(r["regime"], 330, line)
+            put({"M5": "Scalp", "M15": "Short-term", "M30": "Intraday"}[t],
+                10 + 4 * EM, line)
+            put("Trend:", cA, line)
+            put(r["trend"], vA, line)
+            put("Regime:", cB, line)
+            put(r["regime"], vB, line)
             line += 1
-            put("Signal:", 150, line)
+            put("Signal:", cA, line)
             #  Part 2: a blocked row shows the trade it WOULD have fired,
             #  greyed out (grey is a colour, not a character - the walk
             #  shows the same word either way)
@@ -350,20 +372,19 @@ class Panel:
                     sig_dir = 1
                 elif r["score"] <= -2:
                     sig_dir = -1
-            put({"1": "BUY", "-1": "SELL", "0": "HOLD"}[str(sig_dir)], 192, line)
-            put("Score:", 282, line)
-            put("%+d / 3" % r["score"], 330, line)
+            put({"1": "BUY", "-1": "SELL", "0": "HOLD"}[str(sig_dir)], vA, line)
+            put("Score:", cB, line)
+            put("%+d / 3" % r["score"], vB, line)
             line += 1
 
         # ---- Group 2 -----------------------------------------------------
         separators.add(line)                     # the separator between groups
         line += 1
-        cA, vA, cB, vB, cC, vC = self.plan_columns()
         for t in self.tags:
             p = self.plans[t]
             put(p["head"], 10, line)
             if p["kind"]:
-                put(p["kind"], 44, line)
+                put(p["kind"], 10 + 5 * EM, line)
             if p["lines"] == 1 and p["note"]:
                 put(p["note"], cA, line)
             for l in range(p["lines"]):
@@ -403,6 +424,22 @@ class Panel:
         for line, txt, w in over:
             print("  !! line %d ends at %.0f px in a %d px panel: %r"
                   % (line, w, self.panel_w, txt))
+
+        # ---- and no two pieces of text may share a pixel ------------------
+        #  Every caption is followed by its value at caption x + 8 em, and
+        #  every column by the next one at value + 2 em, so this should be
+        #  impossible at any font size - which is exactly why it is checked
+        #  rather than assumed.
+        by_line = {}
+        for line, x0, x_end, txt in placed:
+            by_line.setdefault(line, []).append((x0, x_end, txt))
+        for line, spans in sorted(by_line.items()):
+            spans.sort()
+            for (a0, a1, at), (b0, b1, bt) in zip(spans, spans[1:]):
+                if b0 < a1 - 0.5:
+                    over.append((line, "%s | %s" % (at, bt), b0 - a1))
+                    print("  !! line %d: %r overlaps %r by %.1f px"
+                          % (line, at, bt, a1 - b0))
         self.placed = placed
         return over
 
@@ -460,20 +497,74 @@ def sweep():
     return px > 0.5
 
 
+def layout_sweep():
+    """Draw the widest case at every DPI and font size and prove two things:
+    no line passes the panel's right edge, and no two pieces of text share a
+    pixel.  The grid is built in em, so this is meant to hold everywhere -
+    the check is here so a future fixed pixel cannot quietly break it."""
+    print("\n" + "=" * 96)
+    print("Layout sweep - does the grid hold at every DPI and font size?")
+    print("=" * 96)
+    global FONT, DPI, EM, EM_BASE, RENDER_CW, CELL
+    keep = (FONT, DPI, EM, EM_BASE, RENDER_CW, CELL)
+    fails = []
+    try:
+        for dpi in (72, 96, 120, 144, 192):
+            worst = 0
+            for size in range(6, 17):
+                FONT, DPI = size, dpi
+                EM = char_w(size, dpi)
+                EM_BASE = char_w(9, dpi)
+                RENDER_CW = size * dpi / 72.0 * ADV_CONSOLAS
+                CELL = RENDER_CW
+                p = Panel("XAUUSD", SYMBOLS["XAUUSD-2d"], 200.0)
+                p.price = 4285.70
+                p.set_reading("M5",  direction=-1, score=-3,
+                              trend="Going down", regime="Steady")
+                p.set_reading("M15", direction=0, score=3,
+                              trend="Going up", regime="Choppy")
+                p.set_reading("M30", direction=-1, score=-2,
+                              trend="Going down", regime="Steady")
+                p.update_plan()
+                grid, last, seps, placed = p.draw()
+                for ln, x0, x_end, txt in placed:
+                    if x_end > p.panel_w - 3:
+                        fails.append((dpi, size, "right edge", ln, txt))
+                by = {}
+                for ln, x0, x_end, txt in placed:
+                    by.setdefault(ln, []).append((x0, x_end, txt))
+                for ln, spans in by.items():
+                    spans.sort()
+                    for (a0, a1, at), (b0, b1, bt) in zip(spans, spans[1:]):
+                        if b0 < a1 - 0.5:
+                            fails.append((dpi, size, "overlap", ln, "%s|%s" % (at, bt)))
+                worst = max(worst, p.panel_w)
+            print("  dpi %-3d  sizes 6-16: %s (widest panel %d px)"
+                  % (dpi, "clean" if not fails else "PROBLEMS", worst))
+    finally:
+        FONT, DPI, EM, EM_BASE, RENDER_CW, CELL = keep
+    for f in fails[:8]:
+        print("  !! dpi %d font %d: %s on line %d: %r" % f)
+    if not fails:
+        print("  every size 6-16 at every DPI: no overlap, nothing past the edge")
+    return bool(fails)
+
+
 def panel_need_at(p, em):
     """PlanWidthNeed()/NoticeWidth() with a given pixel width per character."""
-    cA, cB, cC = PLAN_COL_A, PLAN_COL_B, PLAN_COL_C
-    vA, vB = cA + em * PLAN_LBL_C, cB + em * PLAN_LBL_C
-    wA = max([len(q["val"][(l, 0)]) for q in p.plans.values()
-              for l in range(q["lines"]) if (l, 0) in q["val"]] or [0])
-    cB = max(cB, vA + wA * em + em * 2)
+    cA = col_x(PLAN_COL_A, em)
+    vA = cA + em * PLAN_LBL_C
+    wA = max([10] + [len(q["val"][(l, 0)]) for q in p.plans.values()
+                     for l in range(q["lines"]) if (l, 0) in q["val"]]) * em
+    cB = max(col_x(PLAN_COL_B, em), vA + wA + em * 2)
     vB = cB + em * PLAN_LBL_C
-    wB = max([len(q["val"][(l, 1)]) for q in p.plans.values()
-              for l in range(q["lines"]) if (l, 1) in q["val"]] or [0])
-    cC = max(cC, vB + wB * em + em * 2)
+    wB = max([6] + [len(q["val"][(l, 1)]) for q in p.plans.values()
+                    for l in range(q["lines"]) if (l, 1) in q["val"]]) * em
+    cC = max(col_x(PLAN_COL_C, em), vB + wB + em * 2)
     vC = cC + em * PLAN_LBL_C
     need = max(PLAN_W_MIN, 10 + len(NOTICE) * em + 10,
-               44 + len("pending +3/3") * em + 10)
+               10 + 5 * em + len("pending +3/3") * em + 10,
+               vA + 5 * em + 10, vB + 6 * em + 10)
     for q in p.plans.values():
         if q["lines"] == 1:
             if q["note"]:
@@ -556,6 +647,7 @@ def main():
                 price=4285.70)
 
     bad += [("sweep", 0.0, 0.0)] if sweep() else []
+    bad += [("layout", 0.0, 0.0)] if layout_sweep() else []
 
     print("\n" + "=" * 96)
     if bad:

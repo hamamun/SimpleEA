@@ -181,7 +181,7 @@ input long                InpMagicBase    = 202610;          // Base magic numbe
 input group "=== Panel appearance ==="
 input int      InpPanelX      = 12;          // Panel X offset (px)
 input int      InpPanelY      = 24;          // Panel Y offset (px)
-input int      InpFontSize    = 9;           // Font size
+input int      InpFontSize    = 10;          // Font size
 input string   InpFont        = "Consolas";  // Font (monospaced aligns best)
 input color    InpBgColor     = C'48,48,48'; // Panel background
 input color    InpTitleColor  = clrWhite;    // Title colour
@@ -227,15 +227,14 @@ input group "=== Range mode (choppy markets) ==="
 //  play the trend game as before; Choppy rows (H below the revert
 //  threshold - moves genuinely come back) play the RANGE game: entry at
 //  the box band, target at the box midpoint, stop beyond the band.  All
-//  numbers below are gates, not guesses - every one must pass or the
+//  the box numbers are gates, not guesses - every one must pass or the
 //  row stands aside and the plan block says why.
+//  Only the on/off switch is an input: "do I want chop traded at all" is
+//  a user preference.  The six numbers that define the box were inputs
+//  too until they stopped earning a decision - they are calibration, so
+//  they now live in THE RANGE PROFILE below, one value for all three
+//  timeframes, exactly like the trade profile.
 input bool     InpRangeMode    = true;       // Range mode: trade the box when choppy (default ON)
-input int      InpRangeBars    = 20;         // Range box = last N closed bars
-input double   InpRangeMinATR  = 2.0;        // Box must be at least this many ATR tall
-input double   InpRangeSpreadX = 3.0;        // Half-box target must be >= this many spreads
-input double   InpRangeERMax   = 0.40;       // Efficiency above this => a trend, not a box
-input double   InpRangeSLATR   = 1.0;        // Range stop = band + this many ATR
-input int      InpValidBarsRange = 8;        // Range fade validity in bars (the box-kill is its real guard)
 
 input group "=== Market closed detection ==="
 //  While the symbol cannot be traded (weekend, daily break, symbol halt)
@@ -283,6 +282,30 @@ input int      InpClosedStaleMin = 30;       // Also closed: no quote for this m
 #define HURST_TREND     0.55      // H above this = persistent: play the trend game
 #define HURST_REVERT    0.45      // H below this = anti-persistent: play the range game
 
+//  ---- THE RANGE PROFILE (baked in: the tested box geometry) ----------
+//  Same reasoning as the two blocks above: these are the calibration the
+//  box trade was measured with, one set for all three timeframes, and
+//  none of them is a preference.  They used to be six inputs; only the
+//  on/off switch is still one.  If your broker's spread is genuinely
+//  not the one this was measured on, the single number worth
+//  re-exposing is RANGE_SPREAD_X - the cost gate is the only one that
+//  is account-specific rather than a property of the price series.
+#define RANGE_BARS      20        // range box = the last N closed bars' highs/lows
+#define RANGE_SL_ATR    1.0       // range stop = opposite band + this many ATR
+#define RANGE_MIN_RR    1.0       // box must be tall enough that half-box >= stop risk
+//  The height gate is DERIVED, never typed twice: half the box is the
+//  target (box/2 ATR) and the stop is RANGE_SL_ATR, so requiring
+//  half-box >= RANGE_MIN_RR x stop is the same as box >= 2 x 1.0 x 1.0
+//  ATR.  Change RANGE_SL_ATR and the height floor follows it; the RR
+//  cannot silently drop because two numbers drifted apart.
+#define RANGE_MIN_ATR   (2.0 * RANGE_SL_ATR * RANGE_MIN_RR)
+#define RANGE_SPREAD_X  3.0       // half-box target must clear at least this many spreads
+#define RANGE_ER_MAX    0.40      // efficiency above this = a walk, not a box
+//  NOT HURST_REVERT on purpose: H reads ~256 bars of memory, the E/R
+//  reads the box's own 20.  Reusing 0.45 here would let 0.40-0.45 walks
+//  in as boxes - a different question, a different window.
+#define RANGE_VALID_BARS 8        // range fade leash in bars (the box-kill is the real guard)
+
 #define PEND_ATR        0.5       // pending entry sits this many ATR from the market
 #define VALID_BARS      3         // trend reading's leash in bars (research/HORIZON.md)
 #define RISK_SCORE3_X   2.0       // score 3 risks this multiple of the score-2 percentage
@@ -291,6 +314,11 @@ input int      InpClosedStaleMin = 30;       // Also closed: no quote for this m
 #define HEAD_H      34     // height of the header band (title + symbol line)
 #define PLAN_W_MIN  406    // panel width with no plan showing
 #define PLAN_LINES  3      // lines an ACTIVE timeframe uses (1 for HOLD)
+//  The three column anchors are the FONT-9 design, not raw pixels: ColX()
+//  scales them by em / em(9), so they are the same columns at every font
+//  size and the two groups keep lining up.  PLAN_LBL_C is what guarantees
+//  the gap - a value starts 8 characters (widest caption + a space) after
+//  its label.
 #define PLAN_COL_A  150    // first cell column: aligns with "Trend:" above
 #define PLAN_COL_B  282    // second cell column: aligns with "Regime:" above
 #define PLAN_COL_C  414    // third cell column: used by the "Valid" cell
@@ -302,9 +330,9 @@ input int      InpClosedStaleMin = 30;       // Also closed: no quote for this m
 #define AUTO_W_MIN  420    // minimum width for the 2nd Panel
 #define AUTO_LINES  4      // lines per active trade/order card in the 2nd Panel
 #define AUTO_SEP_H  10     // gap between cards in the 2nd Panel
-#define AUTO_COL_A  150    // first cell column in the 2nd Panel
-#define AUTO_COL_B  320    // second cell column in the 2nd Panel
-#define AUTO_COL_C  480    // third cell column in the 2nd Panel
+#define AUTO_COL_A  150    // first cell column in the 2nd Panel (font-9 anchors,
+#define AUTO_COL_B  320    // second cell column - scaled by ColX() like the
+#define AUTO_COL_C  480    // third cell column - main panel's columns)
 #define AUTO_LBL_A  9      // label width in chars for Col A ("Waiting: ")
 #define AUTO_LBL_B  11     // label width in chars for Col B ("Distance: ")
 #define AUTO_LBL_C  5      // label width in chars for Col C ("Ask: " / "Bid: ")
@@ -393,7 +421,7 @@ int BarsNeeded()
    if(hneed + 50 > need)  need = hneed + 50;
 
    //  Short lookbacks: only matter if someone sets them very large.
-   if(InpRangeBars + 5 > need) need = InpRangeBars + 5;
+   if(RANGE_BARS    + 5 > need) need = RANGE_BARS    + 5;
    if(ATR_PERIOD    + 5 > need) need = ATR_PERIOD    + 5;
    if(InpERPeriod   + 5 > need) need = InpERPeriod   + 5;
 
@@ -981,7 +1009,7 @@ void EvaluateRow(int idx)
       else
       {
          // ---- the box: actual highs and lows of the last N closed bars
-         int    nb   = MathMax(5, InpRangeBars);
+         int    nb   = MathMax(5, RANGE_BARS);
          int    from = MathMax(0, n - nb);
          double top  = -DBL_MAX;
          double bot  =  DBL_MAX;
@@ -1000,13 +1028,13 @@ void EvaluateRow(int idx)
          string why = "";
          if(atr <= 0.0 || spread < 0.0 || n < nb || top <= bot)
             why = "chop — no valid box yet";      // data or geometry not there
-         else if(top - bot < InpRangeMinATR * atr)
+         else if(top - bot < RANGE_MIN_ATR * atr)
             why = "chop — no valid box yet";      // box too flat to trade
-         else if(ER >= InpRangeERMax)
+         else if(ER >= RANGE_ER_MAX)
             why = "chop — no valid box yet";      // it is a walk, not a box
          else if(bid > top || bid < bot)
             why = "chop — no valid box yet";      // price broke the box
-         else if(half < InpRangeSpreadX * spread)
+         else if(half < RANGE_SPREAD_X * spread)
             why = "chop — nothing clears the spread";   // the cost gate
 
          if(why != "")
@@ -1038,7 +1066,7 @@ void EvaluateRow(int idx)
    //  (trend <-> range), or the old leash has run out - the very bars
    //  the auto-trader expires and re-places a waiting order on.  A row
    //  that stands aside carries no leash at all.
-   int  leash = (mode == 2) ? MathMax(1, InpValidBarsRange)
+   int  leash = (mode == 2) ? MathMax(1, RANGE_VALID_BARS)
                             : VALID_BARS;
    int  tfSec = (int)PeriodSeconds(g_rows[idx].tf);
    long age   = leash + 1;                        // unknown age: treat the leash as spent
@@ -1306,14 +1334,14 @@ void UpdatePlanRow(int i)
    // ---- stop and target ---------------------------------------------
    //  Trend rows keep the per-timeframe ATR profiles (scalp aims near,
    //  intraday aims far).  Range rows are pure box geometry: entry at
-   //  the OPPOSITE band, stop = band + InpRangeSLATR ATR, target =
+   //  the OPPOSITE band, stop = band + RANGE_SL_ATR ATR, target =
    //  half the box (band -> midpoint).  Neither is ever shrunk by hand.
    int slPts, tpPts;
    if(isRange)
    {
       planEntry = ValidLimitPrice(dir, (dir > 0) ? g_rows[i].rngBot : g_rows[i].rngTop,
                                   bid, ask, point);
-      slPts = (int)MathMax(1.0, MathRound(InpRangeSLATR * atr / point));
+      slPts = (int)MathMax(1.0, MathRound(RANGE_SL_ATR * atr / point));
       tpPts = (int)MathMax(1.0, MathRound(0.5 * (g_rows[i].rngTop - g_rows[i].rngBot) / point));
    }
    else
@@ -1382,12 +1410,12 @@ void UpdatePlanRow(int i)
 
    // ---- how long this reading is worth acting on -------------------
    //  Trend readings live VALID_BARS closed bars (the measured median
-   //  life, research/HORIZON.md).  Range fades get InpValidBarsRange:
+   //  life, research/HORIZON.md).  Range fades get RANGE_VALID_BARS:
    //  the box is re-measured every bar and a close outside it already
    //  kills both the pending and the position, so a longer leash costs
    //  nothing - it only stops the cancel / re-place churn every 3 bars
    //  and the one-bar gap at the band that churn leaves behind.
-   int vBars = (g_rows[i].mode == 2) ? MathMax(1, InpValidBarsRange)
+   int vBars = (g_rows[i].mode == 2) ? MathMax(1, RANGE_VALID_BARS)
                                      : VALID_BARS;
    datetime until  = 0;
    datetime sigBar = LastClosedBarTime(_Symbol, g_rows[i].tf);
@@ -2701,13 +2729,13 @@ void ManageAutoBar()
       {
          int  dir     = g_auto[i].dir;
          int  tfSec   = PeriodSeconds(g_rows[i].tf);
-         //  Range fades live on InpValidBarsRange: the box-kill above
+         //  Range fades live on RANGE_VALID_BARS: the box-kill above
          //  (a close outside the box) is their real invalidation, and
          //  the pending is refreshed to the new plan on every closed
          //  bar anyway.  Expiring them on the 3-bar trend leash only
          //  produced a cancel -> one-bar gap at the band -> re-place
          //  cycle while the thesis was intact.
-         int  vBars   = g_auto[i].isRange ? MathMax(1, InpValidBarsRange)
+         int  vBars   = g_auto[i].isRange ? MathMax(1, RANGE_VALID_BARS)
                                           : VALID_BARS;
          bool expired = (g_auto[i].placedBar > 0 && tfSec > 0 &&
                          g_rows[i].lastBar > g_auto[i].placedBar &&
@@ -3363,6 +3391,34 @@ int CharW(int size)
 }
 
 //+------------------------------------------------------------------+
+//  THE COLUMN GRID - every x in the panel, scaled by the font size.
+//
+//  The panel is a monospaced table, so one number sizes everything: em,
+//  the pixel advance of one character (CharW).  Before this, the column
+//  anchors were raw pixels tuned at the old 9-point default - which is
+//  fine until the font grows: at 10 points "Signal:" alone is 7 em wide
+//  and the value still started at x+192, so the caption ran into its
+//  own value by a few pixels and the panel looked crowded.
+//
+//  Now the font-9 design (150 / 282 / 414, and the kind column at 5 em)
+//  is only a set of reference anchors: ColX() scales them around the left
+//  padding by em / em(9), so raising the font widens every column in
+//  proportion instead of squeezing text into the next label.  The value
+//  x of a column is its label x plus PLAN_LBL_C (the widest label plus
+//  a space), which is what actually guarantees the gap.
+//+------------------------------------------------------------------+
+int EmBase()
+{
+   int b = CharW(9);                 // the point size the anchors were drawn at
+   return((b > 0) ? b : 1);
+}
+
+int ColX(int designPx)
+{
+   return(10 + (designPx - 10) * CharW(InpFontSize) / EmBase());
+}
+
+//+------------------------------------------------------------------+
 //  Remove one panel object by short name.  Safe to call whether or not
 //  the object exists, so callers never have to check first.
 //+------------------------------------------------------------------+
@@ -3471,6 +3527,13 @@ void DrawSupportedPanel()
              InpTitleColor, InpFontSize, true);
 
    // ---- two lines per timeframe -------------------------------------
+   //  One column grid for both groups: the plan's captions and the row's
+   //  "Trend:" / "Regime:" / "Signal:" / "Score:" labels share these x
+   //  positions, so the two groups line up at every font size.
+   int cA, vA, cB, vB, cC, vC;
+   PlanColumns(cA, vA, cB, vB, cC, vC);
+   int styleX = pad + 4 * em;        // clear of the 3-char timeframe tag
+
    //  Line 1 (plain words, every value NAMED so nothing is ambiguous):
    //     Trend: Going up      Regime: Steady
    //  Line 2 (the original trading read, kept from the first panel):
@@ -3484,23 +3547,23 @@ void DrawSupportedPanel()
 
       MakeLabel("tf" + sfx,    x + pad,      ry, g_rows[i].tag,
                 clrWhite, InpFontSize, false);
-      MakeLabel("style" + sfx, x + pad + 34, ry, g_rows[i].style,
+      MakeLabel("style" + sfx, x + styleX, ry, g_rows[i].style,
                 clrGray, InpFontSize, false);
 
-      MakeLabel("trendCap" + sfx,  x + 150, ry, "Trend:",
+      MakeLabel("trendCap" + sfx,  x + cA, ry, "Trend:",
                 clrGray, InpFontSize, false);
-      MakeLabel("regimeCap" + sfx, x + 282, ry, "Regime:",
+      MakeLabel("regimeCap" + sfx, x + cB, ry, "Regime:",
                 clrGray, InpFontSize, false);
-      MakeLabel("signalCap" + sfx, x + 150, ry + rowH, "Signal:",
+      MakeLabel("signalCap" + sfx, x + cA, ry + rowH, "Signal:",
                 clrGray, InpFontSize, false);
-      MakeLabel("scoreCap" + sfx,  x + 282, ry + rowH, "Score:",
+      MakeLabel("scoreCap" + sfx,  x + cB, ry + rowH, "Score:",
                 clrGray, InpFontSize, false);
 
       if(g_rows[i].ok)
       {
-         MakeLabel("dir" + sfx, x + 192, ry, PlainTrendText(g_rows[i].direction),
+         MakeLabel("dir" + sfx, x + vA, ry, PlainTrendText(g_rows[i].direction),
                    DirectionColor(g_rows[i].direction), InpFontSize + 1, false);
-         MakeLabel("regimeVal" + sfx, x + 330, ry, RegimeText(i),
+         MakeLabel("regimeVal" + sfx, x + vB, ry, RegimeText(i),
                    RegimeColor(i), InpFontSize + 1, false);
          //  Part 2: a blocked row shows the trade it WOULD have fired,
          //  greyed out - the gate now has a word and a colour instead of
@@ -3512,22 +3575,22 @@ void DrawSupportedPanel()
             if(g_rows[i].score >= InpBuyScore)       { sigDir = 1;  greyed = true; }
             else if(g_rows[i].score <= InpSellScore) { sigDir = -1; greyed = true; }
          }
-         MakeLabel("signal" + sfx, x + 192, ry + rowH,
+         MakeLabel("signal" + sfx, x + vA, ry + rowH,
                    DirectionText(sigDir),
                    greyed ? clrGray : DirectionColor(sigDir), InpFontSize + 1, false);
-         MakeLabel("score" + sfx, x + 330, ry + rowH,
+         MakeLabel("score" + sfx, x + vB, ry + rowH,
                    StringFormat("%+d / 3", g_rows[i].score),
                    greyed ? clrGray : DirectionColor(sigDir), InpFontSize + 1, false);
       }
       else
       {
-         MakeLabel("dir" + sfx,       x + 192, ry, "Waiting",
+         MakeLabel("dir" + sfx,       x + vA, ry, "Waiting",
                    clrDimGray, InpFontSize, false);
-         MakeLabel("regimeVal" + sfx, x + 330, ry, "...",
+         MakeLabel("regimeVal" + sfx, x + vB, ry, "...",
                    clrDimGray, InpFontSize, false);
-         MakeLabel("signal" + sfx,    x + 192, ry + rowH, "...",
+         MakeLabel("signal" + sfx,    x + vA, ry + rowH, "...",
                    clrDimGray, InpFontSize, false);
-         MakeLabel("score" + sfx,     x + 330, ry + rowH, "...",
+         MakeLabel("score" + sfx,     x + vB, ry + rowH, "...",
                    clrDimGray, InpFontSize, false);
       }
    }
@@ -3558,25 +3621,47 @@ void PlanColumns(int &cA, int &vA, int &cB, int &vB, int &cC, int &vC)
 {
    int em = CharW(InpFontSize);
 
-   cA = PLAN_COL_A;
+   //  The anchors are the font-9 design; ColX() scales them by the font
+   //  the user actually picked.  The value x of each column is its label
+   //  x + PLAN_LBL_C em (the widest caption plus a space), so a value can
+   //  never start inside its own label - that was the 9-point-only gap.
+
+   //  Column A also has to clear the decision word that sits left of it
+   //  ("pending -2/3", or the same plus "[PLACED]" on a one-line block),
+   //  which starts at 5 em.  At a small font the scaled anchor alone is
+   //  not wide enough for both.
+   int kindW = StringLen("pending -2/3");
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      int w = StringLen(g_plans[i].kind);
+      string tag = AutoStatusTag(i);
+      if(tag != "" && g_plans[i].lines == 1)
+         w += 1 + StringLen(tag);
+      kindW = (int)MathMax(kindW, w);
+   }
+
+   cA = (int)MathMax(ColX(PLAN_COL_A), 10 + 5 * em + kindW * em + em);
    vA = cA + em * PLAN_LBL_C;
 
-   int wA = 0;
+   //  Seed with the widest GROUP-1 values in this column ("Going down" is
+   //  10 chars; the Signal cell is 4), then let the plan cells push the
+   //  next column right only if they are wider still.
+   int wA = 10 * em;
    for(int i = 0; i < TF_COUNT; i++)
       for(int l = 0; l < g_plans[i].lines; l++)
          if(g_plans[i].lbl[l][0] != "")
             wA = (int)MathMax(wA, StringLen(g_plans[i].val[l][0]) * em);
 
-   cB = (int)MathMax(PLAN_COL_B, vA + wA + em * 2);
+   cB = (int)MathMax(ColX(PLAN_COL_B), vA + wA + em * 2);
    vB = cB + em * PLAN_LBL_C;
 
-   int wB = 0;
+   int wB = 6 * em;                  // "Choppy" / "+3 / 3" from the rows
    for(int i = 0; i < TF_COUNT; i++)
       for(int l = 0; l < g_plans[i].lines; l++)
          if(g_plans[i].lbl[l][1] != "")
             wB = (int)MathMax(wB, StringLen(g_plans[i].val[l][1]) * em);
 
-   cC = (int)MathMax(PLAN_COL_C, vB + wB + em * 2);
+   cC = (int)MathMax(ColX(PLAN_COL_C), vB + wB + em * 2);
    vC = cC + em * PLAN_LBL_C;
 }
 
@@ -3606,8 +3691,14 @@ int PlanWidthNeed()
    PlanColumns(cA, vA, cB, vB, cC, vC);
    int em = CharW(InpFontSize);
 
-   //  timeframe tag at x+10 and the kind ("pending +3/3") at x+44
-   int need = 44 + StringLen("pending +3/3") * em + 10;
+   //  timeframe tag at x+10 and the kind ("pending +3/3") at x+5 em
+   int need = 10 + 5 * em + StringLen("pending +3/3") * em + 10;
+
+   //  Group 1 draws on this same grid, so its widest cell has a say too.
+   //  Sizing the panel from the plan alone clipped a reading at 10 points
+   //  ("Choppy" / "+3 / 3" are the last cells of the two line 2s).
+   need = (int)MathMax(need, vA + 5 * em + 10);      // "SELL" / "HOLD" / "Waiting"
+   need = (int)MathMax(need, vB + 6 * em + 10);      // "Choppy" / "+3 / 3"
 
    for(int i = 0; i < TF_COUNT; i++)
    {
@@ -3653,6 +3744,7 @@ void DrawPlanBlock(int x, int y)
 
    int cA, vA, cB, vB, cC, vC;
    PlanColumns(cA, vA, cB, vB, cC, vC);
+   int kindX = 10 + 5 * CharW(InpFontSize);     // clear of the "M30" tag
 
    int line = 0;
    for(int i = 0; i < TF_COUNT; i++)
@@ -3677,7 +3769,7 @@ void DrawPlanBlock(int x, int y)
       }
 
       if(kindTxt != "")
-         MakeLabel("planKind" + sfx, x + 44, ry, kindTxt, kc, InpFontSize, false);
+         MakeLabel("planKind" + sfx, x + kindX, ry, kindTxt, kc, InpFontSize, false);
       else
          DeleteObject("planKind" + sfx);
 
@@ -3686,7 +3778,7 @@ void DrawPlanBlock(int x, int y)
       if(autoTag != "" && g_plans[i].lines > 1)
       {
          color stClr = (g_auto[i].dir > 0) ? InpBuyColor : InpSellColor;
-         MakeLabel(stName, x + 44, ry + rowH, autoTag, stClr, InpFontSize, false);
+         MakeLabel(stName, x + kindX, ry + rowH, autoTag, stClr, InpFontSize, false);
       }
       else
          DeleteObject(stName);
@@ -3817,7 +3909,7 @@ void AutoColumns(int &cA, int &vA, int &cB, int &vB, int &cC, int &vC)
 {
    int em = CharW(InpFontSize);
 
-   cA = (int)MathMax(AUTO_COL_A, 10 + (int)StringLen("M30 | SELL LIMIT") * em + em * 2);
+   cA = (int)MathMax(ColX(AUTO_COL_A), 10 + (int)StringLen("M30 | SELL LIMIT") * em + em * 2);
    vA = cA + em * AUTO_LBL_A;
 
    int wA = 0;
@@ -3829,7 +3921,7 @@ void AutoColumns(int &cA, int &vA, int &cB, int &vB, int &cC, int &vC)
             wA = (int)MathMax(wA, StringLen(g_auto[i].val[l][0]) * em);
    }
 
-   cB = (int)MathMax(AUTO_COL_B, vA + wA + em * 2);
+   cB = (int)MathMax(ColX(AUTO_COL_B), vA + wA + em * 2);
    vB = cB + em * AUTO_LBL_B;
 
    int wB = 0;
@@ -3841,7 +3933,7 @@ void AutoColumns(int &cA, int &vA, int &cB, int &vB, int &cC, int &vC)
             wB = (int)MathMax(wB, StringLen(g_auto[i].val[l][1]) * em);
    }
 
-   cC = (int)MathMax(AUTO_COL_C, vB + wB + em * 2);
+   cC = (int)MathMax(ColX(AUTO_COL_C), vB + wB + em * 2);
    vC = cC + em * AUTO_LBL_C;
 }
 
@@ -4023,7 +4115,10 @@ void DrawNoticePanel(const string noticeTxt)
    //  notice on the line where the first timeframe row would have started,
    //  so an unsupported chart reads as the panel collapsing to its header
    //  rather than as a different widget appearing.
-   int noticeH = HEAD_H + 2 + (InpFontSize + 1) + 6;
+   //  the notice is drawn at font+1, so its own line needs that much room
+   //  plus a margin - at 10 points the old +6 left the text 2 px from the
+   //  bottom edge
+   int noticeH = HEAD_H + 2 + (InpFontSize + 1) + 8;
 
    MakeRect("bg", x, y, g_panelW, noticeH, InpBgColor, clrDimGray);
 

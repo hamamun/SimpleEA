@@ -218,7 +218,7 @@ reading never changes after the fact.
 | Group | Input | Default | Meaning |
 |---|---|---|---|
 | Panel | `InpPanelX/Y` | 12 / 24 | position in pixels |
-| | `InpFontSize` | 9 | font size |
+| | `InpFontSize` | **10** | font size — every column, the row height and the panel's own width scale with it, so a bigger font widens the grid instead of crowding the text |
 | | `InpBgColor` | `48,48,48` (`#303030`) | panel background colour |
 | Thresholds | `InpBuyScore` | 2 | score ≥ this ⇒ BUY |
 | | `InpSellScore` | −2 | score ≤ this ⇒ SELL |
@@ -226,12 +226,18 @@ reading never changes after the fact.
 | | `InpHurstWindow` | 256 | Hurst estimate window in bars |
 | | `InpERPeriod` | 20 | efficiency-ratio period |
 | | `InpERDead` | 0.10 | below this ⇒ dead market, force HOLD (with reason) |
-| Range | `InpRangeMode` | **true** | range game on (false ⇒ every chop row says `chop — range mode is off`) |
-| | `InpRangeBars` | 20 | range box = the last N closed bars' highs/lows |
-| | `InpRangeMinATR` | 2.0 | box must be at least this many ATR tall |
-| | `InpRangeSpreadX` | 3.0 | half-box target must clear at least this many spreads |
-| | `InpRangeERMax` | 0.40 | efficiency above this ⇒ a walk, not a box |
-| | `InpRangeSLATR` | 1.0 | range stop = opposite band + this many ATR |
+| Range | `InpRangeMode` | **true** | range game on (false ⇒ every chop row says `chop — range mode is off`). One switch for M5, M15 and M30 — each row still reads its own regime |
+| | *box geometry* | baked | `RANGE_BARS` 20 / `RANGE_SL_ATR` 1.0 / `RANGE_MIN_RR` 1.0 / `RANGE_SPREAD_X` 3.0 / `RANGE_ER_MAX` 0.40 / `RANGE_VALID_BARS` 8 — see below |
+
+**The range profile is baked in, not configurable.** Same reasoning as the trade profile: these
+six were inputs until they stopped earning a decision. The box is the last 20 closed bars'
+highs/lows; half of it must clear 3 spreads (the cost gate); it must be at least
+`2 × RANGE_SL_ATR × RANGE_MIN_RR` = 2.0 ATR tall (derived, so the height floor and the stop can
+never drift apart into a worse R:R); efficiency must be under 0.40 (a walk, not a box); the stop
+sits `RANGE_SL_ATR` = 1.0 ATR beyond the band; and a range fade lives 8 bars — the box-kill is
+its real invalidation. `RANGE_SPREAD_X` is the one number that is account-specific rather than a
+property of the price series: if your broker's spread is far from the one this was measured on,
+that is the constant to re-expose as an input.
 
 Raising `InpBuyScore` to 3 requires all three components to agree. The two gates are validated at
 load: if `InpBuyScore` is not greater than `InpSellScore` the EA refuses to start, because an
@@ -275,24 +281,24 @@ per timeframe**. Same two-column style as the group above it, and no heading lin
 this: the executor reads one row and acts on that timeframe.
 
 ```
- ┌──────────────────────────────────────────────────────────────────────────────────────┐
- │  SimpleEA  | Autotrading : On                                     |  XAUUSD  |  M5   │
- ├──────────────────────────────────────────────────────────────────────────────────────┤
- │  M5   Scalp         Trend: Going down      Regime: Steady                            │
- │                     Signal: SELL           Score: -3 / 3                             │
- │  M15  Short-term    Trend: Sideways        Regime: Mixed                             │
- │                     Signal: BUY            Score: +2 / 3                             │
- │  M30  Intraday      Trend: Going down      Regime: Steady                            │
- │                     Signal: SELL           Score: -2 / 3                             │
- ├──────────────────────────────────────────────────────────────────────────────────────┤
- │  M5   market -3/3   Entry:  4285.70        Lot:     0.28                             │
- │                     Stop:   4285.98 28pts  Target:  4285.45 25pts   Reach: ~1 bar    │
- │                     Risk:   7.84 USD       Reward:  7.00 USD        Valid: 3/3 bars  │
- │  M15  HOLD          mixed — no edge either way                                       │
- │  M30  pending -2/3  Entry:  4286.55        Lot:     0.01                             │
- │                     Stop:   4289.10 255pts Target:  4281.45 510pts  Reach: ~9 bars   │
- │                     Risk:   2.55 USD       Reward:  5.10 USD        Valid: 3/3 bars  │
- └──────────────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│  SimpleEA   | Autotrading :   On                                             |  XAUUSD  |  M5 │
+├─────────────────────────────────────────────────────────────────────────────────────────────┤
+│  M5   Scalp            Trend:   Going down       Regime:  Steady                              │
+│                        Signal:  SELL             Score:   -3 / 3                              │
+│  M15  Short-term       Trend:   Sideways         Regime:  Mixed                               │
+│                        Signal:  BUY              Score:   +2 / 3                              │
+│  M30  Intraday         Trend:   Going down       Regime:  Steady                              │
+│                        Signal:  SELL             Score:   -2 / 3                              │
+├─────────────────────────────────────────────────────────────────────────────────────────────┤
+│  M5    market -3/3     Entry:   4285.70          Lot:     0.28                                │
+│                        Stop:    4285.98 28pts    Target:  4285.45 25pts     Reach:  ~1 bar    │
+│                        Risk:    7.84 USD         Reward:  7.00 USD          Valid:  3/3 bars  │
+│  M15   HOLD            mixed — no edge either way                                             │
+│  M30   pending -2/3    Entry:   4286.55          Lot:     0.01                                │
+│                        Stop:    4289.10 255pts   Target:  4281.45 510pts    Reach:  ~9 bars   │
+│                        Risk:    2.55 USD         Reward:  5.10 USD          Valid:  3/3 bars  │
+└─────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Two Part 2 readings are visible at once: M15's Mixed regime **blocks** its `+2 / 3` score —
@@ -302,11 +308,11 @@ takes the range game instead, the block carries the box's own numbers — entry 
 band, stop = band + 1 ATR, target = half the box (the midpoint):
 
 ```
- ┌──────────────────────────────────────────────────────────────────────────────────────┐
- │  M5   range fade    Entry:  4286.60        Lot:     0.14                             │
- │                     Stop:   4286.88 28pts  Target:  4285.60 100pts  Reach: ~13 bars  │
- │                     Risk:   3.92 USD       Reward:  14.00 USD       Valid: 8/8 bars  │
- └──────────────────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────────────────────┐
+│  M5    range fade      Entry:   4286.60         Lot:     0.14                               │
+│                        Stop:    4286.88 28pts   Target:  4285.60 100pts   Reach:   ~13 bars │
+│                        Risk:    3.92 USD        Reward:  14.00 USD        Valid:   8/8 bars │
+└───────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **A HOLD or waiting timeframe takes a single line**, so the group is only as tall as it has
@@ -321,6 +327,15 @@ padded. A wider monospaced face (Courier New, Lucida Console, ~0.60 em) on a big
 long line touch the border: `research/walk_trade_plan.py` measures that across DPI 72–192 and
 sizes 6–16 and prints the answer at the end of its run.
 
+**The whole grid is sized by the font.** `CharW()` turns `InpFontSize` into the pixel advance of
+one character, and every x in the panel is derived from it: the three column anchors are the
+9-point design scaled by `ColX()`, a value always starts 8 characters (the widest caption plus a
+space) after its label, and the panel is measured from the same numbers before anything is
+drawn. That is what makes 10 the shipped default — at the old fixed 150 / 282 / 414 px columns a
+10-point `Signal:` alone was 7 characters wide and ran into its own value. `walk_trade_plan.py`
+now checks every rendered case for both a right-edge overflow *and* two pieces of text sharing a
+pixel, so a crowded column fails the run instead of the eye.
+
 | Your question | How the panel answers it |
 |---|---|
 | **1. Entry point** | `Entry:` is the price to use — the current ask/bid for that direction (market) or the pending price half an ATR better (pushed out further only when the spread or the broker's stops level demands it). **The EA decides which, per timeframe, from the score**: `market -3/3` = all three components agree, go now; `pending +2/3` = only two agree, so the entry waits for a better price. In the **range game** the box decides instead: `range fade` = a limit at the **opposite band** of the box, no matter what the score says. |
@@ -328,7 +343,7 @@ sizes 6–16 and prints the answer at the end of its run.
 | **3. Take profit** | `Target:` — price **and points**, with the same amount in account currency on the `Reward:` cell. |
 | **4. Stop loss** | `Stop:` — price **and points**, with the money on the `Risk:` cell. Widened automatically (and marked `(min)`) if your broker demands a minimum stop distance. |
 | **5. Reach** | `Reach:` — a rough bar count for how long the target may take (the target's own distance in ATR units, squared — a typical random walk, not a forecast). This is what makes scalp / short-term / intraday visibly different in **time**, not only in points. |
-| **6. Validity / Hold** | On an advice plan or a waiting pending order this is the idea's own leash: **3 bars** from the bar the idea was born (the measured median, see below), shown as a live countdown `left/total bars`. **Range fades use `InpValidBarsRange`** (default 8) instead — the box-kill is their real invalidation, so a longer leash only removes the cancel/re-place churn while the box holds. The idea is re-born when the direction changes, the game switches (trend ↔ range), or the leash runs out — the `0/total` bar is the rethink bar, the same bars the auto-trader expires and re-places a waiting order on. Once a **trade is open** the signal's leash is spent and the cell switches to `Hold: N bars (est ~M)` — bars held against the Reach estimate. |
+| **6. Validity / Hold** | On an advice plan or a waiting pending order this is the idea's own leash: **3 bars** from the bar the idea was born (the measured median, see below), shown as a live countdown `left/total bars`. **Range fades use `RANGE_VALID_BARS`** (baked at 8) instead — the box-kill is their real invalidation, so a longer leash only removes the cancel/re-place churn while the box holds. The idea is re-born when the direction changes, the game switches (trend ↔ range), or the leash runs out — the `0/total` bar is the rethink bar, the same bars the auto-trader expires and re-places a waiting order on. Once a **trade is open** the signal's leash is spent and the cell switches to `Hold: N bars (est ~M)` — bars held against the Reach estimate. |
 
 **Sizing: one switch and one number** (`InpUseRisk` / `InpUseMinLot`):
 
@@ -354,7 +369,6 @@ Inputs, all under *Trade plan*:
 | `InpUseRisk` | true | **Allow risk** — risk % of balance; false = no risk %, fixed lot ladder |
 | `InpUseMinLot` | false | Always advise the symbol's minimum lot |
 | `InpRiskPct` | 0.5 | Risk % per trade; score 3 risks double (1.0 %) |
-| `InpValidBarsRange` | 8 | Validity of **range fades** in bars — the box-kill already guards them, they just live longer than trend pendings |
 | `InpDetectClosed` | true | Collapse the panel to `Market Closed` (and stop trading) while the symbol is not trading |
 | `InpClosedStaleMin` | 30 | Quote-age in minutes that also counts as closed (0 = off) |
 
@@ -459,10 +473,10 @@ slightly worse exit.
      `Entry`, `SL`, and `TP1 / TP2 / TP3` to the new plan. If the score upgrades from `2/3` to
      `3/3` in the same direction, deletes the waiting pending order and opens the **Market order**
      immediately. Cancels if the direction changes, drops to `HOLD`, or reaches its validity
-     expiry — 3 closed bars for trend orders, `InpValidBarsRange` for range fades.
+     expiry — 3 closed bars for trend orders, `RANGE_VALID_BARS` (8) for range fades.
 7. **Range fades (Part 2 — Choppy rows):**
    - The order is **always a Pending Limit at the opposite band** of the box (never a market
-     order — the score has no say in the entry), with `Stop = band + InpRangeSLATR × ATR` and
+     order — the score has no say in the entry), with `Stop = band + RANGE_SL_ATR × ATR` and
      `TP3 = half the box` (the midpoint). The plan block shows it as `range fade`.
    - **Box-kill:** if a closed bar closes **outside the trade's box**, the pending is cancelled
      or the open trade closed immediately — the broken box is the thesis being invalidated.
