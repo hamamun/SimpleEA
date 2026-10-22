@@ -408,6 +408,7 @@ read-only mode):
 | Input | Default | Meaning |
 |---|---|---|
 | `InpAutoTrading` | **true** | Full-auto execution on (`true`) or read-only (`false`) |
+| `InpRequireM15M30SameTrend` | **false** | M15/M30 trend tie: `false` (default) = untied, each places on its own direction; `true` = both must be Going up or both Going down before either places |
 | `InpUseStopLoss` | **false** | Place initial Stop Loss on order when `true` (default is `false`): no SL is placed at entry — the pre-TP1 trailstop places the first SL at activation (or TP1 places it at Break-Even if the trailstop is off) |
 | `InpUseTrailStop` | **true** | Pre-TP1 stepped trailstop on/off (Entry→TP1 only; hands off to the TP1 logic at TP1) |
 | `InpTrailPctTight` | **40** | Trailstop % used when the regime is NOT Steady (10–70, clamped) |
@@ -426,9 +427,10 @@ slightly worse exit.
    (`M5`, `M15`, `M30`) at a time. When all three timeframes qualify, up to 3 independent trades
    can run simultaneously.
 2. **M5 vs M15/M30 Trend Alignment:**
-   - **M5** trades its own signal and score directly.
-   - **M15** and **M30** only place a new order when **both M15 and M30 trends match** (`Both Going up`
-     or `Both Going down`).
+   - Every timeframe trades its own signal and score directly by default: M15 and M30 are **untied**
+     (`InpRequireM15M30SameTrend=false`).
+   - Set `InpRequireM15M30SameTrend=true` to tie M15 and M30: then neither places a new order unless
+     **both M15 and M30 trends match** (`Both Going up` or `Both Going down`).
 3. **Market vs Pending Limit Placement:**
    - Score `3/3` (`+3` or `-3`) $\rightarrow$ opens a **Market order** immediately.
    - Score `2/3` (`+2` or `-2`) $\rightarrow$ places a **Pending Limit order** (`BUY LIMIT` or `SELL LIMIT`)
@@ -473,8 +475,9 @@ slightly worse exit.
    - **Pending Limit Order:** On each new closed candle in the same direction (`2/3`), updates
      `Entry`, `SL`, and `TP1 / TP2 / TP3` to the new plan. If the score upgrades from `2/3` to
      `3/3` in the same direction, deletes the waiting pending order and opens the **Market order**
-     immediately. Cancels if the direction changes, drops to `HOLD`, or reaches its validity
-     expiry — 3 closed bars for trend orders, `RANGE_VALID_BARS` (8) for range fades.
+     immediately. Cancels if the direction changes, drops to `HOLD`, the optional M15/M30 trend
+     tie stops matching, or it reaches its validity expiry — 3 closed bars for trend orders,
+     `RANGE_VALID_BARS` (8) for range fades.
 7. **Range fades (Part 2 — Choppy rows):**
    - The order is **always a Pending Limit at the opposite band** of the box (never a market
      order — the score has no say in the entry), with `Stop = band + RANGE_SL_ATR × ATR` and
@@ -484,8 +487,8 @@ slightly worse exit.
    - The **score watcher does not apply** to range fades (after TP1/TP2): the box midpoint, the
      stop and the box-kill govern their exits. The flip-to-opposite-direction and
      HOLD-in-profit rules still apply, exactly as for trend trades.
-   - M5 range fades follow **rule 2 as usual**: M5 places its own box trade entirely on its own;
-     M15/M30 still require their mutual trend match.
+   - Range fades follow **rule 2 as usual**: each timeframe places its own box trade by default;
+     M15/M30 require their mutual trend match only when `InpRequireM15M30SameTrend=true`.
 
 #### Second Panel Layout (Right or Bottom of Main Panel)
 

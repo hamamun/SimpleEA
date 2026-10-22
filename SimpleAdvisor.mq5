@@ -99,8 +99,8 @@
 //|   - Strictly 1 active trade/order per timeframe (M5, M15, M30)    |
 //|     at a time, tracked by per-timeframe magic numbers.            |
 //|   - Market order at score 3/3; Pending Limit order at score 2/3.  |
-//|   - M5 trades its own signal directly; M15 and M30 require their  |
-//|     trends (Going up / Going down) to match before placing.       |
+//|   - M5 trades its own signal directly. M15/M30 are untied by      |
+//|     default; tie them with InpRequireM15M30SameTrend = true.      |
 //|   - Three take-profit levels per order:                           |
 //|        TP3 = 100% of SimpleEA's advised target points             |
 //|        TP2 = 25% less than TP3 (75% of TP3)                       |
@@ -153,7 +153,7 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "2.12"
+#property version   "2.13"
 #property description "Multi-timeframe BUY/SELL/HOLD direction panel, trade plan and full-auto executor. M5 / M15 / M30 charts only."
 
 #ifndef M_PI
@@ -171,6 +171,7 @@ enum ENUM_AUTO_PANEL_POS
 //==================================================================
 input group "=== Autotrading ==="
 input bool                InpAutoTrading  = true;            // Autotrading (true = full auto, false = read-only)
+input bool                InpRequireM15M30SameTrend = false; // M15/M30 same trend required to place (false = untied)
 input bool                InpUseStopLoss  = false;           // Stoploss (true = place initial SL, false = only when trailstop / TP1 places it)
 input bool                InpUseTrailStop = true;            // Pre-TP1 stepped trailstop (true = on, Entry->TP1 only)
 input int                 InpTrailPctTight  = 40;            // Trailstop % when regime is NOT Steady (10-70)
@@ -1840,13 +1841,14 @@ double CalcTP2CloseLot(double curLot)
 }
 
 //+------------------------------------------------------------------+
-//  Rule 8: M5 trades its own signal directly; M15 and M30 require their
-//  trends (Going up / Going down) to match before placing an order.
+//  Rule 8: every timeframe trades its own signal directly.  Only when
+//  InpRequireM15M30SameTrend=true are M15 and M30 tied together: their
+//  trends (Going up / Going down) must match before either can place.
 //+------------------------------------------------------------------+
 bool TrendMatchForTF(int i)
 {
-   if(i == 0)
-      return(g_rows[0].ok && g_rows[0].direction != 0);
+   if(i == 0 || !InpRequireM15M30SameTrend)
+      return(g_rows[i].ok && g_rows[i].direction != 0);
    if(!g_rows[1].ok || !g_rows[2].ok)
       return(false);
    if(g_rows[1].direction == 0 || g_rows[2].direction == 0)
@@ -2614,7 +2616,7 @@ bool PlacePlanOrder(int i)
 //    - Manages waiting pending limit orders (updates Entry/SL/TP,
 //      upgrades 2/3 -> 3/3 to Market, or cancels on flip/HOLD/expiry).
 //    - Opens new Market/Limit orders for flat timeframes with a valid
-//      plan (M5 independent; M15 & M30 require matching trend).
+//      plan (independent rows; M15 & M30 tied only if that input is on).
 //+------------------------------------------------------------------+
 void ManageAutoBar()
 {
@@ -2775,7 +2777,7 @@ void ManageAutoBar()
             continue;
          }
 
-         // 1) Direction changed / HOLD / M15-M30 mismatch / expired -> cancel pending order
+         // 1) Direction changed / HOLD / trend gate failed / expired -> cancel pending order
          if(!g_rows[i].ok || g_rows[i].direction != dir || !TrendMatchForTF(i) ||
             expired || g_plans[i].state != 2)
          {

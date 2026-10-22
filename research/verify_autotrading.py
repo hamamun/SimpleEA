@@ -15,8 +15,9 @@ line and verifies every rule:
           pre-TP1 HOLD closes if in profit; pending 2/3 -> 3/3 upgrades to
           Market immediately; pending updates Entry/SL/TP on new bar or cancels
           on flip/HOLD/expiry
-  Rule 8  M5 trades its own signal directly; M15 and M30 require matching
-          trend direction between M15 and M30
+  Rule 8  Every timeframe trades its own signal directly by default
+          (InpRequireM15M30SameTrend=false); with that input true, M15
+          and M30 require matching trend direction between them
   Rule 10 2nd Panel header: "Autotrading | Trailstop : Off/On/Active | Stoploss : On/Off | SYMBOL"
           Main Panel header: "SimpleEA | Autotrading : On/Off | SYMBOL | TF" + full-width sep
   Rule 11 2nd Panel placement input InpAutoPanelPos (AUTO_POS_RIGHT default, or
@@ -194,6 +195,7 @@ class AutoTraderSim:
     #  first SL); the no-SL behaviour is verified explicitly further down
     #  with use_stop_loss=False.
     def __init__(self, symbol="XAUUSD", spec=None, balance=800.0, auto_trading=True,
+                 require_m15_m30_same_trend=False,
                  use_stop_loss=True, use_trail_stop=True, trail_pct_tight=40,
                  trail_pct_steady=55, auto_panel_pos=AUTO_POS_RIGHT, panel_x=12, panel_y=24,
                  use_risk=True, use_min_lot=False, risk2=0.5, risk3=1.0,
@@ -203,6 +205,7 @@ class AutoTraderSim:
         self.balance = balance
         self.cur = "USD"
         self.auto_trading = auto_trading
+        self.require_m15_m30_same_trend = require_m15_m30_same_trend
         self.use_stop_loss = use_stop_loss
         self.use_trail_stop = use_trail_stop
         self.trail_pct_tight = trail_pct_tight
@@ -303,8 +306,8 @@ class AutoTraderSim:
 
     def trend_match_for_tf(self, tag):
         """TrendMatchForTF() in SimpleAdvisor.mq5 (Rule 8)."""
-        if tag == "M5":
-            return self.rows["M5"]["ok"] and self.rows["M5"]["dir"] != 0
+        if tag == "M5" or not self.require_m15_m30_same_trend:
+            return self.rows[tag]["ok"] and self.rows[tag]["dir"] != 0
         r15, r30 = self.rows["M15"], self.rows["M30"]
         if not r15["ok"] or not r30["ok"]:
             return False
@@ -1126,10 +1129,14 @@ def main():
     print("  ok  Rule 1: InpAutoTrading=false keeps EA read-only and 2nd panel closed")
 
     # ------------------------------------------------------------------
-    # 3. Rule 8: M5 independent; M15 and M30 require trend match
+    # 3. Rule 8: all timeframes independent by default; the optional
+    #    InpRequireM15M30SameTrend=true ties M15 and M30 together
     # ------------------------------------------------------------------
     sim = AutoTraderSim(auto_trading=True)
-    # M5 SELL (-3/3), M15 BUY (+3/3), M30 SELL (-2/3) -> M15 and M30 clash!
+    check(sim.require_m15_m30_same_trend is False,
+          "the shipped default must be untied (InpRequireM15M30SameTrend=false)")
+    # M5 SELL (-3/3), M15 BUY (+3/3), M30 SELL (-2/3) -> M15/M30 clash,
+    # but untied rows place on their own directions anyway.
     sim.set_bar("M5", -1, -3, bar_time=1000)
     sim.set_bar("M15", 1, 3, bar_time=1000)
     sim.set_bar("M30", -1, -2, bar_time=1000)
@@ -1137,21 +1144,71 @@ def main():
     sim.manage_auto_bar()
     check(sim.auto["M5"].active and sim.auto["M5"].is_open,
           "M5 must open its market trade independently")
-    check(not sim.auto["M15"].active and not sim.auto["M30"].active,
-          "M15 and M30 must NOT place orders when M15 and M30 trends disagree")
+    check(sim.auto["M15"].active and sim.auto["M15"].is_open
+          and sim.auto["M30"].active and not sim.auto["M30"].is_open,
+          "untied M15/M30 must place on their own directions even when they disagree")
 
-    # Now M30 aligns with M15 (M15 BUY +3/3 market, M30 BUY +2/3 pending limit)
+    # Tied mode: the same clash blocks both M15 and M30 (M5 still places).
+    sim_tied = AutoTraderSim(auto_trading=True, require_m15_m30_same_trend=True)
+    sim_tied.set_bar("M5", -1, -3, bar_time=1000)
+    sim_tied.set_bar("M15", 1, 3, bar_time=1000)
+    sim_tied.set_bar("M30", -1, -2, bar_time=1000)
+    sim_tied.update_plan()
+    sim_tied.manage_auto_bar()
+    check(sim_tied.auto["M5"].active and sim_tied.auto["M5"].is_open,
+          "M5 must stay independent even when the M15/M30 tie is on")
+    check(not sim_tied.auto["M15"].active and not sim_tied.auto["M30"].active,
+          "tied M15 and M30 must NOT place orders when their trends disagree")
+    sim_tied.set_bar("M30", 1, 2, bar_time=1800)
+    sim_tied.update_plan()
+    sim_tied.manage_auto_bar()
+    check(sim_tied.auto["M15"].active and sim_tied.auto["M15"].is_open
+          and sim_tied.auto["M30"].active and not sim_tied.auto["M30"].is_open,
+          "tied M15/M30 must place once their trends match (Market M15, Limit M30)")
+
+    # Return the untied sim to the all-aligned state the panel checks use:
+    # M30 flips to BUY, so its SELL limit is replaced by a BUY limit.
     sim.set_bar("M30", 1, 2, bar_time=1800)
     sim.update_plan()
     sim.manage_auto_bar()
     check(sim.auto["M5"].active and sim.auto["M15"].active and sim.auto["M30"].active,
-          "When M15 and M30 trends match, all 3 timeframes have 1 independent order each")
+          "When all rows qualify, all 3 timeframes have 1 independent order each")
     check(sim.auto["M15"].is_open and not sim.auto["M30"].is_open,
           "Score 3/3 opens Market order (M15); score 2/3 places Pending Limit order (M30)")
-    print("  ok  Rule 2, 3 & 8: 1 order per TF, Market at 3/3, Limit at 2/3, M15/M30 trend match enforced")
+    print("  ok  Rule 2, 3 & 8: 1 order per TF, Market at 3/3, Limit at 2/3, M15/M30 untied by default / tied on request")
 
     over = sim.render_both_panels("State 1: All 3 Timeframes Active (M5 Market SELL, M15 Market BUY, M30 Pending BUY LIMIT)")
     check(not over, "2nd panel overflowed: %s" % (over,))
+
+    # The tie also governs waiting pendings: untied pendings survive an
+    # M15/M30 disagreement; tied pendings are cancelled when it appears.
+    pend_free = AutoTraderSim(auto_trading=True)
+    pend_free.set_bar("M15", 1, 2, bar_time=1000)
+    pend_free.set_bar("M30", -1, -2, bar_time=1000)
+    pend_free.update_plan()
+    pend_free.manage_auto_bar()
+    pend_free.set_bar("M15", 1, 2, bar_time=1900)
+    pend_free.set_bar("M30", -1, -2, bar_time=2800)
+    pend_free.update_plan()
+    pend_free.manage_auto_bar()
+    check(pend_free.auto["M15"].active and not pend_free.auto["M15"].is_open
+          and pend_free.auto["M30"].active and not pend_free.auto["M30"].is_open,
+          "untied M15/M30 pendings must survive their directions disagreeing")
+
+    pend_tied = AutoTraderSim(auto_trading=True, require_m15_m30_same_trend=True)
+    pend_tied.set_bar("M15", 1, 2, bar_time=1000)
+    pend_tied.set_bar("M30", 1, 2, bar_time=1000)
+    pend_tied.update_plan()
+    pend_tied.manage_auto_bar()
+    check(pend_tied.auto["M15"].active and pend_tied.auto["M30"].active,
+          "tied M15/M30 pendings must place while their trends match")
+    pend_tied.set_bar("M15", 1, 2, bar_time=1900)
+    pend_tied.set_bar("M30", 0, 0, bar_time=2800)
+    pend_tied.update_plan()
+    pend_tied.manage_auto_bar()
+    check(not pend_tied.auto["M15"].active,
+          "a tied M15 pending must cancel when M30 no longer matches")
+    print("  ok  Rule 8 pendings: untied pendings survive disagreement; tied pendings cancel")
 
     # ------------------------------------------------------------------
     # 3b. Per-timeframe stop/target profile: the three styles aim apart
