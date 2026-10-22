@@ -198,7 +198,7 @@ A **Choppy** row never reaches ±3 — the regime adds no trend vote in the rang
 trades through the box gates instead (entry, stop and target come from the box geometry, not
 from the score). A **Mixed** row stands aside whatever the score says.
 
-Kaufman's **Efficiency Ratio** is a dead-market gate: if ER is below `InpERDead` (default 0.10)
+Kaufman's **Efficiency Ratio** is a dead-market gate: if ER is below the standard `ER_DEAD` gate (0.10)
 the instrument is not travelling anywhere, so the row is forced to `HOLD` regardless of score —
 and now says so: `quiet — nothing worth trading`.
 
@@ -222,10 +222,7 @@ reading never changes after the fact.
 | | `InpBgColor` | `48,48,48` (`#303030`) | panel background colour |
 | Thresholds | `InpBuyScore` | 2 | score ≥ this ⇒ BUY |
 | | `InpSellScore` | −2 | score ≤ this ⇒ SELL |
-| Shared | `InpTrendL1` / `InpTrendL2` | 150 / 24 | Precision Trend filter periods (all three timeframes) |
-| | `InpHurstWindow` | 256 | Hurst estimate window in bars |
-| | `InpERPeriod` | 20 | efficiency-ratio period |
-| | `InpERDead` | 0.10 | below this ⇒ dead market, force HOLD (with reason) |
+| Engine | *standard engine* | baked | `TREND_L1/L2` 150 / 24 · `HURST_WINDOW` 256 · `ER_PERIOD` 20 · `ER_DEAD` 0.10 — not inputs since v2.12; SimpleEA applies them automatically, see below |
 | Range | `InpRangeMode` | **true** | range game on (false ⇒ every chop row says `chop — range mode is off`). One switch for M5, M15 and M30 — each row still reads its own regime |
 | | *box geometry* | baked | `RANGE_BARS` 20 / `RANGE_SL_ATR` 1.0 / `RANGE_MIN_RR` 1.0 / `RANGE_SPREAD_X` 3.0 / `RANGE_ER_MAX` 0.40 / `RANGE_VALID_BARS` 8 — see below |
 
@@ -244,14 +241,17 @@ load: if `InpBuyScore` is not greater than `InpSellScore` the EA refuses to star
 overlapping pair (say `-2` / `2` the wrong way round) would make score 0 pass the BUY test and the
 panel would call BUY forever.
 
-**One engine, three timeframes.** The trend filter is shared: `InpTrendL1` / `InpTrendL2` are set
-once and used by M5, M15 and M30 alike — each row applies them to *its own* closed bars, which is
-what makes the three rows disagree. These used to be two inputs per timeframe (six in all) that all
-shipped with the same default and were never set apart. They stay inputs because the periods are the
-one genuinely symbol-sensitive number in the engine: what counts as a trend on XAUUSD is not what
-counts on EURUSD. If one timeframe ever needs its own filter, that is a one-line change in code, not
-an input: `OnInit()` calls `ConfigureRow()` once per row and hands each row its own copy, so passing
-a different period for row 0 leaves M15 and M30 untouched.
+**One standard engine, three timeframes.** The trend filter is shared: `TREND_L1` / `TREND_L2` are
+set once — in the baked-in Engine Profile, not in the Inputs tab — and used by M5, M15 and M30 alike;
+each row applies them to *its own* closed bars, which is what makes the three rows disagree. These
+five numbers (the two trend periods, `HURST_WINDOW`, `ER_PERIOD`, `ER_DEAD`) were the "Shared engine
+settings" inputs until v2.11; since **v2.12** they are standard, like the trade/regime/range profiles,
+because none of them is a user preference — they are the calibration the engine was measured with, so
+SimpleEA simply applies them itself and states them once in the Experts log at startup. The trend
+periods remain the one genuinely symbol-sensitive pair: if a symbol class is ever *measured* to need
+its own, the fix is a one-line change in code, decided by the EA — not an input: `OnInit()` calls
+`ConfigureRow()` once per row and hands each row its own copy, so passing a different period for
+row 0 leaves M15 and M30 untouched.
 
 **The regime boundaries are not inputs, and that is deliberate.** `H > 0.55` is *Steady*,
 `H < 0.45` is *Choppy*, and everything between the two is *Mixed* — stand aside. Those two numbers
@@ -260,16 +260,17 @@ property of the series, not of the symbol: 0.5 is the coin-flip, and 0.55 / 0.45
 literature uses either side of it before it will call a regime at all (see `SIGNAL_LOGIC.md` §4).
 The measurement backs that up rather than assuming it — on real data H spans ~0.35–0.62 at p10–p90,
 so those two numbers land near the 30th/70th percentiles of the real distribution instead of being
-invented (§4.3). Only a different estimator moves them, not a different chart. What *is* an input is
-`InpHurstWindow` — how many bars the estimate is taken over — because that number does depend on the
-timeframe: 256 bars is five days on M30 and two days on M5.
+invented (§4.3). Only a different estimator moves them, not a different chart. The window the
+estimate is taken over — `HURST_WINDOW` (256 bars) — is standard for the same reason: it is five days
+on M30 and two days on M5, and the estimator needs that many bars on every row before its read is
+stable enough to label a regime.
 
 **History depth is automatic.** There is no bars-to-load input. The EA pulls **700 closed bars per
-timeframe** as its floor and raises that number itself when your own periods need more: four times
-the longest trend period (`InpTrendL1`), the Hurst window plus margin, or the range/ATR/E-R lookbacks
-(whichever is largest), capped at 50 000. Change `InpHurstWindow` to 900 or a trend period to 400
-and the pull follows on its own — there is nothing to keep in sync, and the panel still only ever
-reads closed, finished bars.
+timeframe** as its floor and raises that number itself if the standard engine ever needs more: four
+times the longest trend period (`TREND_L1`), the Hurst window plus margin, or the range/ATR/E-R
+lookbacks (whichever is largest), capped at 50 000. Recalibrate `HURST_WINDOW` to 900 or a trend
+period to 400 in the Engine Profile and the pull follows on its own — there is nothing to keep in
+sync, and the panel still only ever reads closed, finished bars.
 
 ---
 

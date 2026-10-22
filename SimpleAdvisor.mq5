@@ -57,7 +57,7 @@
 //|  the range game - it trades through the box gates instead.         |
 //|                                                                  |
 //|  Kaufman's Efficiency Ratio acts as a dead-market gate: below     |
-//|  InpERDead the market is not travelling anywhere, so any          |
+//|  ER_DEAD   the market is not travelling anywhere, so any          |
 //|  directional read is meaningless and the row is forced to HOLD    |
 //|  with "quiet - nothing worth trading" on the plan block.          |
 //|                                                                  |
@@ -153,7 +153,7 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "2.11"
+#property version   "2.12"
 #property description "Multi-timeframe BUY/SELL/HOLD direction panel, trade plan and full-auto executor. M5 / M15 / M30 charts only."
 
 #ifndef M_PI
@@ -205,22 +205,11 @@ input bool     InpUseRisk      = true;       // Allow risk (false = no risk %, f
 input bool     InpUseMinLot    = false;      // Always advise the symbol's minimum lot
 input double   InpRiskPct      = 0.5;        // Risk % per trade (score 3 risks double)
 
-input group "=== Shared engine settings ==="
-//  One filter for all three rows: M5, M15 and M30 run the same Precision
-//  Trend periods, each on its own timeframe's bars.  These used to be two
-//  inputs per timeframe - six knobs that all carried the same default and
-//  were never set apart - so they were collapsed into these.  A timeframe
-//  that genuinely needs its own eyes can still get them in code:
-//  ConfigureRow() in OnInit() hands each row its own copy, so passing a
-//  different period for one row costs one line and touches nothing else.
-//  The two periods stay inputs because they ARE symbol-sensitive - what
-//  counts as a trend on XAUUSD is not what counts on EURUSD - and the
-//  history pull above grows itself when you raise them.
-input int      InpTrendL1     = 150;         // Precision Trend long period  (all timeframes)
-input int      InpTrendL2     = 24;          // Precision Trend short period (all timeframes)
-input int      InpHurstWindow = 256;         // Hurst estimate window (bars)
-input int      InpERPeriod    = 20;          // Kaufman efficiency-ratio period
-input double   InpERDead      = 0.10;        // Efficiency below this => dead market, force HOLD
+//  (No engine-settings group: the Precision Trend periods, the Hurst
+//  window and the efficiency-ratio numbers are STANDARD - they are the
+//  tested calibration, not user preferences, so since v2.12 they live
+//  in THE ENGINE PROFILE in INTERNALS below and SimpleEA applies them
+//  automatically to all three rows.  See that block to recalibrate.)
 
 input group "=== Range mode (choppy markets) ==="
 //  Part 2: the regime now DECIDES instead of abstaining.  Steady rows
@@ -253,6 +242,30 @@ input int      InpClosedStaleMin = 30;       // Also closed: no quote for this m
 #define TF_TEXT     "M5/M15/M30"
 #define TRAIL_STEP_PCT 5.0   // pre-TP1 trailstop: SL jumps this many % per step of progress
 
+//  ---- THE ENGINE PROFILE (baked in: the standard engine) -----------
+//  These five were the "Shared engine settings" inputs until v2.11.
+//  They are standard now, for the same reason as the three profiles
+//  below: none of them is a user preference - they are the calibration
+//  the signal engine was measured with, and a wrong value silently
+//  changes the strategy instead of a convenience.  So SimpleEA simply
+//  applies them itself: one filter for all three rows, M5, M15 and M30
+//  each running the same periods on its own timeframe's bars.
+//  ConfigureRow() in OnInit() hands each row its own copy, so a
+//  timeframe that genuinely needs its own eyes can still get them in
+//  code - passing a different period for one row costs one line and
+//  touches nothing else.  The history pull (BarsNeeded) grows itself
+//  if a value here is ever raised.  The two trend periods are the one
+//  genuinely symbol-sensitive pair: if a symbol class is ever measured
+//  to need its own, the fix is a per-row value at ConfigureRow() time,
+//  decided by the EA - not a return to user knobs.  ER_PERIOD matches
+//  RANGE_BARS on purpose (the E/R reads the box's own bars), and
+//  ER_DEAD is an absolute dead-market gate, never a relative one.
+#define TREND_L1        150       // Precision Trend long period  (all timeframes)
+#define TREND_L2        24        // Precision Trend short period (all timeframes)
+#define HURST_WINDOW    256       // Hurst estimate window (bars, each timeframe's own)
+#define ER_PERIOD       20        // Kaufman efficiency-ratio period (= RANGE_BARS)
+#define ER_DEAD         0.10      // efficiency below this => dead market, force HOLD
+
 //  ---- THE TRADE PROFILE (baked in: this is the tested set) ----------
 //  These were inputs until they stopped earning a decision.  None of
 //  them is a user preference - they are the calibration the engine was
@@ -275,9 +288,10 @@ input int      InpClosedStaleMin = 30;       // Also closed: no quote for this m
 //  the 0.5 coin-flip before it will call a regime at all (SIGNAL_LOGIC.md
 //  section 4).  Nothing about gold, or about M5, moves those numbers -
 //  only a different estimator would - so they are not a dial.  The window
-//  the estimate is taken over IS a dial (InpHurstWindow): that one does
-//  depend on the timeframe, because 256 bars is five days on M30 and two
-//  days on M5.  Widen the band here and the panel goes quieter; narrow it
+//  the estimate is taken over (HURST_WINDOW in THE ENGINE PROFILE above)
+//  is standard for the same reason: 256 bars is five days on M30 and two
+//  days on M5, and the estimator needs that many bars to be stable on
+//  every row.  Widen the band here and the panel goes quieter; narrow it
 //  and it trades more - which is exactly why it is not a user input.
 #define HURST_TREND     0.55      // H above this = persistent: play the trend game
 #define HURST_REVERT    0.45      // H below this = anti-persistent: play the range game
@@ -397,9 +411,9 @@ ENUM_TIMEFRAMES g_drawnTf = (ENUM_TIMEFRAMES)0;  // timeframe the header was dra
 //     - E/R, ATR, range box : a handful of bars each
 //
 //  The pull is the largest of those, never below BARS_BASE.  So the
-//  default settings keep pulling 700, but raising the Hurst window to
-//  900 or a trend period to 400 raises the pull automatically -
-//  there is nothing to remember to change alongside them.
+//  standard profile keeps pulling 700, but raising the Hurst window to
+//  900 or a trend period to 400 in THE ENGINE PROFILE raises the pull
+//  automatically - there is nothing to remember to change alongside it.
 //+------------------------------------------------------------------+
 int BarsNeeded()
 {
@@ -408,14 +422,14 @@ int BarsNeeded()
    //  The trend filter's long period (shared by all three timeframes).
    //  Clamped BEFORE the multiply, so a typo (L1 = 900,000,000) cannot
    //  overflow the int and hand the loader a negative count.
-   int l1max = InpTrendL1;
+   int l1max = TREND_L1;
    if(l1max < 1)          l1max = 1;
    if(l1max > BARS_MAX)   l1max = BARS_MAX;
    int l1need = MathMin(BARS_MAX, BARS_WARMUP_X * l1max);
    if(l1need > need) need = l1need;
 
    //  Hurst window plus margin for the block averaging (same guard).
-   int hneed = InpHurstWindow;
+   int hneed = HURST_WINDOW;
    if(hneed < 32)         hneed = 32;
    if(hneed > BARS_MAX)   hneed = BARS_MAX;
    if(hneed + 50 > need)  need = hneed + 50;
@@ -423,7 +437,7 @@ int BarsNeeded()
    //  Short lookbacks: only matter if someone sets them very large.
    if(RANGE_BARS    + 5 > need) need = RANGE_BARS    + 5;
    if(ATR_PERIOD    + 5 > need) need = ATR_PERIOD    + 5;
-   if(InpERPeriod   + 5 > need) need = InpERPeriod   + 5;
+   if(ER_PERIOD     + 5 > need) need = ER_PERIOD     + 5;
 
    if(need > BARS_MAX) need = BARS_MAX;
    return(need);
@@ -465,17 +479,19 @@ int OnInit()
    //  One filter, one regime test, three timeframes: each row gets the
    //  shared numbers and applies them to its own closed bars.  (Give a
    //  row different numbers here and only that row changes.)
-   ConfigureRow(0, PERIOD_M5,  "M5",  "Scalp",      InpTrendL1, InpTrendL2,
+   ConfigureRow(0, PERIOD_M5,  "M5",  "Scalp",      TREND_L1, TREND_L2,
                 HURST_TREND,    HURST_REVERT,    SL_ATR_M5,  TP_ATR_M5);
-   ConfigureRow(1, PERIOD_M15, "M15", "Short-term", InpTrendL1, InpTrendL2,
+   ConfigureRow(1, PERIOD_M15, "M15", "Short-term", TREND_L1, TREND_L2,
                 HURST_TREND,    HURST_REVERT,    SL_ATR_M15, TP_ATR_M15);
-   ConfigureRow(2, PERIOD_M30, "M30", "Intraday",   InpTrendL1, InpTrendL2,
+   ConfigureRow(2, PERIOD_M30, "M30", "Intraday",   TREND_L1, TREND_L2,
                 HURST_TREND,    HURST_REVERT,    SL_ATR_M30, TP_ATR_M30);
 
-   if(InpTrendL1 < InpTrendL2)
+   //  The trend periods are baked in (THE ENGINE PROFILE), so this can
+   //  only trip for someone who has just edited them the wrong way round.
+   if(TREND_L1 < TREND_L2)
    {
       Print("SimpleEA: the long trend period must be greater than the short one. ",
-            "Set InpTrendL1 > InpTrendL2.");
+            "Set TREND_L1 > TREND_L2 in THE ENGINE PROFILE.");
       return(INIT_PARAMETERS_INCORRECT);
    }
    //  The regime boundaries are baked in, so this can only trip for
@@ -523,6 +539,12 @@ int OnInit()
       PrintFormat("SimpleEA: note - risking %.2f%% per trade (%.2f%% at score 3) is "
                   "far above the shipped 0.5%% / 1.0%%.", InpRiskPct,
                   InpRiskPct * RISK_SCORE3_X);
+
+   //  The standard engine, stated once so the log always records which
+   //  calibration produced the reads (these are not inputs any more).
+   PrintFormat("SimpleEA: standard engine - Precision Trend %d/%d, Hurst window %d bars, "
+               "E/R %d with dead-market gate %.2f (all three timeframes).",
+               TREND_L1, TREND_L2, HURST_WINDOW, ER_PERIOD, ER_DEAD);
 
    g_rowH   = InpFontSize + 11;
    // Each timeframe takes TWO lines: Trend/Regime on the first,
@@ -969,8 +991,8 @@ void EvaluateRow(int idx)
    //     Mixed   (in between)  -> stand aside: nothing is calculable
    //  Each row uses ITS OWN timeframe's eyes - M5's chop never touches
    //  M15/M30 and vice versa.
-   double H  = HurstExponent(c, last, InpHurstWindow);
-   double ER = EfficiencyRatio(c, last, InpERPeriod);
+   double H  = HurstExponent(c, last, HURST_WINDOW);
+   double ER = EfficiencyRatio(c, last, ER_PERIOD);
 
    int v3   = 0;
    int mode = 0;                          // 0 stand aside | 1 trend game | 2 range game
@@ -991,7 +1013,7 @@ void EvaluateRow(int idx)
 
    // ---- the decision -----------------------------------------------
    int dir = 0;
-   if(ER < InpERDead)
+   if(ER < ER_DEAD)
    {
       mode = 0;
       g_rows[idx].blockReason = "quiet — nothing worth trading";
