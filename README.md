@@ -116,7 +116,7 @@ timeframe, magic-number tagged), so treat it as a live trader and start on demo.
    and the *Incompatible chart* notice — drop it on an H1 chart and that is exactly what you will
    see. On a supported chart with a closed market (weekend, daily break), the same widget shows
    `Market Closed` instead.
-5. Colours, position, and font are all inputs under *Panel appearance*.
+5. Colours, position, and font are all inputs under *Panels & appearance*.
 
 > If a row shows `waiting ...`, the terminal has not finished downloading history for that
 > timeframe yet. Leave the chart open and it will fill in.
@@ -217,14 +217,15 @@ reading never changes after the fact.
 
 | Group | Input | Default | Meaning |
 |---|---|---|---|
-| Panel | `InpPanelX/Y` | 12 / 24 | position in pixels |
+| Signal & range | `InpBuyScore` | 2 | score ≥ this ⇒ BUY |
+| | `InpSellScore` | −2 | score ≤ this ⇒ SELL |
+| | `InpRangeMode` | **true** | range game on (false ⇒ every chop row says `chop — range mode is off`). One switch for M5, M15 and M30 — each row still reads its own regime |
+| Engine | *standard engine* | baked | `TREND_L1/L2` 150 / 24 · `HURST_WINDOW` 256 · `ER_PERIOD` 20 · `ER_DEAD` 0.10 — not inputs since v2.12; SimpleEA applies them automatically, see below |
+| | *box geometry* | baked | `RANGE_BARS` 20 / `RANGE_SL_ATR` 1.0 / `RANGE_MIN_RR` 1.0 / `RANGE_SPREAD_X` 3.0 / `RANGE_ER_MAX` 0.40 / `RANGE_VALID_BARS` 8 — see below |
+| Panels | `InpPanelX/Y` | 12 / 24 | position in pixels |
+| | `InpAutoPanelPos` | **Bottom** (`AUTO_POS_BOTTOM`) | Second panel placement: **Right** (beside Main Panel) or **Bottom** (below Main Panel) |
 | | `InpFontSize` | **10** | font size — every column, the row height and the panel's own width scale with it, so a bigger font widens the grid instead of crowding the text |
 | | `InpBgColor` | `48,48,48` (`#303030`) | panel background colour |
-| Thresholds | `InpBuyScore` | 2 | score ≥ this ⇒ BUY |
-| | `InpSellScore` | −2 | score ≤ this ⇒ SELL |
-| Engine | *standard engine* | baked | `TREND_L1/L2` 150 / 24 · `HURST_WINDOW` 256 · `ER_PERIOD` 20 · `ER_DEAD` 0.10 — not inputs since v2.12; SimpleEA applies them automatically, see below |
-| Range | `InpRangeMode` | **true** | range game on (false ⇒ every chop row says `chop — range mode is off`). One switch for M5, M15 and M30 — each row still reads its own regime |
-| | *box geometry* | baked | `RANGE_BARS` 20 / `RANGE_SL_ATR` 1.0 / `RANGE_MIN_RR` 1.0 / `RANGE_SPREAD_X` 3.0 / `RANGE_ER_MAX` 0.40 / `RANGE_VALID_BARS` 8 — see below |
 
 **The range profile is baked in, not configurable.** Same reasoning as the trade profile: these
 six were inputs until they stopped earning a decision. The box is the last 20 closed bars'
@@ -363,13 +364,13 @@ the same level.
 to type in yourself — nothing is sent. With it on, the executor places exactly these numbers, and
 the block keeps showing them while the trade runs (Entry/SL/TP from the live position).
 
-Inputs, all under *Trade plan*:
+Inputs are under *Trade plan & sizing*, followed by *Market closed detection*:
 
 | Input | Default | Meaning |
 |---|---|---|
 | `InpUseRisk` | true | **Allow risk** — risk % of balance; false = no risk %, fixed lot ladder |
-| `InpUseMinLot` | false | Always advise the symbol's minimum lot |
 | `InpRiskPct` | 0.5 | Risk % per trade; score 3 risks double (1.0 %) |
+| `InpUseMinLot` | false | Always advise the symbol's minimum lot |
 | `InpDetectClosed` | true | Collapse the panel to `Market Closed` (and stop trading) while the symbol is not trading |
 | `InpClosedStaleMin` | 30 | Quote-age in minutes that also counts as closed (0 = off) |
 
@@ -400,7 +401,7 @@ line would overflow.
 
 ---
 
-### Autotrading & Second Panel (`Autotrading`)
+### Autotrading & Second Panel (`Autotrading & order management`)
 
 Controlled by `InpAutoTrading` (**default `true`**, hands-free Full Auto mode; set `false` for
 read-only mode):
@@ -413,7 +414,6 @@ read-only mode):
 | `InpUseTrailStop` | **true** | Pre-TP1 stepped trailstop on/off (Entry→TP1 only; hands off to the TP1 logic at TP1) |
 | `InpTrailPctTight` | **40** | Trailstop % used when the regime is NOT Steady (10–70, clamped) |
 | `InpTrailPctSteady` | **55** | Trailstop % used in a Steady regime with a clear trend in the trade's direction (10–70, clamped) |
-| `InpAutoPanelPos` | **Bottom** (`AUTO_POS_BOTTOM`) | Second panel placement: **Right** (beside Main Panel) or **Bottom** (below Main Panel) |
 | `InpMagicBase` | 202610 | Base magic number (`+0` M5, `+1` M15, `+2` M30) |
 
 There is no slippage input. The allowance is derived per order from the live market, so one EA is

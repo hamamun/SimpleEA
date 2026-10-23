@@ -153,7 +153,7 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "2.13"
+#property version   "2.14"
 #property description "Multi-timeframe BUY/SELL/HOLD direction panel, trade plan and full-auto executor. M5 / M15 / M30 charts only."
 
 #ifndef M_PI
@@ -169,50 +169,19 @@ enum ENUM_AUTO_PANEL_POS
 //==================================================================
 //  INPUTS
 //==================================================================
-input group "=== Autotrading ==="
+input group "=== Autotrading & order management ==="
 input bool                InpAutoTrading  = true;            // Autotrading (true = full auto, false = read-only)
 input bool                InpRequireM15M30SameTrend = false; // M15/M30 same trend required to place (false = untied)
 input bool                InpUseStopLoss  = false;           // Stoploss (true = place initial SL, false = only when trailstop / TP1 places it)
 input bool                InpUseTrailStop = true;            // Pre-TP1 stepped trailstop (true = on, Entry->TP1 only)
 input int                 InpTrailPctTight  = 40;            // Trailstop % when regime is NOT Steady (10-70)
 input int                 InpTrailPctSteady = 55;            // Trailstop % in a Steady, clear trend (10-70)
-input ENUM_AUTO_PANEL_POS InpAutoPanelPos = AUTO_POS_BOTTOM; // Right panel placement (Right or Bottom)
 input long                InpMagicBase    = 202610;          // Base magic number (+0 M5, +1 M15, +2 M30)
 
-input group "=== Panel appearance ==="
-input int      InpPanelX      = 12;          // Panel X offset (px)
-input int      InpPanelY      = 24;          // Panel Y offset (px)
-input int      InpFontSize    = 10;          // Font size
-input string   InpFont        = "Consolas";  // Font (monospaced aligns best)
-input color    InpBgColor     = C'48,48,48'; // Panel background
-input color    InpTitleColor  = clrWhite;    // Title colour
-input color    InpBuyColor    = clrLime;     // "Going up" colour
-input color    InpSellColor   = clrTomato;   // "Going down" colour
-input color    InpHoldColor   = clrSilver;   // "Sideways" colour
-
-input group "=== Signal thresholds ==="
+input group "=== Signal & range mode ==="
 input int      InpBuyScore    = 2;           // Score >= this  => BUY
 input int      InpSellScore   = -2;          // Score <= this  => SELL
 
-input group "=== Trade plan & sizing ==="
-//  Sizing is one switch and one number:
-//     InpUseRisk  = true   -> risk InpRiskPct % of balance (score 3: double)
-//     InpUseRisk  = false  -> no risk % is applied: a fixed lot ladder,
-//                             0.01 lot per 1,000 of balance (score 3: x1.5)
-//     InpUseMinLot = true  -> overrides both: always the symbol's min lot
-//  The ladder's two numbers and the score-3 multiplier are baked in -
-//  they define the fallback, they are not a dial to tune.
-input bool     InpUseRisk      = true;       // Allow risk (false = no risk %, fixed lot ladder)
-input bool     InpUseMinLot    = false;      // Always advise the symbol's minimum lot
-input double   InpRiskPct      = 0.5;        // Risk % per trade (score 3 risks double)
-
-//  (No engine-settings group: the Precision Trend periods, the Hurst
-//  window and the efficiency-ratio numbers are STANDARD - they are the
-//  tested calibration, not user preferences, so since v2.12 they live
-//  in THE ENGINE PROFILE in INTERNALS below and SimpleEA applies them
-//  automatically to all three rows.  See that block to recalibrate.)
-
-input group "=== Range mode (choppy markets) ==="
 //  Part 2: the regime now DECIDES instead of abstaining.  Steady rows
 //  play the trend game as before; Choppy rows (H below the revert
 //  threshold - moves genuinely come back) play the RANGE game: entry at
@@ -226,6 +195,24 @@ input group "=== Range mode (choppy markets) ==="
 //  timeframes, exactly like the trade profile.
 input bool     InpRangeMode    = true;       // Range mode: trade the box when choppy (default ON)
 
+//  (No engine-settings group: the Precision Trend periods, the Hurst
+//  window and the efficiency-ratio numbers are STANDARD - they are the
+//  tested calibration, not user preferences, so since v2.12 they live
+//  in THE ENGINE PROFILE in INTERNALS below and SimpleEA applies them
+//  automatically to all three rows.  See that block to recalibrate.)
+
+input group "=== Trade plan & sizing ==="
+//  Sizing is one switch and one number:
+//     InpUseRisk  = true   -> risk InpRiskPct % of balance (score 3: double)
+//     InpUseRisk  = false  -> no risk % is applied: a fixed lot ladder,
+//                             0.01 lot per 1,000 of balance (score 3: x1.5)
+//     InpUseMinLot = true  -> overrides both: always the symbol's min lot
+//  The ladder's two numbers and the score-3 multiplier are baked in -
+//  they define the fallback, they are not a dial to tune.
+input bool     InpUseRisk      = true;       // Allow risk (false = no risk %, fixed lot ladder)
+input double   InpRiskPct      = 0.5;        // Risk % per trade (score 3 risks double)
+input bool     InpUseMinLot    = false;      // Always advise the symbol's minimum lot
+
 input group "=== Market closed detection ==="
 //  While the symbol cannot be traded (weekend, daily break, symbol halt)
 //  the panel collapses to the same two-line widget the unsupported chart
@@ -233,6 +220,18 @@ input group "=== Market closed detection ==="
 //  stands down until the market opens again.
 input bool     InpDetectClosed   = true;     // Detect a closed market, collapse the panel to "Market Closed"
 input int      InpClosedStaleMin = 30;       // Also closed: no quote for this many minutes (0 = off)
+
+input group "=== Panels & appearance ==="
+input int      InpPanelX      = 12;          // Panel X offset (px)
+input int      InpPanelY      = 24;          // Panel Y offset (px)
+input ENUM_AUTO_PANEL_POS InpAutoPanelPos = AUTO_POS_BOTTOM; // Right panel placement (Right or Bottom)
+input int      InpFontSize    = 10;          // Font size
+input string   InpFont        = "Consolas";  // Font (monospaced aligns best)
+input color    InpBgColor     = C'48,48,48'; // Panel background
+input color    InpTitleColor  = clrWhite;    // Title colour
+input color    InpBuyColor    = clrLime;     // "Going up" colour
+input color    InpSellColor   = clrTomato;   // "Going down" colour
+input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 
 //==================================================================
 //  INTERNALS
