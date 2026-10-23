@@ -438,7 +438,8 @@ The timer is a **placement switch only** — it has two clocks, and they behave 
 - **Long pause** (`InpAutoOffHours`): a one-shot pause that starts the moment the input is applied.
   `48` means *the next 48 hours*, and it overrides the daily schedule whether the schedule is on
   or off; when it expires, the daily schedule (if enabled) takes over again. The 48 hours are
-  exactly 48 elapsed hours, measured away from PC clock/timezone edits. The deadline is
+  exactly 48 elapsed hours rather than the same local clock time two days later, so a
+  daylight-saving change does not shorten or lengthen the pause. The deadline is
   stored per account + symbol + magic in terminal Global Variables, so restarting MT5, removing
   or re-attaching the EA, or recompiling it **does not restart or extend the pause**.
 
@@ -460,9 +461,10 @@ To pause another 48 hours deliberately, set `InpAutoOffHours = 0` → **OK**, th
 → **OK**. Setting `0` also cancels a pause that is still running and re-arms the input; setting a
 *different* positive number starts a fresh pause of that many hours.
 
-> **Strategy Tester warning:** `TimeLocal()` is the real PC clock, not the simulated historical
-> bar time — a backtest will see *today's* time of day, not each bar's. Leave
-> `InpUseAutoSchedule = false` in backtests.
+> **Strategy Tester note:** during testing, MT5 makes `TimeLocal()` follow the simulated
+> server time. A backtest therefore evaluates `08:00-17:00` against historical **server**
+> timestamps, not the PC-local clock used live; convert the start/stop to server time when
+> testing a live PC-local window.
 
 #### Execution & Trade Management Rules
 
