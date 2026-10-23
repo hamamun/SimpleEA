@@ -101,6 +101,8 @@
 //|   - Market order at score 3/3; Pending Limit order at score 2/3.  |
 //|   - M5 trades its own signal directly. M15/M30 are untied by      |
 //|     default; tie them with InpRequireM15M30SameTrend = true.      |
+//|   - Optional PC-local timer/pause: while OFF, no new orders are   |
+//|     placed and pendings are cancelled; open trades stay managed.  |
 //|   - Three take-profit levels per order:                           |
 //|        TP3 = 100% of SimpleEA's advised target points             |
 //|        TP2 = 25% less than TP3 (75% of TP3)                       |
@@ -153,7 +155,7 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "2.14"
+#property version   "2.15"
 #property description "Multi-timeframe BUY/SELL/HOLD direction panel, trade plan and full-auto executor. M5 / M15 / M30 charts only."
 
 #ifndef M_PI
@@ -171,6 +173,13 @@ enum ENUM_AUTO_PANEL_POS
 //==================================================================
 input group "=== Autotrading & order management ==="
 input bool                InpAutoTrading  = true;            // Autotrading (true = full auto, false = read-only)
+//  Daily timer + one-shot pause, both on PC LOCAL time.  These gate
+//  NEW placements only: while OFF, waiting pendings are cancelled and
+//  already-open trades keep being managed (trail / TP / exits).
+input bool                InpUseAutoSchedule = false;        // Use daily autotrading timer (PC local time)
+input string              InpAutoStartTime   = "08:00";      // Autotrading start time (PC local HH:MM)
+input string              InpAutoEndTime     = "17:00";      // Autotrading stop time (PC local HH:MM)
+input int                 InpAutoOffHours    = 0;            // One-shot pause hours from when set (0=off, 48=2 days)
 input bool                InpRequireM15M30SameTrend = false; // M15/M30 same trend required to place (false = untied)
 input bool                InpUseStopLoss  = false;           // Stoploss (true = place initial SL, false = only when trailstop / TP1 places it)
 input bool                InpUseTrailStop = true;            // Pre-TP1 stepped trailstop (true = on, Entry->TP1 only)
@@ -399,6 +408,18 @@ int  g_rowH    = 20;
 bool g_panelOK = false; // what is currently drawn: false = notice only
 datetime g_srvSaidClosedUntil = 0;  // server said "market closed": trust it for a while
 
+//  Autotrading timer (PC local) + one-shot pause state.  The pause
+//  deadline itself is kept in GMT (an elapsed duration), while the
+//  daily start/stop are read against the PC/VPS local clock.
+int      g_schedStartMin    = -1;   // daily start, minutes since local midnight
+int      g_schedEndMin      = -1;   // daily stop,  minutes since local midnight
+datetime g_pauseUntilGMT    = 0;    // one-shot pause deadline (GMT), 0 = none
+string   g_pauseGVUntil     = "";   // GlobalVariable holding the deadline
+string   g_pauseGVReq       = "";   // GlobalVariable holding the requested hours
+bool     g_timerStateInit   = false;
+bool     g_timerWasAllowed  = false; // last observed timer placement state
+ulong    g_lastPendCancelTryMs = 0;  // throttled pending-cancel retries while OFF
+
 ENUM_TIMEFRAMES g_drawnTf = (ENUM_TIMEFRAMES)0;  // timeframe the header was drawn for
 
 //+------------------------------------------------------------------+
@@ -540,6 +561,9 @@ int OnInit()
                   "far above the shipped 0.5%% / 1.0%%.", InpRiskPct,
                   InpRiskPct * RISK_SCORE3_X);
 
+   if(!InitAutoTimer())
+      return(INIT_PARAMETERS_INCORRECT);
+
    //  The standard engine, stated once so the log always records which
    //  calibration produced the reads (these are not inputs any more).
    PrintFormat("SimpleEA: standard engine - Precision Trend %d/%d, Hurst window %d bars, "
@@ -611,6 +635,7 @@ void OnTick()
    //  live timeframe change is caught whether or not MetaTrader re-started
    //  the EA for it.  On a wrong chart that call costs one comparison.
    CheckNewBars();
+   CheckAutoTimerTransition();
 
    //  Real-time tick checks for TP1/TP2/TP3 partial closes, break-even SL,
    //  and live Ask/Bid/P&L updates on the 2nd Panel.
@@ -622,6 +647,7 @@ void OnTick()
 void OnTimer()
 {
    CheckNewBars();
+   CheckAutoTimerTransition();
    if(ChartSupported() && g_panelOK)
       ManageAutoTick();
 }
@@ -1734,6 +1760,301 @@ bool CanTradeNow()
    if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))   return(false);
    return(true);
 }
+//+------------------------------------------------------------------+
+//  AUTOTRADING TIMER (PC LOCAL TIME) & ONE-SHOT PAUSE
+//
+//  CanTradeNow() above remains the MANAGEMENT permission: master
+//  switch, supported chart, market open, terminal/account allowed.
+//  The timer is only a PLACEMENT gate on top of it.  That split is
+//  deliberate: while the timer is OFF the EA must keep trailing,
+//  taking TP1/TP2/TP3 and applying its exit rules to trades that are
+//  already open - with InpUseStopLoss=false a hard freeze could
+//  leave a position with no SL at all.  Waiting pendings are the
+//  opposite case: they are unfilled entries resting at the broker,
+//  so the OFF transition cancels them instead of letting them fill
+//  while the user believes autotrading is off.
+//
+//  Daily start/stop read the PC/VPS local clock (TimeLocal), as
+//  requested - NOT broker server time.  The one-shot pause deadline
+//  is stored in GMT so a 48-hour pause lasts 48 elapsed hours even
+//  across a daylight-saving change; it is persisted in a terminal
+//  GlobalVariable together with the requested hours, so a restart
+//  neither extends it nor restarts a completed request.  Inputs are
+//  read-only in MQL5, so the EA cannot rewrite InpAutoOffHours to 0
+//  in the dialog; instead the completed request stays recorded and
+//  the EFFECTIVE pause becomes 0 by itself.  Set 0 (clears the
+//  record), then the hours again, to run another one-shot pause.
+//+------------------------------------------------------------------+
+bool ParseClockMinutes(const string value, int &minutes)
+{
+   minutes = -1;
+   string txt = value;
+   StringTrimLeft(txt);
+   StringTrimRight(txt);
+
+   string parts[];
+   if(StringSplit(txt, 58, parts) != 2) return(false);   // 58 = ':'
+   if(StringLen(parts[0]) < 1 || StringLen(parts[0]) > 2) return(false);
+   if(StringLen(parts[1]) < 1 || StringLen(parts[1]) > 2) return(false);
+   for(int part = 0; part < 2; part++)
+      for(int k = 0; k < StringLen(parts[part]); k++)
+      {
+         ushort ch = StringGetCharacter(parts[part], k);
+         if(ch < '0' || ch > '9') return(false);
+      }
+
+   int hour   = (int)StringToInteger(parts[0]);
+   int minute = (int)StringToInteger(parts[1]);
+   if(hour < 0 || hour > 23 || minute < 0 || minute > 59) return(false);
+   minutes = hour * 60 + minute;
+   return(true);
+}
+
+//+------------------------------------------------------------------+
+datetime PauseUntilLocal()
+{
+   if(g_pauseUntilGMT <= 0) return(0);
+   long offset = (long)TimeLocal() - (long)TimeGMT();
+   return((datetime)((long)g_pauseUntilGMT + offset));
+}
+
+//+------------------------------------------------------------------+
+bool AutoPauseActive()
+{
+   return(g_pauseUntilGMT > 0 && TimeGMT() < g_pauseUntilGMT);
+}
+
+//+------------------------------------------------------------------+
+bool InAutoScheduleWindow()
+{
+   if(!InpUseAutoSchedule) return(true);
+   if(g_schedStartMin < 0 || g_schedEndMin < 0) return(false);
+
+   MqlDateTime dt;
+   TimeToStruct(TimeLocal(), dt);
+   int nowMin = dt.hour * 60 + dt.min;
+   if(g_schedStartMin < g_schedEndMin)
+      return(nowMin >= g_schedStartMin && nowMin < g_schedEndMin);
+   return(nowMin >= g_schedStartMin || nowMin < g_schedEndMin); // overnight
+}
+
+//+------------------------------------------------------------------+
+bool AutoTimerAllowsPlacement()
+{
+   return(!AutoPauseActive() && InAutoScheduleWindow());
+}
+
+//+------------------------------------------------------------------+
+bool CanPlaceAutoOrders()
+{
+   return(CanTradeNow() && AutoTimerAllowsPlacement());
+}
+
+//+------------------------------------------------------------------+
+bool InitAutoTimer()
+{
+   if(InpAutoOffHours < 0 || InpAutoOffHours > 8760)
+   {
+      PrintFormat("SimpleEA: InpAutoOffHours (%d) must be between 0 and 8760 hours "
+                  "(0 = no pause, 48 = two days).", InpAutoOffHours);
+      return(false);
+   }
+
+   if(InpUseAutoSchedule)
+   {
+      if(!ParseClockMinutes(InpAutoStartTime, g_schedStartMin) ||
+         !ParseClockMinutes(InpAutoEndTime,   g_schedEndMin))
+      {
+         PrintFormat("SimpleEA: autotrading timer times must be HH:MM between 00:00 and "
+                     "23:59 (PC local); got start '%s', stop '%s'.",
+                     InpAutoStartTime, InpAutoEndTime);
+         return(false);
+      }
+      if(g_schedStartMin == g_schedEndMin)
+      {
+         Print("SimpleEA: autotrading timer start and stop times must be different "
+               "(for 24-hour autotrading, turn InpUseAutoSchedule off).");
+         return(false);
+      }
+   }
+
+   //  Persisted one-shot pause identity: one deadline per account +
+   //  symbol + magic base, so other charts/EAs never share it.
+   long   login    = AccountInfoInteger(ACCOUNT_LOGIN);
+   string identity = StringFormat("%I64d.%s.%I64d", login, _Symbol, InpMagicBase);
+   string base     = "SimpleEA.Pause." + identity;
+   if(StringLen(base) > 54)
+   {
+      uint hash = 2166136261;
+      for(int k = 0; k < StringLen(identity); k++)
+         hash = (hash ^ (uint)StringGetCharacter(identity, k)) * 16777619;
+      base = StringFormat("SimpleEA.Pause.%u", hash);
+   }
+   g_pauseGVUntil = base + ".Until";
+   g_pauseGVReq   = base + ".Req";
+
+   datetime nowGMT = TimeGMT();
+   if(InpAutoOffHours == 0)
+   {
+      bool had = (GlobalVariableCheck(g_pauseGVUntil) ||
+                  GlobalVariableCheck(g_pauseGVReq));
+      GlobalVariableDel(g_pauseGVUntil);
+      GlobalVariableDel(g_pauseGVReq);
+      if(had)
+      {
+         GlobalVariablesFlush();
+         Print("SimpleEA: one-shot autotrading pause cleared (InpAutoOffHours = 0).");
+      }
+      g_pauseUntilGMT = 0;
+   }
+   else
+   {
+      double storedUntil = 0.0, storedReq = 0.0;
+      bool hasUntil = (GlobalVariableCheck(g_pauseGVUntil) &&
+                       GlobalVariableGet(g_pauseGVUntil, storedUntil));
+      bool hasReq   = (GlobalVariableCheck(g_pauseGVReq) &&
+                       GlobalVariableGet(g_pauseGVReq, storedReq));
+      if(hasUntil && hasReq && storedUntil > 0.0 &&
+         (int)MathRound(storedReq) == InpAutoOffHours)
+      {
+         //  Same request seen again (restart / reinit): keep the
+         //  original deadline, completed or not.  Never extend it.
+         g_pauseUntilGMT = (datetime)(long)storedUntil;
+         if(g_pauseUntilGMT > nowGMT)
+            PrintFormat("SimpleEA: one-shot pause continues until %s PC local "
+                        "(%I64d minutes remaining); new orders are paused, open trades stay managed.",
+                        TimeToString(PauseUntilLocal(), TIME_DATE | TIME_MINUTES),
+                        ((long)g_pauseUntilGMT - (long)nowGMT + 59) / 60);
+         else
+            PrintFormat("SimpleEA: the previous %d-hour pause completed at %s PC local.  The input "
+                        "still shows %d, but the effective pause is 0; set 0, then %d again, for another.",
+                        InpAutoOffHours,
+                        TimeToString(PauseUntilLocal(), TIME_DATE | TIME_MINUTES),
+                        InpAutoOffHours, InpAutoOffHours);
+      }
+      else
+      {
+         //  A fresh request (none stored, or a different number of hours).
+         g_pauseUntilGMT = nowGMT + InpAutoOffHours * 3600;
+         bool savedUntil = (GlobalVariableSet(g_pauseGVUntil,
+                                              (double)(long)g_pauseUntilGMT) > 0);
+         bool savedReq   = (GlobalVariableSet(g_pauseGVReq,
+                                              (double)InpAutoOffHours) > 0);
+         if(savedUntil && savedReq)
+            GlobalVariablesFlush();
+         else
+            PrintFormat("SimpleEA: warning - could not save the pause deadline for restart "
+                        "persistence (error %d); it still applies to this run.", GetLastError());
+         PrintFormat("SimpleEA: one-shot pause set for the next %d hours, until %s PC local; "
+                     "new orders are paused, open trades stay managed.",
+                     InpAutoOffHours,
+                     TimeToString(PauseUntilLocal(), TIME_DATE | TIME_MINUTES));
+      }
+   }
+
+   g_timerWasAllowed = AutoTimerAllowsPlacement();
+   g_timerStateInit  = true;
+
+   if(InpUseAutoSchedule)
+      PrintFormat("SimpleEA: daily autotrading timer %02d:%02d-%02d:%02d PC local "
+                  "(PC local now %s) - new orders %s.",
+                  g_schedStartMin / 60, g_schedStartMin % 60,
+                  g_schedEndMin / 60,   g_schedEndMin % 60,
+                  TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS),
+                  g_timerWasAllowed ? "allowed" : "paused");
+   return(true);
+}
+
+//+------------------------------------------------------------------+
+int CancelAllAutoPendings()
+{
+   if(!CanTradeNow()) return(0);
+   SyncAutoState();
+   int cancelled = 0;
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      if(!g_auto[i].active || g_auto[i].isOpen) continue;
+      if(TradeDeleteOrder(g_auto[i].ticket))
+      {
+         g_auto[i].lastSignalBar = g_rows[i].lastBar;
+         ResetAutoSlot(i, true);
+         cancelled++;
+      }
+   }
+   if(cancelled > 0)
+   {
+      SyncAutoState();
+      UpdatePlan();
+      UpdateAutoPanel();
+   }
+   return(cancelled);
+}
+
+//+------------------------------------------------------------------+
+void CheckAutoTimerTransition()
+{
+   bool allowed = AutoTimerAllowsPlacement();
+   if(!g_timerStateInit)
+   {
+      g_timerWasAllowed = allowed;
+      g_timerStateInit  = true;
+      return;
+   }
+   if(allowed == g_timerWasAllowed)
+   {
+      //  Still OFF: keep retrying a failed/unavailable pending cancel
+      //  (throttled), so a resting limit cannot quietly survive.
+      if(!allowed && InpAutoTrading && ChartSupported())
+      {
+         ulong nowMs = GetTickCount64();
+         if(nowMs - g_lastPendCancelTryMs >= 2000)
+         {
+            g_lastPendCancelTryMs = nowMs;
+            CancelAllAutoPendings();
+         }
+      }
+      return;
+   }
+   g_timerWasAllowed = allowed;
+
+   if(!InpAutoTrading || !ChartSupported()) return;
+
+   if(!allowed)
+   {
+      g_lastPendCancelTryMs = GetTickCount64();
+      int cancelled = CancelAllAutoPendings();
+      PrintFormat("SimpleEA: autotrading timer OFF at %s PC local - no new orders; "
+                  "cancelled %d pending order(s); open trades remain managed.",
+                  TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS), cancelled);
+   }
+   else
+   {
+      PrintFormat("SimpleEA: autotrading timer ON at %s PC local - new orders allowed again.",
+                  TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS));
+      if(g_panelOK && CanTradeNow())
+      {
+         ManageAutoBar();
+         UpdateAutoPanel();
+      }
+   }
+   DrawPanel();
+   ChartRedraw(0);
+}
+
+//+------------------------------------------------------------------+
+string AutoTradingHeaderText()
+{
+   if(!InpAutoTrading) return("Off");
+   return(AutoTimerAllowsPlacement() ? "On" : "Paused");
+}
+
+//+------------------------------------------------------------------+
+color AutoTradingHeaderColor()
+{
+   if(!InpAutoTrading) return(InpSellColor);
+   return(AutoTimerAllowsPlacement() ? InpBuyColor : clrOrange);
+}
+
 
 //+------------------------------------------------------------------+
 ENUM_ORDER_TYPE_FILLING FillingMode()
@@ -2502,7 +2823,7 @@ void SyncAutoState()
 //+------------------------------------------------------------------+
 bool PlacePlanOrder(int i)
 {
-   if(!CanTradeNow()) return(false);
+   if(!CanPlaceAutoOrders()) return(false);
    if(g_plans[i].state != 2 || g_plans[i].dir == 0) return(false);
    if(!TrendMatchForTF(i)) return(false);
 
@@ -2625,6 +2946,7 @@ void ManageAutoBar()
       UpdatePlan();
       return;
    }
+   bool timerAllowsPlacement = AutoTimerAllowsPlacement();
 
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -2751,6 +3073,20 @@ void ManageAutoBar()
       if(g_auto[i].active && !g_auto[i].isOpen)
       {
          int  dir     = g_auto[i].dir;
+
+         // Timer/pause OFF: a waiting order is an unfilled entry, so
+         // cancel it rather than refresh it (it could otherwise fill
+         // while new placements are supposed to be paused).
+         if(!timerAllowsPlacement)
+         {
+            if(TradeDeleteOrder(g_auto[i].ticket))
+            {
+               g_auto[i].lastSignalBar = g_rows[i].lastBar;
+               ResetAutoSlot(i, true);
+            }
+            continue;
+         }
+
          int  tfSec   = PeriodSeconds(g_rows[i].tf);
          //  Range fades live on RANGE_VALID_BARS: the box-kill above
          //  (a close outside the box) is their real invalidation, and
@@ -2836,7 +3172,7 @@ void ManageAutoBar()
       // ---- CASE C: Flat on this timeframe -> check new placement ----
       if(!g_auto[i].active)
       {
-         if(g_rows[i].ok && g_rows[i].direction != 0 && g_plans[i].state == 2 &&
+         if(timerAllowsPlacement && g_rows[i].ok && g_rows[i].direction != 0 && g_plans[i].state == 2 &&
             TrendMatchForTF(i) && !HasTradedOnBar(i, g_rows[i].lastBar))
          {
             PlacePlanOrder(i);
@@ -3528,7 +3864,7 @@ void DrawSupportedPanel()
    int    em       = CharW(InpFontSize);
    int    titleW   = 8 * CharW(InpFontSize + 1);
    string symRight = "|  " + _Symbol + "  |  " + ChartTimeframeText();
-   int    headW    = pad + titleW + em + (16 + 3 + 2 + StringLen(symRight)) * em + pad;
+   int    headW    = pad + titleW + em + (16 + 6 + 2 + StringLen(symRight)) * em + pad;
    int    wantW    = (int)MathMax(NoticeWidth(), headW);
    wantW           = (int)MathMax(wantW, PlanWidthNeed());
    g_panelW        = wantW;
@@ -3537,15 +3873,15 @@ void DrawSupportedPanel()
    MakeRect("bg",  x, y, g_panelW, g_panelH, InpBgColor, clrDimGray);
    MakeRect("sep", x + 4, y + HEAD_H - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
 
-   // ---- header: SimpleEA | Autotrading : On/Off | SYMBOL | TF -----
+   // ---- header: SimpleEA | Autotrading : On/Off/Paused | SYMBOL | TF -----
    MakeLabel("title", x + pad, y + 7, "SimpleEA",
              InpTitleColor, InpFontSize + 1, false);
    int autoCapX = x + pad + titleW + em;
    MakeLabel("autoCap", autoCapX, y + 8, "| Autotrading : ",
              clrSilver, InpFontSize, false);
    int autoValX = autoCapX + 16 * em;
-   MakeLabel("autoVal", autoValX, y + 8, InpAutoTrading ? "On" : "Off",
-             InpAutoTrading ? InpBuyColor : InpSellColor, InpFontSize, false);
+   MakeLabel("autoVal", autoValX, y + 8, AutoTradingHeaderText(),
+             AutoTradingHeaderColor(), InpFontSize, false);
    MakeLabel("sym", x + g_panelW - pad, y + 8, symRight,
              InpTitleColor, InpFontSize, true);
 

@@ -316,7 +316,7 @@ class Panel:
         # plan's own measured need (when it is shown) can only add to it
         sym_right = "|  %s  |  %s" % (self.symbol, self.tags[0])
         title_w = 8 * char_w(FONT + 1, DPI)
-        head_w = 10 + title_w + EM + (16 + 3 + 2 + len(sym_right)) * EM + 10
+        head_w = 10 + title_w + EM + (16 + 6 + 2 + len(sym_right)) * EM + 10
         want = max(PLAN_W_MIN,
                    10 + len(NOTICE) * char_w(FONT + 1, DPI) + 10,
                    head_w)

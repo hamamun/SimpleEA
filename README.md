@@ -409,6 +409,10 @@ read-only mode):
 | Input | Default | Meaning |
 |---|---|---|
 | `InpAutoTrading` | **true** | Full-auto execution on (`true`) or read-only (`false`) |
+| `InpUseAutoSchedule` | **false** | Restrict new-order placement to a daily start/stop window (PC/VPS local time) |
+| `InpAutoStartTime` | `08:00` | Daily placement start time, inclusive (`HH:MM`, PC/VPS local time) |
+| `InpAutoEndTime` | `17:00` | Daily placement stop time, exclusive (`17:00` is already OFF). Before `InpAutoStartTime` means the window crosses midnight |
+| `InpAutoOffHours` | **0** | One-shot long pause from now, in hours (`48` = the next two days); `0` = no pause / cancel + re-arm |
 | `InpRequireM15M30SameTrend` | **false** | M15/M30 trend tie: `false` (default) = untied, each places on its own direction; `true` = both must be Going up or both Going down before either places |
 | `InpUseStopLoss` | **false** | Place initial Stop Loss on order when `true` (default is `false`): no SL is placed at entry — the pre-TP1 trailstop places the first SL at activation (or TP1 places it at Break-Even if the trailstop is off) |
 | `InpUseTrailStop` | **true** | Pre-TP1 stepped trailstop on/off (Entry→TP1 only; hands off to the TP1 logic at TP1) |
@@ -420,6 +424,40 @@ There is no slippage input. The allowance is derived per order from the live mar
 correct on every symbol: `2.5 × max(current spread, broker stops level)`, clamped to 5–50 points
 for entries and 8–75 points (and ×1.5) for closes, because a rejected close is worse than a
 slightly worse exit.
+
+#### Daily timer and one-shot long pause
+
+The timer is a **placement switch only** — it has two clocks, and they behave differently:
+
+- **Daily schedule** (`InpUseAutoSchedule`, `InpAutoStartTime`, `InpAutoEndTime`): with the switch
+  on, new orders are placed only between the start and stop times **on the PC/VPS clock**
+  (`TimeLocal()`, never the broker server clock). The start minute is ON, the stop minute is
+  already OFF, and a stop before the start (for example `22:00` → `06:00`) runs across midnight.
+  A malformed time, or start equal to stop, makes the EA refuse to start rather than guess.
+- **Long pause** (`InpAutoOffHours`): a one-shot pause that starts the moment the input is applied.
+  `48` means *the next 48 hours*, and it overrides the daily schedule whether the schedule is on
+  or off; when it expires, the daily schedule (if enabled) takes over again. The 48 hours are
+  exactly 48 elapsed hours, measured away from PC clock/timezone edits. The deadline is
+  stored per account + symbol + magic in terminal Global Variables, so restarting MT5, removing
+  or re-attaching the EA, or recompiling it **does not restart or extend the pause**.
+
+While the timer is OFF, **no new orders are placed and waiting pending orders are cancelled**, but
+**open trades keep being managed exactly as before** — TP1/TP2/TP3 partial closes, the trailstop,
+and the signal/exit rules all keep running. When the timer turns back ON, the EA immediately runs a
+placement pass on the most recently closed bars instead of waiting for the next one. The
+`Autotrading :` word in the Main Panel header reads **Paused** (orange) whenever the timer is OFF,
+so a scheduled stand-down never looks like a dead EA.
+
+One MT5 limitation is unavoidable: an EA **cannot rewrite its own input box**, so when the 48
+hours finish the input still *displays* `48`. Internally the request is spent — the effective
+remaining pause is 0, and re-opening Properties shows the same `48` without starting a new pause.
+To pause another 48 hours deliberately, set `InpAutoOffHours = 0` → **OK**, then set it to `48`
+→ **OK**. Setting `0` also cancels a pause that is still running and re-arms the input; setting a
+*different* positive number starts a fresh pause of that many hours.
+
+> **Strategy Tester warning:** `TimeLocal()` is the real PC clock, not the simulated historical
+> bar time — a backtest will see *today's* time of day, not each bar's. Leave
+> `InpUseAutoSchedule = false` in backtests.
 
 #### Execution & Trade Management Rules
 
@@ -489,6 +527,14 @@ slightly worse exit.
      HOLD-in-profit rules still apply, exactly as for trend trades.
    - Range fades follow **rule 2 as usual**: each timeframe places its own box trade by default;
      M15/M30 require their mutual trend match only when `InpRequireM15M30SameTrend=true`.
+8. **Autotrading timer & long pause (placement only):**
+   - With the daily schedule on, new orders place only inside the PC/VPS-local window; the
+     one-shot `InpAutoOffHours` pause overrides everything until it expires.
+   - At the moment the timer turns OFF, waiting pending orders are cancelled. Open positions are
+     **never** closed by the timer and keep all normal TP/trail/exit management.
+   - At the moment the timer turns ON, a placement pass runs immediately on the latest closed
+     bars (subject to the one-signal-per-bar rule), and the Main Panel header switches from
+     **Paused** back to **On**.
 
 #### Second Panel Layout (Right or Bottom of Main Panel)
 
