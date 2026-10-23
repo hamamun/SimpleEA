@@ -116,7 +116,7 @@ timeframe, magic-number tagged), so treat it as a live trader and start on demo.
    and the *Incompatible chart* notice — drop it on an H1 chart and that is exactly what you will
    see. On a supported chart with a closed market (weekend, daily break), the same widget shows
    `Market Closed` instead.
-5. Colours, position, and font are all inputs under *Panel appearance*.
+5. Colours, position, and font are all inputs under *Panels & appearance*.
 
 > If a row shows `waiting ...`, the terminal has not finished downloading history for that
 > timeframe yet. Leave the chart open and it will fill in.
@@ -198,7 +198,7 @@ A **Choppy** row never reaches ±3 — the regime adds no trend vote in the rang
 trades through the box gates instead (entry, stop and target come from the box geometry, not
 from the score). A **Mixed** row stands aside whatever the score says.
 
-Kaufman's **Efficiency Ratio** is a dead-market gate: if ER is below `InpERDead` (default 0.10)
+Kaufman's **Efficiency Ratio** is a dead-market gate: if ER is below the standard `ER_DEAD` gate (0.10)
 the instrument is not travelling anywhere, so the row is forced to `HOLD` regardless of score —
 and now says so: `quiet — nothing worth trading`.
 
@@ -217,17 +217,15 @@ reading never changes after the fact.
 
 | Group | Input | Default | Meaning |
 |---|---|---|---|
-| Panel | `InpPanelX/Y` | 12 / 24 | position in pixels |
+| Signal & range | `InpBuyScore` | 2 | score ≥ this ⇒ BUY |
+| | `InpSellScore` | −2 | score ≤ this ⇒ SELL |
+| | `InpRangeMode` | **true** | range game on (false ⇒ every chop row says `chop — range mode is off`). One switch for M5, M15 and M30 — each row still reads its own regime |
+| Engine | *standard engine* | baked | `TREND_L1/L2` 150 / 24 · `HURST_WINDOW` 256 · `ER_PERIOD` 20 · `ER_DEAD` 0.10 — not inputs since v2.12; SimpleEA applies them automatically, see below |
+| | *box geometry* | baked | `RANGE_BARS` 20 / `RANGE_SL_ATR` 1.0 / `RANGE_MIN_RR` 1.0 / `RANGE_SPREAD_X` 3.0 / `RANGE_ER_MAX` 0.40 / `RANGE_VALID_BARS` 8 — see below |
+| Panels | `InpPanelX/Y` | 12 / 24 | position in pixels |
+| | `InpAutoPanelPos` | **Bottom** (`AUTO_POS_BOTTOM`) | Second panel placement: **Right** (beside Main Panel) or **Bottom** (below Main Panel) |
 | | `InpFontSize` | **10** | font size — every column, the row height and the panel's own width scale with it, so a bigger font widens the grid instead of crowding the text |
 | | `InpBgColor` | `48,48,48` (`#303030`) | panel background colour |
-| Thresholds | `InpBuyScore` | 2 | score ≥ this ⇒ BUY |
-| | `InpSellScore` | −2 | score ≤ this ⇒ SELL |
-| Shared | `InpTrendL1` / `InpTrendL2` | 150 / 24 | Precision Trend filter periods (all three timeframes) |
-| | `InpHurstWindow` | 256 | Hurst estimate window in bars |
-| | `InpERPeriod` | 20 | efficiency-ratio period |
-| | `InpERDead` | 0.10 | below this ⇒ dead market, force HOLD (with reason) |
-| Range | `InpRangeMode` | **true** | range game on (false ⇒ every chop row says `chop — range mode is off`). One switch for M5, M15 and M30 — each row still reads its own regime |
-| | *box geometry* | baked | `RANGE_BARS` 20 / `RANGE_SL_ATR` 1.0 / `RANGE_MIN_RR` 1.0 / `RANGE_SPREAD_X` 3.0 / `RANGE_ER_MAX` 0.40 / `RANGE_VALID_BARS` 8 — see below |
 
 **The range profile is baked in, not configurable.** Same reasoning as the trade profile: these
 six were inputs until they stopped earning a decision. The box is the last 20 closed bars'
@@ -244,14 +242,17 @@ load: if `InpBuyScore` is not greater than `InpSellScore` the EA refuses to star
 overlapping pair (say `-2` / `2` the wrong way round) would make score 0 pass the BUY test and the
 panel would call BUY forever.
 
-**One engine, three timeframes.** The trend filter is shared: `InpTrendL1` / `InpTrendL2` are set
-once and used by M5, M15 and M30 alike — each row applies them to *its own* closed bars, which is
-what makes the three rows disagree. These used to be two inputs per timeframe (six in all) that all
-shipped with the same default and were never set apart. They stay inputs because the periods are the
-one genuinely symbol-sensitive number in the engine: what counts as a trend on XAUUSD is not what
-counts on EURUSD. If one timeframe ever needs its own filter, that is a one-line change in code, not
-an input: `OnInit()` calls `ConfigureRow()` once per row and hands each row its own copy, so passing
-a different period for row 0 leaves M15 and M30 untouched.
+**One standard engine, three timeframes.** The trend filter is shared: `TREND_L1` / `TREND_L2` are
+set once — in the baked-in Engine Profile, not in the Inputs tab — and used by M5, M15 and M30 alike;
+each row applies them to *its own* closed bars, which is what makes the three rows disagree. These
+five numbers (the two trend periods, `HURST_WINDOW`, `ER_PERIOD`, `ER_DEAD`) were the "Shared engine
+settings" inputs until v2.11; since **v2.12** they are standard, like the trade/regime/range profiles,
+because none of them is a user preference — they are the calibration the engine was measured with, so
+SimpleEA simply applies them itself and states them once in the Experts log at startup. The trend
+periods remain the one genuinely symbol-sensitive pair: if a symbol class is ever *measured* to need
+its own, the fix is a one-line change in code, decided by the EA — not an input: `OnInit()` calls
+`ConfigureRow()` once per row and hands each row its own copy, so passing a different period for
+row 0 leaves M15 and M30 untouched.
 
 **The regime boundaries are not inputs, and that is deliberate.** `H > 0.55` is *Steady*,
 `H < 0.45` is *Choppy*, and everything between the two is *Mixed* — stand aside. Those two numbers
@@ -260,16 +261,17 @@ property of the series, not of the symbol: 0.5 is the coin-flip, and 0.55 / 0.45
 literature uses either side of it before it will call a regime at all (see `SIGNAL_LOGIC.md` §4).
 The measurement backs that up rather than assuming it — on real data H spans ~0.35–0.62 at p10–p90,
 so those two numbers land near the 30th/70th percentiles of the real distribution instead of being
-invented (§4.3). Only a different estimator moves them, not a different chart. What *is* an input is
-`InpHurstWindow` — how many bars the estimate is taken over — because that number does depend on the
-timeframe: 256 bars is five days on M30 and two days on M5.
+invented (§4.3). Only a different estimator moves them, not a different chart. The window the
+estimate is taken over — `HURST_WINDOW` (256 bars) — is standard for the same reason: it is five days
+on M30 and two days on M5, and the estimator needs that many bars on every row before its read is
+stable enough to label a regime.
 
 **History depth is automatic.** There is no bars-to-load input. The EA pulls **700 closed bars per
-timeframe** as its floor and raises that number itself when your own periods need more: four times
-the longest trend period (`InpTrendL1`), the Hurst window plus margin, or the range/ATR/E-R lookbacks
-(whichever is largest), capped at 50 000. Change `InpHurstWindow` to 900 or a trend period to 400
-and the pull follows on its own — there is nothing to keep in sync, and the panel still only ever
-reads closed, finished bars.
+timeframe** as its floor and raises that number itself if the standard engine ever needs more: four
+times the longest trend period (`TREND_L1`), the Hurst window plus margin, or the range/ATR/E-R
+lookbacks (whichever is largest), capped at 50 000. Recalibrate `HURST_WINDOW` to 900 or a trend
+period to 400 in the Engine Profile and the pull follows on its own — there is nothing to keep in
+sync, and the panel still only ever reads closed, finished bars.
 
 ---
 
@@ -283,6 +285,7 @@ this: the executor reads one row and acts on that timeframe.
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
 │  SimpleEA   | Autotrading :   On                                             |  XAUUSD  |  M5 │
+│  Timer: Off | Choppy Trade: On | M15/M30 Same Trend: Off                                      │
 ├─────────────────────────────────────────────────────────────────────────────────────────────┤
 │  M5   Scalp            Trend:   Going down       Regime:  Steady                              │
 │                        Signal:  SELL             Score:   -3 / 3                              │
@@ -362,13 +365,13 @@ the same level.
 to type in yourself — nothing is sent. With it on, the executor places exactly these numbers, and
 the block keeps showing them while the trade runs (Entry/SL/TP from the live position).
 
-Inputs, all under *Trade plan*:
+Inputs are under *Trade plan & sizing*, followed by *Market closed detection*:
 
 | Input | Default | Meaning |
 |---|---|---|
 | `InpUseRisk` | true | **Allow risk** — risk % of balance; false = no risk %, fixed lot ladder |
-| `InpUseMinLot` | false | Always advise the symbol's minimum lot |
 | `InpRiskPct` | 0.5 | Risk % per trade; score 3 risks double (1.0 %) |
+| `InpUseMinLot` | false | Always advise the symbol's minimum lot |
 | `InpDetectClosed` | true | Collapse the panel to `Market Closed` (and stop trading) while the symbol is not trading |
 | `InpClosedStaleMin` | 30 | Quote-age in minutes that also counts as closed (0 = off) |
 
@@ -399,7 +402,7 @@ line would overflow.
 
 ---
 
-### Autotrading & Second Panel (`Autotrading`)
+### Autotrading & Second Panel (`Autotrading & order management`)
 
 Controlled by `InpAutoTrading` (**default `true`**, hands-free Full Auto mode; set `false` for
 read-only mode):
@@ -407,11 +410,15 @@ read-only mode):
 | Input | Default | Meaning |
 |---|---|---|
 | `InpAutoTrading` | **true** | Full-auto execution on (`true`) or read-only (`false`) |
+| `InpUseAutoSchedule` | **false** | Restrict new-order placement to a daily start/stop window (PC/VPS local time) |
+| `InpAutoStartTime` | `08:00` | Daily placement start time, inclusive (`HH:MM`, PC/VPS local time) |
+| `InpAutoEndTime` | `17:00` | Daily placement stop time, exclusive (`17:00` is already OFF). Before `InpAutoStartTime` means the window crosses midnight |
+| `InpAutoOffHours` | **0** | One-shot long pause from now, in hours (`48` = the next two days); `0` = no pause / cancel + re-arm |
+| `InpRequireM15M30SameTrend` | **false** | M15/M30 trend tie: `false` (default) = untied, each places on its own direction; `true` = both must be Going up or both Going down before either places |
 | `InpUseStopLoss` | **false** | Place initial Stop Loss on order when `true` (default is `false`): no SL is placed at entry — the pre-TP1 trailstop places the first SL at activation (or TP1 places it at Break-Even if the trailstop is off) |
 | `InpUseTrailStop` | **true** | Pre-TP1 stepped trailstop on/off (Entry→TP1 only; hands off to the TP1 logic at TP1) |
 | `InpTrailPctTight` | **40** | Trailstop % used when the regime is NOT Steady (10–70, clamped) |
 | `InpTrailPctSteady` | **55** | Trailstop % used in a Steady regime with a clear trend in the trade's direction (10–70, clamped) |
-| `InpAutoPanelPos` | **Bottom** (`AUTO_POS_BOTTOM`) | Second panel placement: **Right** (beside Main Panel) or **Bottom** (below Main Panel) |
 | `InpMagicBase` | 202610 | Base magic number (`+0` M5, `+1` M15, `+2` M30) |
 
 There is no slippage input. The allowance is derived per order from the live market, so one EA is
@@ -419,15 +426,56 @@ correct on every symbol: `2.5 × max(current spread, broker stops level)`, clamp
 for entries and 8–75 points (and ×1.5) for closes, because a rejected close is worse than a
 slightly worse exit.
 
+#### Daily timer and one-shot long pause
+
+The timer is a **placement switch only** — it has two clocks, and they behave differently:
+
+- **Daily schedule** (`InpUseAutoSchedule`, `InpAutoStartTime`, `InpAutoEndTime`): with the switch
+  on, new orders are placed only between the start and stop times **on the PC/VPS clock**
+  (`TimeLocal()`, never the broker server clock). The start minute is ON, the stop minute is
+  already OFF, and a stop before the start (for example `22:00` → `06:00`) runs across midnight.
+  A malformed time, or start equal to stop, makes the EA refuse to start rather than guess.
+- **Long pause** (`InpAutoOffHours`): a one-shot pause that starts the moment the input is applied.
+  `48` means *the next 48 hours*, and it overrides the daily schedule whether the schedule is on
+  or off; when it expires, the daily schedule (if enabled) takes over again. The 48 hours are
+  exactly 48 elapsed hours rather than the same local clock time two days later, so a
+  daylight-saving change does not shorten or lengthen the pause. The deadline is
+  stored per account + symbol + magic in terminal Global Variables, so restarting MT5, removing
+  or re-attaching the EA, or recompiling it **does not restart or extend the pause**.
+
+While the timer is OFF, **no new orders are placed and waiting pending orders are cancelled**, but
+**open trades keep being managed exactly as before** — TP1/TP2/TP3 partial closes, the trailstop,
+and the signal/exit rules all keep running. When the timer turns back ON, the EA immediately runs a
+placement pass on the most recently closed bars instead of waiting for the next one. The
+`Autotrading :` word in the Main Panel header reads **Paused** (orange) whenever the timer is OFF,
+so a scheduled stand-down never looks like a dead EA. Directly underneath, a second header line
+explains the operating modes behind that word: `Timer: On/Paused/Off` (with the daily window, or
+the long pause's remaining time), `Choppy Trade: On/Off` (the `InpRangeMode` switch), and
+`M15/M30 Same Trend: On/Off` (the `InpRequireM15M30SameTrend` switch). A running long-pause
+countdown refreshes whenever its displayed minute rolls over.
+
+One MT5 limitation is unavoidable: an EA **cannot rewrite its own input box**, so when the 48
+hours finish the input still *displays* `48`. Internally the request is spent — the effective
+remaining pause is 0, and re-opening Properties shows the same `48` without starting a new pause.
+To pause another 48 hours deliberately, set `InpAutoOffHours = 0` → **OK**, then set it to `48`
+→ **OK**. Setting `0` also cancels a pause that is still running and re-arms the input; setting a
+*different* positive number starts a fresh pause of that many hours.
+
+> **Strategy Tester note:** during testing, MT5 makes `TimeLocal()` follow the simulated
+> server time. A backtest therefore evaluates `08:00-17:00` against historical **server**
+> timestamps, not the PC-local clock used live; convert the start/stop to server time when
+> testing a live PC-local window.
+
 #### Execution & Trade Management Rules
 
 1. **One Order per Timeframe at a Time:** Strictly 1 active trade or pending order per timeframe
    (`M5`, `M15`, `M30`) at a time. When all three timeframes qualify, up to 3 independent trades
    can run simultaneously.
 2. **M5 vs M15/M30 Trend Alignment:**
-   - **M5** trades its own signal and score directly.
-   - **M15** and **M30** only place a new order when **both M15 and M30 trends match** (`Both Going up`
-     or `Both Going down`).
+   - Every timeframe trades its own signal and score directly by default: M15 and M30 are **untied**
+     (`InpRequireM15M30SameTrend=false`).
+   - Set `InpRequireM15M30SameTrend=true` to tie M15 and M30: then neither places a new order unless
+     **both M15 and M30 trends match** (`Both Going up` or `Both Going down`).
 3. **Market vs Pending Limit Placement:**
    - Score `3/3` (`+3` or `-3`) $\rightarrow$ opens a **Market order** immediately.
    - Score `2/3` (`+2` or `-2`) $\rightarrow$ places a **Pending Limit order** (`BUY LIMIT` or `SELL LIMIT`)
@@ -472,8 +520,9 @@ slightly worse exit.
    - **Pending Limit Order:** On each new closed candle in the same direction (`2/3`), updates
      `Entry`, `SL`, and `TP1 / TP2 / TP3` to the new plan. If the score upgrades from `2/3` to
      `3/3` in the same direction, deletes the waiting pending order and opens the **Market order**
-     immediately. Cancels if the direction changes, drops to `HOLD`, or reaches its validity
-     expiry — 3 closed bars for trend orders, `RANGE_VALID_BARS` (8) for range fades.
+     immediately. Cancels if the direction changes, drops to `HOLD`, the optional M15/M30 trend
+     tie stops matching, or it reaches its validity expiry — 3 closed bars for trend orders,
+     `RANGE_VALID_BARS` (8) for range fades.
 7. **Range fades (Part 2 — Choppy rows):**
    - The order is **always a Pending Limit at the opposite band** of the box (never a market
      order — the score has no say in the entry), with `Stop = band + RANGE_SL_ATR × ATR` and
@@ -483,8 +532,16 @@ slightly worse exit.
    - The **score watcher does not apply** to range fades (after TP1/TP2): the box midpoint, the
      stop and the box-kill govern their exits. The flip-to-opposite-direction and
      HOLD-in-profit rules still apply, exactly as for trend trades.
-   - M5 range fades follow **rule 2 as usual**: M5 places its own box trade entirely on its own;
-     M15/M30 still require their mutual trend match.
+   - Range fades follow **rule 2 as usual**: each timeframe places its own box trade by default;
+     M15/M30 require their mutual trend match only when `InpRequireM15M30SameTrend=true`.
+8. **Autotrading timer & long pause (placement only):**
+   - With the daily schedule on, new orders place only inside the PC/VPS-local window; the
+     one-shot `InpAutoOffHours` pause overrides everything until it expires.
+   - At the moment the timer turns OFF, waiting pending orders are cancelled. Open positions are
+     **never** closed by the timer and keep all normal TP/trail/exit management.
+   - At the moment the timer turns ON, a placement pass runs immediately on the latest closed
+     bars (subject to the one-signal-per-bar rule), and the Main Panel header switches from
+     **Paused** back to **On**.
 
 #### Second Panel Layout (Right or Bottom of Main Panel)
 

@@ -125,8 +125,8 @@ ER = |close[i] - close[i-n]| / SUM |close[k] - close[k-1]|
 ```
 
 Net distance travelled divided by total path walked. `1.0` = straight line, `0.0` = pure noise.
-Used as a **dead-market gate**: below `InpERDead` (0.10) the row is forced to HOLD no matter what
-the score says.
+Used as a **dead-market gate**: below the standard `ER_DEAD` (0.10, baked in since v2.12) the
+row is forced to HOLD no matter what the score says.
 
 ER has become the standard regime input in the current MQL5 generation — it appears as the
 adaptive driver in the *Adaptive Kalman Trend Filter with Regime Bands* (2026), as a component of

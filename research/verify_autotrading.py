@@ -15,10 +15,12 @@ line and verifies every rule:
           pre-TP1 HOLD closes if in profit; pending 2/3 -> 3/3 upgrades to
           Market immediately; pending updates Entry/SL/TP on new bar or cancels
           on flip/HOLD/expiry
-  Rule 8  M5 trades its own signal directly; M15 and M30 require matching
-          trend direction between M15 and M30
+  Rule 8  Every timeframe trades its own signal directly by default
+          (InpRequireM15M30SameTrend=false); with that input true, M15
+          and M30 require matching trend direction between them
   Rule 10 2nd Panel header: "Autotrading | Trailstop : Off/On/Active | Stoploss : On/Off | SYMBOL"
-          Main Panel header: "SimpleEA | Autotrading : On/Off | SYMBOL | TF" + full-width sep
+          Main Panel header: "SimpleEA | Autotrading : On/Off/Paused | SYMBOL | TF",
+          then "Timer: ... | Choppy Trade: On/Off | M15/M30 Same Trend: On/Off" + full-width sep
   Rule 11 2nd Panel placement input InpAutoPanelPos (AUTO_POS_RIGHT default, or
           AUTO_POS_BOTTOM below Main Panel); opens when orders exist and closes
           completely (0 objects) when no trade/order is open
@@ -45,6 +47,11 @@ line and verifies every rule:
           the rethink bar and shows for exactly one bar).  A live trade
           switches to Hold: N bars (est ~M) - bars held against the
           Reach estimate.
+  Rule 15 PC-local autotrading timer + one-shot pause: outside the
+          daily window (or during InpAutoOffHours) no new orders are
+          placed and waiting pendings are cancelled, while open
+          trades keep being managed.  The pause deadline persists
+          across restarts and a completed request does not restart.
 
   Part 2 (the regime now DECIDES instead of abstaining):
           Steady rows trade the trend game exactly as above; Choppy rows
@@ -88,6 +95,22 @@ EM = char_w(FONT, DPI)
 TAGS = ("M5", "M15", "M30")
 STYLES = {"M5": "Scalp", "M15": "Short-term", "M30": "Intraday"}
 TF_SEC = {"M5": 300, "M15": 900, "M30": 1800}
+
+
+def parse_clock_minutes(value):
+    """ParseClockMinutes() in SimpleAdvisor.mq5 (raises on bad input)."""
+    txt = value.strip()
+    parts = txt.split(":")
+    if len(parts) != 2:
+        raise ValueError(value)
+    if not (1 <= len(parts[0]) <= 2 and 1 <= len(parts[1]) <= 2):
+        raise ValueError(value)
+    if not all(part.isdigit() for part in parts):
+        raise ValueError(value)
+    hour, minute = int(parts[0]), int(parts[1])
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError(value)
+    return hour * 60 + minute
 
 
 def compute_tp_levels(tp3):
@@ -194,6 +217,10 @@ class AutoTraderSim:
     #  first SL); the no-SL behaviour is verified explicitly further down
     #  with use_stop_loss=False.
     def __init__(self, symbol="XAUUSD", spec=None, balance=800.0, auto_trading=True,
+                 require_m15_m30_same_trend=False, range_mode=True,
+                 use_auto_schedule=False, auto_start_time="08:00",
+                 auto_end_time="17:00", auto_off_hours=0,
+                 local_minute_of_day=600, gmt_now=1700000000, pause_store=None,
                  use_stop_loss=True, use_trail_stop=True, trail_pct_tight=40,
                  trail_pct_steady=55, auto_panel_pos=AUTO_POS_RIGHT, panel_x=12, panel_y=24,
                  use_risk=True, use_min_lot=False, risk2=0.5, risk3=1.0,
@@ -203,6 +230,26 @@ class AutoTraderSim:
         self.balance = balance
         self.cur = "USD"
         self.auto_trading = auto_trading
+        self.require_m15_m30_same_trend = require_m15_m30_same_trend
+        self.range_mode = range_mode
+        self.use_auto_schedule = use_auto_schedule
+        self.auto_start_time = auto_start_time
+        self.auto_end_time = auto_end_time
+        self.auto_off_hours = auto_off_hours
+        self.local_minute_of_day = local_minute_of_day
+        self.gmt_now = gmt_now
+        self.pause_store = {} if pause_store is None else pause_store
+        self.sched_start_min = -1
+        self.sched_end_min = -1
+        if use_auto_schedule:
+            self.sched_start_min = parse_clock_minutes(auto_start_time)
+            self.sched_end_min = parse_clock_minutes(auto_end_time)
+            if self.sched_start_min == self.sched_end_min:
+                raise ValueError("schedule start and stop must differ")
+        self.pause_until_gmt = 0
+        self.init_auto_pause()
+        self.timer_was_allowed = self.auto_timer_allows_placement()
+        self.timer_state_init = True
         self.use_stop_loss = use_stop_loss
         self.use_trail_stop = use_trail_stop
         self.trail_pct_tight = trail_pct_tight
@@ -303,14 +350,117 @@ class AutoTraderSim:
 
     def trend_match_for_tf(self, tag):
         """TrendMatchForTF() in SimpleAdvisor.mq5 (Rule 8)."""
-        if tag == "M5":
-            return self.rows["M5"]["ok"] and self.rows["M5"]["dir"] != 0
+        if tag == "M5" or not self.require_m15_m30_same_trend:
+            return self.rows[tag]["ok"] and self.rows[tag]["dir"] != 0
         r15, r30 = self.rows["M15"], self.rows["M30"]
         if not r15["ok"] or not r30["ok"]:
             return False
         if r15["dir"] == 0 or r30["dir"] == 0:
             return False
         return r15["dir"] == r30["dir"]
+
+    def init_auto_pause(self):
+        """One-shot pause half of InitAutoTimer() in SimpleAdvisor.mq5."""
+        req = self.auto_off_hours
+        if req < 0 or req > 8760:
+            raise ValueError("InpAutoOffHours out of range")
+        if req == 0:
+            self.pause_store.clear()
+            self.pause_until_gmt = 0
+        elif self.pause_store.get("req") == req and self.pause_store.get("until", 0) > 0:
+            # Same request on restart/reinit: original deadline stands,
+            # whether it is still running or already completed.
+            self.pause_until_gmt = self.pause_store["until"]
+        else:
+            self.pause_until_gmt = self.gmt_now + req * 3600
+            self.pause_store["until"] = self.pause_until_gmt
+            self.pause_store["req"] = req
+
+    def auto_pause_active(self):
+        return self.pause_until_gmt > 0 and self.gmt_now < self.pause_until_gmt
+
+    def in_auto_schedule_window(self):
+        if not self.use_auto_schedule:
+            return True
+        if self.sched_start_min < 0 or self.sched_end_min < 0:
+            return False
+        now = self.local_minute_of_day
+        if self.sched_start_min < self.sched_end_min:
+            return self.sched_start_min <= now < self.sched_end_min
+        return now >= self.sched_start_min or now < self.sched_end_min
+
+    def auto_timer_allows_placement(self):
+        return not self.auto_pause_active() and self.in_auto_schedule_window()
+
+    def can_place_auto_orders(self):
+        return self.auto_trading and self.auto_timer_allows_placement()
+
+    def cancel_all_auto_pendings(self):
+        cancelled = 0
+        if not self.auto_trading:
+            return 0
+        for t in TAGS:
+            a = self.auto[t]
+            if a.active and not a.is_open:
+                a.last_signal_bar = self.rows[t]["last_bar"]
+                a.reset(keep_signal_bar=True)
+                cancelled += 1
+        return cancelled
+
+    def check_auto_timer_transition(self):
+        """CheckAutoTimerTransition() in SimpleAdvisor.mq5."""
+        allowed = self.auto_timer_allows_placement()
+        if not self.timer_state_init:
+            self.timer_was_allowed = allowed
+            self.timer_state_init = True
+            return
+        if allowed == self.timer_was_allowed:
+            if not allowed and self.auto_trading:
+                self.cancel_all_auto_pendings()
+            return
+        self.timer_was_allowed = allowed
+        if not self.auto_trading:
+            return
+        if not allowed:
+            self.cancel_all_auto_pendings()
+        else:
+            self.manage_auto_bar()
+
+    def auto_trading_header_text(self):
+        if not self.auto_trading:
+            return "Off"
+        return "On" if self.auto_timer_allows_placement() else "Paused"
+
+    def pause_remaining_minutes(self):
+        """PauseRemainingMinutes() in SimpleAdvisor.mq5."""
+        if not self.auto_pause_active():
+            return 0
+        return (self.pause_until_gmt - self.gmt_now + 59) // 60
+
+    def timer_header_text(self):
+        """TimerHeaderText() in SimpleAdvisor.mq5."""
+        if self.auto_pause_active():
+            mins = self.pause_remaining_minutes()
+            if mins >= 60:
+                return "Paused %dh %02dm" % (mins // 60, mins % 60)
+            return "Paused %dm" % mins
+        if not self.use_auto_schedule:
+            return "Off"
+        window = "%02d:%02d-%02d:%02d" % (
+            self.sched_start_min // 60, self.sched_start_min % 60,
+            self.sched_end_min // 60, self.sched_end_min % 60)
+        return ("On " if self.in_auto_schedule_window() else "Paused ") + window
+
+    def header_status_values(self):
+        """The three values on Main Panel header line 2."""
+        return (self.timer_header_text(),
+                "On" if self.range_mode else "Off",
+                "On" if self.require_m15_m30_same_trend else "Off")
+
+    def header_status_line(self):
+        timer, choppy, same_trend = self.header_status_values()
+        return "Timer: %s | Choppy Trade: %s | M15/M30 Same Trend: %s" % (
+            timer, choppy, same_trend)
 
     def is_score_strong(self, tag):
         """IsScoreStrongForTrade() in SimpleAdvisor.mq5."""
@@ -545,7 +695,7 @@ class AutoTraderSim:
                 p["val"][(2, 2)] = "%d/%d bars" % (left, vbars)
 
     def place_plan_order(self, tag):
-        if not self.auto_trading:
+        if not self.can_place_auto_orders():
             return False
         p = self.plans[tag]
         r = self.rows[tag]
@@ -649,6 +799,7 @@ class AutoTraderSim:
         self.refresh_live_pnl()
         if not self.auto_trading:
             return
+        timer_allows_placement = self.auto_timer_allows_placement()
         point = self.spec["point"]
 
         for t in TAGS:
@@ -724,6 +875,12 @@ class AutoTraderSim:
                 expired = (a.placed_bar > 0 and r["last_bar"] > a.placed_bar
                            and ((r["last_bar"] - a.placed_bar) // tf_sec) >= leash)
 
+                # Timer/pause OFF: cancel the unfilled entry, never refresh it
+                if not timer_allows_placement:
+                    a.last_signal_bar = r["last_bar"]
+                    a.reset(keep_signal_bar=True)
+                    continue
+
                 # 0) RANGE FADE: a closed bar outside the trade's box cancels the pending
                 if (a.is_range and r["ok"]
                         and (r["last_close"] > a.rng_top or r["last_close"] < a.rng_bot)):
@@ -759,7 +916,7 @@ class AutoTraderSim:
 
             # CASE C: Flat -> check new order placement
             if not a.active:
-                if (r["ok"] and r["dir"] != 0 and p["state"] == 2
+                if (timer_allows_placement and r["ok"] and r["dir"] != 0 and p["state"] == 2
                         and self.trend_match_for_tf(t)
                         and a.last_signal_bar != r["last_bar"]):
                     self.place_plan_order(t)
@@ -779,6 +936,12 @@ class AutoTraderSim:
             for t in TAGS:
                 a = self.auto[t]
                 if not a.active:
+                    continue
+
+                # Timer/pause OFF cancels pendings (OnTick transition in MQL)
+                if not a.is_open and not self.auto_timer_allows_placement():
+                    a.last_signal_bar = self.rows[t]["last_bar"]
+                    a.reset(keep_signal_bar=True)
                     continue
 
                 # Simulate broker filling a limit order when price reaches entry_price
@@ -1126,10 +1289,14 @@ def main():
     print("  ok  Rule 1: InpAutoTrading=false keeps EA read-only and 2nd panel closed")
 
     # ------------------------------------------------------------------
-    # 3. Rule 8: M5 independent; M15 and M30 require trend match
+    # 3. Rule 8: all timeframes independent by default; the optional
+    #    InpRequireM15M30SameTrend=true ties M15 and M30 together
     # ------------------------------------------------------------------
     sim = AutoTraderSim(auto_trading=True)
-    # M5 SELL (-3/3), M15 BUY (+3/3), M30 SELL (-2/3) -> M15 and M30 clash!
+    check(sim.require_m15_m30_same_trend is False,
+          "the shipped default must be untied (InpRequireM15M30SameTrend=false)")
+    # M5 SELL (-3/3), M15 BUY (+3/3), M30 SELL (-2/3) -> M15/M30 clash,
+    # but untied rows place on their own directions anyway.
     sim.set_bar("M5", -1, -3, bar_time=1000)
     sim.set_bar("M15", 1, 3, bar_time=1000)
     sim.set_bar("M30", -1, -2, bar_time=1000)
@@ -1137,21 +1304,171 @@ def main():
     sim.manage_auto_bar()
     check(sim.auto["M5"].active and sim.auto["M5"].is_open,
           "M5 must open its market trade independently")
-    check(not sim.auto["M15"].active and not sim.auto["M30"].active,
-          "M15 and M30 must NOT place orders when M15 and M30 trends disagree")
+    check(sim.auto["M15"].active and sim.auto["M15"].is_open
+          and sim.auto["M30"].active and not sim.auto["M30"].is_open,
+          "untied M15/M30 must place on their own directions even when they disagree")
 
-    # Now M30 aligns with M15 (M15 BUY +3/3 market, M30 BUY +2/3 pending limit)
+    # Tied mode: the same clash blocks both M15 and M30 (M5 still places).
+    sim_tied = AutoTraderSim(auto_trading=True, require_m15_m30_same_trend=True)
+    sim_tied.set_bar("M5", -1, -3, bar_time=1000)
+    sim_tied.set_bar("M15", 1, 3, bar_time=1000)
+    sim_tied.set_bar("M30", -1, -2, bar_time=1000)
+    sim_tied.update_plan()
+    sim_tied.manage_auto_bar()
+    check(sim_tied.auto["M5"].active and sim_tied.auto["M5"].is_open,
+          "M5 must stay independent even when the M15/M30 tie is on")
+    check(not sim_tied.auto["M15"].active and not sim_tied.auto["M30"].active,
+          "tied M15 and M30 must NOT place orders when their trends disagree")
+    sim_tied.set_bar("M30", 1, 2, bar_time=1800)
+    sim_tied.update_plan()
+    sim_tied.manage_auto_bar()
+    check(sim_tied.auto["M15"].active and sim_tied.auto["M15"].is_open
+          and sim_tied.auto["M30"].active and not sim_tied.auto["M30"].is_open,
+          "tied M15/M30 must place once their trends match (Market M15, Limit M30)")
+
+    # Return the untied sim to the all-aligned state the panel checks use:
+    # M30 flips to BUY, so its SELL limit is replaced by a BUY limit.
     sim.set_bar("M30", 1, 2, bar_time=1800)
     sim.update_plan()
     sim.manage_auto_bar()
     check(sim.auto["M5"].active and sim.auto["M15"].active and sim.auto["M30"].active,
-          "When M15 and M30 trends match, all 3 timeframes have 1 independent order each")
+          "When all rows qualify, all 3 timeframes have 1 independent order each")
     check(sim.auto["M15"].is_open and not sim.auto["M30"].is_open,
           "Score 3/3 opens Market order (M15); score 2/3 places Pending Limit order (M30)")
-    print("  ok  Rule 2, 3 & 8: 1 order per TF, Market at 3/3, Limit at 2/3, M15/M30 trend match enforced")
+    print("  ok  Rule 2, 3 & 8: 1 order per TF, Market at 3/3, Limit at 2/3, M15/M30 untied by default / tied on request")
 
     over = sim.render_both_panels("State 1: All 3 Timeframes Active (M5 Market SELL, M15 Market BUY, M30 Pending BUY LIMIT)")
     check(not over, "2nd panel overflowed: %s" % (over,))
+
+    # The tie also governs waiting pendings: untied pendings survive an
+    # M15/M30 disagreement; tied pendings are cancelled when it appears.
+    pend_free = AutoTraderSim(auto_trading=True)
+    pend_free.set_bar("M15", 1, 2, bar_time=1000)
+    pend_free.set_bar("M30", -1, -2, bar_time=1000)
+    pend_free.update_plan()
+    pend_free.manage_auto_bar()
+    pend_free.set_bar("M15", 1, 2, bar_time=1900)
+    pend_free.set_bar("M30", -1, -2, bar_time=2800)
+    pend_free.update_plan()
+    pend_free.manage_auto_bar()
+    check(pend_free.auto["M15"].active and not pend_free.auto["M15"].is_open
+          and pend_free.auto["M30"].active and not pend_free.auto["M30"].is_open,
+          "untied M15/M30 pendings must survive their directions disagreeing")
+
+    pend_tied = AutoTraderSim(auto_trading=True, require_m15_m30_same_trend=True)
+    pend_tied.set_bar("M15", 1, 2, bar_time=1000)
+    pend_tied.set_bar("M30", 1, 2, bar_time=1000)
+    pend_tied.update_plan()
+    pend_tied.manage_auto_bar()
+    check(pend_tied.auto["M15"].active and pend_tied.auto["M30"].active,
+          "tied M15/M30 pendings must place while their trends match")
+    pend_tied.set_bar("M15", 1, 2, bar_time=1900)
+    pend_tied.set_bar("M30", 0, 0, bar_time=2800)
+    pend_tied.update_plan()
+    pend_tied.manage_auto_bar()
+    check(not pend_tied.auto["M15"].active,
+          "a tied M15 pending must cancel when M30 no longer matches")
+    print("  ok  Rule 8 pendings: untied pendings survive disagreement; tied pendings cancel")
+
+    # ------------------------------------------------------------------
+    # 3c. Rule 15: PC-local timer + one-shot pause (placement gate only)
+    # ------------------------------------------------------------------
+    check(parse_clock_minutes("08:00") == 480 and parse_clock_minutes("7:05") == 425,
+          "clock parser must accept HH:MM and H:MM")
+    for bad in ("24:00", "08:60", "08", "ab:cd", "08:00:00"):
+        try:
+            parse_clock_minutes(bad)
+            raised = False
+        except ValueError:
+            raised = True
+        check(raised, "clock parser must reject %r" % bad)
+    try:
+        AutoTraderSim(use_auto_schedule=True, auto_start_time="08:00", auto_end_time="08:00")
+        raised = False
+    except ValueError:
+        raised = True
+    check(raised, "equal schedule start/stop must be rejected")
+
+    overnight = AutoTraderSim(use_auto_schedule=True, auto_start_time="22:00",
+                              auto_end_time="06:00", local_minute_of_day=23 * 60)
+    check(overnight.in_auto_schedule_window(), "23:00 must be inside a 22:00-06:00 window")
+    overnight.local_minute_of_day = 12 * 60
+    check(not overnight.in_auto_schedule_window(), "12:00 must be outside a 22:00-06:00 window")
+
+    sched = AutoTraderSim(auto_trading=True, use_auto_schedule=True,
+                          auto_start_time="08:00", auto_end_time="17:00",
+                          local_minute_of_day=7 * 60)
+    sched.set_bar("M5", -1, -3, bar_time=1000)
+    sched.set_bar("M15", 1, 3, bar_time=1000)
+    sched.set_bar("M30", 1, 2, bar_time=1000)
+    sched.update_plan()
+    sched.manage_auto_bar()
+    check(not sched.any_auto_active(),
+          "before the start time no timeframe may place")
+    check(sched.auto_trading_header_text() == "Paused",
+          "header must read Paused while the timer is OFF")
+    check(sched.timer_header_text() == "Paused 08:00-17:00",
+          "status line must show the closed daily window; got %r" % sched.timer_header_text())
+
+    sched.local_minute_of_day = 8 * 60
+    check(sched.timer_header_text() == "On 08:00-17:00",
+          "status line must show the open daily window; got %r" % sched.timer_header_text())
+    sched.check_auto_timer_transition()
+    check(sched.auto["M5"].active and sched.auto["M5"].is_open
+          and sched.auto["M15"].active and sched.auto["M15"].is_open
+          and sched.auto["M30"].active and not sched.auto["M30"].is_open,
+          "the ON transition must run a placement pass (Market M5/M15, Limit M30)")
+
+    sched.local_minute_of_day = 17 * 60
+    check(sched.timer_header_text() == "Paused 08:00-17:00",
+          "the stop minute must already read Paused; got %r" % sched.timer_header_text())
+    sched.check_auto_timer_transition()
+    check(not sched.auto["M30"].active,
+          "the OFF transition must cancel a waiting pending order")
+    check(sched.auto["M5"].active and sched.auto["M5"].is_open
+          and sched.auto["M15"].active and sched.auto["M15"].is_open,
+          "open trades must remain (and stay managed) after the timer turns OFF")
+    m5a = sched.auto["M5"]
+    tp1_ask = m5a.entry_price - m5a.tp1_pts * sched.spec["point"]  # SELL: exits at ask
+    sched.manage_auto_tick(bid=tp1_ask - 0.02, ask=tp1_ask)
+    check(sched.auto["M5"].tp1_hit and sched.auto["M5"].active,
+          "TP1 management must keep working while the timer is OFF")
+
+    pause_store = {}
+    t0 = 1700000000
+    pause1 = AutoTraderSim(auto_off_hours=48, gmt_now=t0, pause_store=pause_store)
+    check(pause_store.get("until") == t0 + 48 * 3600 and pause_store.get("req") == 48,
+          "a fresh 48h request must persist its deadline; got %r" % (pause_store,))
+    check(pause1.auto_pause_active() and not pause1.can_place_auto_orders(),
+          "the one-shot pause must block placement immediately")
+    pause1.gmt_now = t0 + 48 * 60
+    check(pause1.timer_header_text() == "Paused 47h 12m",
+          "status line must count down the long pause; got %r" % pause1.timer_header_text())
+    pause2 = AutoTraderSim(auto_off_hours=48, gmt_now=t0 + 3600, pause_store=pause_store)
+    check(pause2.pause_until_gmt == t0 + 48 * 3600,
+          "a restart must continue the original deadline, not extend it")
+    pause3 = AutoTraderSim(auto_off_hours=48, gmt_now=t0 + 48 * 3600 + 1,
+                           pause_store=pause_store)
+    check(not pause3.auto_pause_active() and pause3.can_place_auto_orders()
+          and pause3.pause_until_gmt == t0 + 48 * 3600,
+          "after expiry the effective pause is 0 and the same input must not restart it")
+    AutoTraderSim(auto_off_hours=0, gmt_now=t0 + 48 * 3600 + 2, pause_store=pause_store)
+    check(pause_store == {}, "setting 0 must clear the stored pause request")
+    pause4 = AutoTraderSim(auto_off_hours=48, gmt_now=t0 + 50 * 3600,
+                           pause_store=pause_store)
+    check(pause4.pause_until_gmt == t0 + 98 * 3600 and pause4.auto_pause_active(),
+          "after 0, setting 48 again must start a fresh 48h pause")
+    modes = AutoTraderSim(range_mode=False, require_m15_m30_same_trend=True)
+    check(modes.header_status_values() == ("Off", "Off", "On"),
+          "header line 2 must mirror Timer / Choppy Trade / Same Trend inputs; got %r"
+          % (modes.header_status_values(),))
+    widest = AutoTraderSim(use_auto_schedule=True, local_minute_of_day=7 * 60,
+                           range_mode=False, require_m15_m30_same_trend=False)
+    check(len(widest.header_status_line()) == 71,
+          "widest header status line must match STATUS_LINE_C=71; got %d (%r)"
+          % (len(widest.header_status_line()), widest.header_status_line()))
+    print("  ok  Rule 15: daily PC-local timer, OFF cancels pendings/manages opens, one-shot pause persists and auto-expires")
+    print("  ok  Header line 2: Timer window/countdown, Choppy Trade and M15/M30 Same Trend modes")
 
     # ------------------------------------------------------------------
     # 3b. Per-timeframe stop/target profile: the three styles aim apart

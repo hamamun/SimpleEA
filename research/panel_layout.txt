@@ -5,6 +5,7 @@ A)  all three timeframes active: trend, range fade, trend
 ================================================================================================
   +---------------------------------------------------------------------------------------------+
   |  SimpleEA   | Autotrading :   On                                             |  XAUUSD  |  M5 |
+  |  Timer:  Off                  | Choppy Trade:  On   | M15/M30 Same Trend:   Off               |
   | --------------------------------------------------------------------------------------------- |
   |  M5   Scalp            Trend:   Going down       Regime:  Steady                              |
   |                        Signal:  SELL             Score:   -3 / 3                              |
@@ -23,13 +24,14 @@ A)  all three timeframes active: trend, range fade, trend
   |                        Stop:    4289.10 255pts   Target:  4281.45 510pts    Reach:  ~9 bars   |
   |                        Risk:    2.55 USD         Reward:  5.10 USD          Valid:  3/3 bars  |
   +---------------------------------------------------------------------------------------------+
-  panel: 692 x 371 px   (one character = 7.3 px)
+  panel: 692 x 392 px   (one character = 7.3 px)
 
 ================================================================================================
 B)  the common case: one active, two HOLD (one line each)
 ================================================================================================
   +-------------------------------------------------------------------------------------------+
   |  SimpleEA   | Autotrading :   On                                           |  XAUUSD  |  M5 |
+  |  Timer:  Off                  | Choppy Trade:  On   | M15/M30 Same Trend:   Off             |
   | ------------------------------------------------------------------------------------------- |
   |  M5   Scalp            Trend:   Going down      Regime:  Steady                             |
   |                        Signal:  SELL            Score:   -3 / 3                             |
@@ -44,32 +46,34 @@ B)  the common case: one active, two HOLD (one line each)
   |  M15   HOLD            mixed — no edge either way                                           |
   |  M30   HOLD            chop — no valid box yet                                              |
   +-------------------------------------------------------------------------------------------+
-  panel: 676 x 287 px   (one character = 7.3 px)
+  panel: 676 x 308 px   (one character = 7.3 px)
 
 ================================================================================================
 C)  nothing anywhere: Group 2 shrinks to three lines
 ================================================================================================
-  +-------------------------------------------------------------+
-  |  SimpleEA   | Autotrading :   On            |  XAUUSD  |  M5  |
-  | ------------------------------------------------------------- |
-  |  M5   Scalp            Trend:   Sideways     Regime:  Mixed   |
-  |                        Signal:  HOLD         Score:   +0 / 3  |
-  |  M15  Short-term       Trend:   Sideways     Regime:  Mixed   |
-  |                        Signal:  HOLD         Score:   +0 / 3  |
-  |  M30  Intraday         Trend:   Sideways     Regime:  Mixed   |
-  |                        Signal:  HOLD         Score:   +0 / 3  |
-  | ------------------------------------------------------------- |
-  |  M5    HOLD            mixed — no edge either way             |
-  |  M15   HOLD            mixed — no edge either way             |
-  |  M30   HOLD            mixed — no edge either way             |
-  +-------------------------------------------------------------+
-  panel: 452 x 245 px   (one character = 7.3 px)
+  +-------------------------------------------------------------------------------+
+  |  SimpleEA   | Autotrading :   On                               |  XAUUSD  |  M5 |
+  |  Timer:  Off                  | Choppy Trade:  On   | M15/M30 Same Trend:   Off |
+  | ------------------------------------------------------------------------------- |
+  |  M5   Scalp            Trend:   Sideways     Regime:  Mixed                     |
+  |                        Signal:  HOLD         Score:   +0 / 3                    |
+  |  M15  Short-term       Trend:   Sideways     Regime:  Mixed                     |
+  |                        Signal:  HOLD         Score:   +0 / 3                    |
+  |  M30  Intraday         Trend:   Sideways     Regime:  Mixed                     |
+  |                        Signal:  HOLD         Score:   +0 / 3                    |
+  | ------------------------------------------------------------------------------- |
+  |  M5    HOLD            mixed — no edge either way                               |
+  |  M15   HOLD            mixed — no edge either way                               |
+  |  M30   HOLD            mixed — no edge either way                               |
+  +-------------------------------------------------------------------------------+
+  panel: 588 x 266 px   (one character = 7.3 px)
 
 ================================================================================================
 D)  M15 still downloading history
 ================================================================================================
   +-------------------------------------------------------------------------------------------+
   |  SimpleEA   | Autotrading :   On                                           |  XAUUSD  |  M5 |
+  |  Timer:  Off                  | Choppy Trade:  On   | M15/M30 Same Trend:   Off             |
   | ------------------------------------------------------------------------------------------- |
   |  M5   Scalp            Trend:   Going down      Regime:  Steady                             |
   |                        Signal:  SELL            Score:   -3 / 3                             |
@@ -84,13 +88,14 @@ D)  M15 still downloading history
   |  M15   waiting         history still loading                                                |
   |  M30   HOLD            mixed — no edge either way                                           |
   +-------------------------------------------------------------------------------------------+
-  panel: 676 x 287 px   (one character = 7.3 px)
+  panel: 676 x 308 px   (one character = 7.3 px)
 
 ================================================================================================
 E)  a $200 account where the minimum lot risks more than 1% (flagged)
 ================================================================================================
   +-------------------------------------------------------------------------------------------+
   |  SimpleEA   | Autotrading :   On                                           |  XAUUSD  |  M5 |
+  |  Timer:  Off                  | Choppy Trade:  On   | M15/M30 Same Trend:   Off             |
   | ------------------------------------------------------------------------------------------- |
   |  M5   Scalp            Trend:   Going down      Regime:  Steady                             |
   |                        Signal:  SELL            Score:   -3 / 3                             |
@@ -105,13 +110,14 @@ E)  a $200 account where the minimum lot risks more than 1% (flagged)
   |  M15   HOLD            mixed — no edge either way                                           |
   |  M30   HOLD            mixed — no edge either way                                           |
   +-------------------------------------------------------------------------------------------+
-  panel: 676 x 287 px   (one character = 7.3 px)
+  panel: 676 x 308 px   (one character = 7.3 px)
 
 ================================================================================================
 F)  a big balance and a wide stop: do long numbers break the layout?
 ================================================================================================
   +---------------------------------------------------------------------------------------------+
   |  SimpleEA   | Autotrading :   On                                             |  XAUUSD  |  M5 |
+  |  Timer:  Off                  | Choppy Trade:  On   | M15/M30 Same Trend:   Off               |
   | --------------------------------------------------------------------------------------------- |
   |  M5   Scalp            Trend:   Going down       Regime:  Steady                              |
   |                        Signal:  SELL             Score:   -3 / 3                              |
@@ -128,13 +134,14 @@ F)  a big balance and a wide stop: do long numbers break the layout?
   |                        Risk:    10200.00 USD     Reward:  15300.00 USD      Valid:  3/3 bars  |
   |  M30   HOLD            mixed — no edge either way                                             |
   +---------------------------------------------------------------------------------------------+
-  panel: 692 x 329 px   (one character = 7.3 px)
+  panel: 692 x 350 px   (one character = 7.3 px)
 
 ================================================================================================
 G)  min-lot mode on EURUSD
 ================================================================================================
   +-------------------------------------------------------------------------------------------+
   |  SimpleEA   | Autotrading :   On                                           |  EURUSD  |  M5 |
+  |  Timer:  Off                  | Choppy Trade:  On   | M15/M30 Same Trend:   Off             |
   | ------------------------------------------------------------------------------------------- |
   |  M5   Scalp            Trend:   Going up        Regime:  Steady                             |
   |                        Signal:  BUY             Score:   +3 / 3                             |
@@ -149,32 +156,34 @@ G)  min-lot mode on EURUSD
   |  M15   HOLD            mixed — no edge either way                                           |
   |  M30   HOLD            mixed — no edge either way                                           |
   +-------------------------------------------------------------------------------------------+
-  panel: 676 x 287 px   (one character = 7.3 px)
+  panel: 676 x 308 px   (one character = 7.3 px)
 
 ================================================================================================
 H)  Part 2: blocked rows say WHY; Signal shows the trade they would have fired (greyed on the real panel)
 ================================================================================================
-  +-------------------------------------------------------------+
-  |  SimpleEA   | Autotrading :   On            |  XAUUSD  |  M5  |
-  | ------------------------------------------------------------- |
-  |  M5   Scalp            Trend:   Sideways     Regime:  Mixed   |
-  |                        Signal:  BUY          Score:   +2 / 3  |
-  |  M15  Short-term       Trend:   Sideways     Regime:  Steady  |
-  |                        Signal:  SELL         Score:   -3 / 3  |
-  |  M30  Intraday         Trend:   Sideways     Regime:  Choppy  |
-  |                        Signal:  HOLD         Score:   +0 / 3  |
-  | ------------------------------------------------------------- |
-  |  M5    HOLD            mixed — no edge either way             |
-  |  M15   HOLD            quiet — nothing worth trading          |
-  |  M30   HOLD            chop — nothing clears the spread       |
-  +-------------------------------------------------------------+
-  panel: 452 x 245 px   (one character = 7.3 px)
+  +-------------------------------------------------------------------------------+
+  |  SimpleEA   | Autotrading :   On                               |  XAUUSD  |  M5 |
+  |  Timer:  Off                  | Choppy Trade:  On   | M15/M30 Same Trend:   Off |
+  | ------------------------------------------------------------------------------- |
+  |  M5   Scalp            Trend:   Sideways     Regime:  Mixed                     |
+  |                        Signal:  BUY          Score:   +2 / 3                    |
+  |  M15  Short-term       Trend:   Sideways     Regime:  Steady                    |
+  |                        Signal:  SELL         Score:   -3 / 3                    |
+  |  M30  Intraday         Trend:   Sideways     Regime:  Choppy                    |
+  |                        Signal:  HOLD         Score:   +0 / 3                    |
+  | ------------------------------------------------------------------------------- |
+  |  M5    HOLD            mixed — no edge either way                               |
+  |  M15   HOLD            quiet — nothing worth trading                            |
+  |  M30   HOLD            chop — nothing clears the spread                         |
+  +-------------------------------------------------------------------------------+
+  panel: 588 x 266 px   (one character = 7.3 px)
 
 ================================================================================================
 I)  Part 2: range fades on two timeframes - limit at the opposite band, target = half the box
 ================================================================================================
   +---------------------------------------------------------------------------------------------+
   |  SimpleEA   | Autotrading :   On                                             |  XAUUSD  |  M5 |
+  |  Timer:  Off                  | Choppy Trade:  On   | M15/M30 Same Trend:   Off               |
   | --------------------------------------------------------------------------------------------- |
   |  M5   Scalp            Trend:   Going down       Regime:  Choppy                              |
   |                        Signal:  SELL             Score:   -1 / 3                              |
@@ -191,13 +200,14 @@ I)  Part 2: range fades on two timeframes - limit at the opposite band, target =
   |                        Stop:    4280.30 170pts   Target:  4286.00 400pts    Reach:  ~6 bars   |
   |                        Risk:    3.40 USD         Reward:  8.00 USD          Valid:  8/8 bars  |
   +---------------------------------------------------------------------------------------------+
-  panel: 692 x 329 px   (one character = 7.3 px)
+  panel: 692 x 350 px   (one character = 7.3 px)
 
 ================================================================================================
 J)  the time cell on live trades: Hold (bars held vs Reach) instead of the signal leash
 ================================================================================================
   +------------------------------------------------------------------------------------------------------+
   |  SimpleEA   | Autotrading :   On                                                      |  XAUUSD  |  M5 |
+  |  Timer:  Off                  | Choppy Trade:  On   | M15/M30 Same Trend:   Off                        |
   | ------------------------------------------------------------------------------------------------------ |
   |  M5   Scalp            Trend:   Going up         Regime:  Steady                                       |
   |                        Signal:  BUY              Score:   +3 / 3                                       |
@@ -214,7 +224,7 @@ J)  the time cell on live trades: Hold (bars held vs Reach) instead of the signa
   |                        Stop:    4291.70 170pts   Target:  4286.00 400pts    Reach:  ~6 bars            |
   |                        Risk:    3.40 USD         Reward:  8.00 USD          Hold:   12 bars (est ~6)   |
   +------------------------------------------------------------------------------------------------------+
-  panel: 756 x 329 px   (one character = 7.3 px)
+  panel: 756 x 350 px   (one character = 7.3 px)
 
 ================================================================================================
 Width sweep - does the 0.55 em budget hold up across DPI and font size?

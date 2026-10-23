@@ -57,7 +57,7 @@
 //|  the range game - it trades through the box gates instead.         |
 //|                                                                  |
 //|  Kaufman's Efficiency Ratio acts as a dead-market gate: below     |
-//|  InpERDead the market is not travelling anywhere, so any          |
+//|  ER_DEAD   the market is not travelling anywhere, so any          |
 //|  directional read is meaningless and the row is forced to HOLD    |
 //|  with "quiet - nothing worth trading" on the plan block.          |
 //|                                                                  |
@@ -99,8 +99,12 @@
 //|   - Strictly 1 active trade/order per timeframe (M5, M15, M30)    |
 //|     at a time, tracked by per-timeframe magic numbers.            |
 //|   - Market order at score 3/3; Pending Limit order at score 2/3.  |
-//|   - M5 trades its own signal directly; M15 and M30 require their  |
-//|     trends (Going up / Going down) to match before placing.       |
+//|   - M5 trades its own signal directly. M15/M30 are untied by      |
+//|     default; tie them with InpRequireM15M30SameTrend = true.      |
+//|   - Optional PC-local timer/pause: while OFF, no new orders are   |
+//|     placed and pendings are cancelled; open trades stay managed.  |
+//|   - A second Main Panel header line shows Timer, Choppy Trade     |
+//|     and M15/M30 Same Trend mode/status at a glance.               |
 //|   - Three take-profit levels per order:                           |
 //|        TP3 = 100% of SimpleEA's advised target points             |
 //|        TP2 = 25% less than TP3 (75% of TP3)                       |
@@ -153,7 +157,7 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "2.11"
+#property version   "2.16"
 #property description "Multi-timeframe BUY/SELL/HOLD direction panel, trade plan and full-auto executor. M5 / M15 / M30 charts only."
 
 #ifndef M_PI
@@ -169,60 +173,26 @@ enum ENUM_AUTO_PANEL_POS
 //==================================================================
 //  INPUTS
 //==================================================================
-input group "=== Autotrading ==="
+input group "=== Autotrading & order management ==="
 input bool                InpAutoTrading  = true;            // Autotrading (true = full auto, false = read-only)
+//  Daily timer + one-shot pause, both on PC LOCAL time.  These gate
+//  NEW placements only: while OFF, waiting pendings are cancelled and
+//  already-open trades keep being managed (trail / TP / exits).
+input bool                InpUseAutoSchedule = false;        // Use daily autotrading timer (PC local time)
+input string              InpAutoStartTime   = "08:00";      // Autotrading start time (PC local HH:MM)
+input string              InpAutoEndTime     = "17:00";      // Autotrading stop time (PC local HH:MM)
+input int                 InpAutoOffHours    = 0;            // One-shot pause hours from when set (0=off, 48=2 days)
+input bool                InpRequireM15M30SameTrend = false; // M15/M30 same trend required to place (false = untied)
 input bool                InpUseStopLoss  = false;           // Stoploss (true = place initial SL, false = only when trailstop / TP1 places it)
 input bool                InpUseTrailStop = true;            // Pre-TP1 stepped trailstop (true = on, Entry->TP1 only)
 input int                 InpTrailPctTight  = 40;            // Trailstop % when regime is NOT Steady (10-70)
 input int                 InpTrailPctSteady = 55;            // Trailstop % in a Steady, clear trend (10-70)
-input ENUM_AUTO_PANEL_POS InpAutoPanelPos = AUTO_POS_BOTTOM; // Right panel placement (Right or Bottom)
 input long                InpMagicBase    = 202610;          // Base magic number (+0 M5, +1 M15, +2 M30)
 
-input group "=== Panel appearance ==="
-input int      InpPanelX      = 12;          // Panel X offset (px)
-input int      InpPanelY      = 24;          // Panel Y offset (px)
-input int      InpFontSize    = 10;          // Font size
-input string   InpFont        = "Consolas";  // Font (monospaced aligns best)
-input color    InpBgColor     = C'48,48,48'; // Panel background
-input color    InpTitleColor  = clrWhite;    // Title colour
-input color    InpBuyColor    = clrLime;     // "Going up" colour
-input color    InpSellColor   = clrTomato;   // "Going down" colour
-input color    InpHoldColor   = clrSilver;   // "Sideways" colour
-
-input group "=== Signal thresholds ==="
+input group "=== Signal & range mode ==="
 input int      InpBuyScore    = 2;           // Score >= this  => BUY
 input int      InpSellScore   = -2;          // Score <= this  => SELL
 
-input group "=== Trade plan & sizing ==="
-//  Sizing is one switch and one number:
-//     InpUseRisk  = true   -> risk InpRiskPct % of balance (score 3: double)
-//     InpUseRisk  = false  -> no risk % is applied: a fixed lot ladder,
-//                             0.01 lot per 1,000 of balance (score 3: x1.5)
-//     InpUseMinLot = true  -> overrides both: always the symbol's min lot
-//  The ladder's two numbers and the score-3 multiplier are baked in -
-//  they define the fallback, they are not a dial to tune.
-input bool     InpUseRisk      = true;       // Allow risk (false = no risk %, fixed lot ladder)
-input bool     InpUseMinLot    = false;      // Always advise the symbol's minimum lot
-input double   InpRiskPct      = 0.5;        // Risk % per trade (score 3 risks double)
-
-input group "=== Shared engine settings ==="
-//  One filter for all three rows: M5, M15 and M30 run the same Precision
-//  Trend periods, each on its own timeframe's bars.  These used to be two
-//  inputs per timeframe - six knobs that all carried the same default and
-//  were never set apart - so they were collapsed into these.  A timeframe
-//  that genuinely needs its own eyes can still get them in code:
-//  ConfigureRow() in OnInit() hands each row its own copy, so passing a
-//  different period for one row costs one line and touches nothing else.
-//  The two periods stay inputs because they ARE symbol-sensitive - what
-//  counts as a trend on XAUUSD is not what counts on EURUSD - and the
-//  history pull above grows itself when you raise them.
-input int      InpTrendL1     = 150;         // Precision Trend long period  (all timeframes)
-input int      InpTrendL2     = 24;          // Precision Trend short period (all timeframes)
-input int      InpHurstWindow = 256;         // Hurst estimate window (bars)
-input int      InpERPeriod    = 20;          // Kaufman efficiency-ratio period
-input double   InpERDead      = 0.10;        // Efficiency below this => dead market, force HOLD
-
-input group "=== Range mode (choppy markets) ==="
 //  Part 2: the regime now DECIDES instead of abstaining.  Steady rows
 //  play the trend game as before; Choppy rows (H below the revert
 //  threshold - moves genuinely come back) play the RANGE game: entry at
@@ -236,6 +206,24 @@ input group "=== Range mode (choppy markets) ==="
 //  timeframes, exactly like the trade profile.
 input bool     InpRangeMode    = true;       // Range mode: trade the box when choppy (default ON)
 
+//  (No engine-settings group: the Precision Trend periods, the Hurst
+//  window and the efficiency-ratio numbers are STANDARD - they are the
+//  tested calibration, not user preferences, so since v2.12 they live
+//  in THE ENGINE PROFILE in INTERNALS below and SimpleEA applies them
+//  automatically to all three rows.  See that block to recalibrate.)
+
+input group "=== Trade plan & sizing ==="
+//  Sizing is one switch and one number:
+//     InpUseRisk  = true   -> risk InpRiskPct % of balance (score 3: double)
+//     InpUseRisk  = false  -> no risk % is applied: a fixed lot ladder,
+//                             0.01 lot per 1,000 of balance (score 3: x1.5)
+//     InpUseMinLot = true  -> overrides both: always the symbol's min lot
+//  The ladder's two numbers and the score-3 multiplier are baked in -
+//  they define the fallback, they are not a dial to tune.
+input bool     InpUseRisk      = true;       // Allow risk (false = no risk %, fixed lot ladder)
+input double   InpRiskPct      = 0.5;        // Risk % per trade (score 3 risks double)
+input bool     InpUseMinLot    = false;      // Always advise the symbol's minimum lot
+
 input group "=== Market closed detection ==="
 //  While the symbol cannot be traded (weekend, daily break, symbol halt)
 //  the panel collapses to the same two-line widget the unsupported chart
@@ -243,6 +231,18 @@ input group "=== Market closed detection ==="
 //  stands down until the market opens again.
 input bool     InpDetectClosed   = true;     // Detect a closed market, collapse the panel to "Market Closed"
 input int      InpClosedStaleMin = 30;       // Also closed: no quote for this many minutes (0 = off)
+
+input group "=== Panels & appearance ==="
+input int      InpPanelX      = 12;          // Panel X offset (px)
+input int      InpPanelY      = 24;          // Panel Y offset (px)
+input ENUM_AUTO_PANEL_POS InpAutoPanelPos = AUTO_POS_BOTTOM; // Right panel placement (Right or Bottom)
+input int      InpFontSize    = 10;          // Font size
+input string   InpFont        = "Consolas";  // Font (monospaced aligns best)
+input color    InpBgColor     = C'48,48,48'; // Panel background
+input color    InpTitleColor  = clrWhite;    // Title colour
+input color    InpBuyColor    = clrLime;     // "Going up" colour
+input color    InpSellColor   = clrTomato;   // "Going down" colour
+input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 
 //==================================================================
 //  INTERNALS
@@ -252,6 +252,30 @@ input int      InpClosedStaleMin = 30;       // Also closed: no quote for this m
 #define TF_COUNT    3
 #define TF_TEXT     "M5/M15/M30"
 #define TRAIL_STEP_PCT 5.0   // pre-TP1 trailstop: SL jumps this many % per step of progress
+
+//  ---- THE ENGINE PROFILE (baked in: the standard engine) -----------
+//  These five were the "Shared engine settings" inputs until v2.11.
+//  They are standard now, for the same reason as the three profiles
+//  below: none of them is a user preference - they are the calibration
+//  the signal engine was measured with, and a wrong value silently
+//  changes the strategy instead of a convenience.  So SimpleEA simply
+//  applies them itself: one filter for all three rows, M5, M15 and M30
+//  each running the same periods on its own timeframe's bars.
+//  ConfigureRow() in OnInit() hands each row its own copy, so a
+//  timeframe that genuinely needs its own eyes can still get them in
+//  code - passing a different period for one row costs one line and
+//  touches nothing else.  The history pull (BarsNeeded) grows itself
+//  if a value here is ever raised.  The two trend periods are the one
+//  genuinely symbol-sensitive pair: if a symbol class is ever measured
+//  to need its own, the fix is a per-row value at ConfigureRow() time,
+//  decided by the EA - not a return to user knobs.  ER_PERIOD matches
+//  RANGE_BARS on purpose (the E/R reads the box's own bars), and
+//  ER_DEAD is an absolute dead-market gate, never a relative one.
+#define TREND_L1        150       // Precision Trend long period  (all timeframes)
+#define TREND_L2        24        // Precision Trend short period (all timeframes)
+#define HURST_WINDOW    256       // Hurst estimate window (bars, each timeframe's own)
+#define ER_PERIOD       20        // Kaufman efficiency-ratio period (= RANGE_BARS)
+#define ER_DEAD         0.10      // efficiency below this => dead market, force HOLD
 
 //  ---- THE TRADE PROFILE (baked in: this is the tested set) ----------
 //  These were inputs until they stopped earning a decision.  None of
@@ -275,9 +299,10 @@ input int      InpClosedStaleMin = 30;       // Also closed: no quote for this m
 //  the 0.5 coin-flip before it will call a regime at all (SIGNAL_LOGIC.md
 //  section 4).  Nothing about gold, or about M5, moves those numbers -
 //  only a different estimator would - so they are not a dial.  The window
-//  the estimate is taken over IS a dial (InpHurstWindow): that one does
-//  depend on the timeframe, because 256 bars is five days on M30 and two
-//  days on M5.  Widen the band here and the panel goes quieter; narrow it
+//  the estimate is taken over (HURST_WINDOW in THE ENGINE PROFILE above)
+//  is standard for the same reason: 256 bars is five days on M30 and two
+//  days on M5, and the estimator needs that many bars to be stable on
+//  every row.  Widen the band here and the panel goes quieter; narrow it
 //  and it trades more - which is exactly why it is not a user input.
 #define HURST_TREND     0.55      // H above this = persistent: play the trend game
 #define HURST_REVERT    0.45      // H below this = anti-persistent: play the range game
@@ -311,7 +336,8 @@ input int      InpClosedStaleMin = 30;       // Also closed: no quote for this m
 #define RISK_SCORE3_X   2.0       // score 3 risks this multiple of the score-2 percentage
 #define BAL_PER_001     1000.0    // risk-off mode: balance per 0.01 lot
 #define SCORE3_FACTOR   1.5       // risk-off mode: lot multiplier at score 3
-#define HEAD_H      34     // height of the header band (title + symbol line)
+#define HEAD_H      34     // height of a ONE-LINE header band (notice + 2nd Panel)
+#define STATUS_LINE_C 71   // widest Main Panel mode-status line, in characters
 #define PLAN_W_MIN  406    // panel width with no plan showing
 #define PLAN_LINES  3      // lines an ACTIVE timeframe uses (1 for HOLD)
 //  The three column anchors are the FONT-9 design, not raw pixels: ColX()
@@ -385,6 +411,19 @@ int  g_rowH    = 20;
 bool g_panelOK = false; // what is currently drawn: false = notice only
 datetime g_srvSaidClosedUntil = 0;  // server said "market closed": trust it for a while
 
+//  Autotrading timer (PC local) + one-shot pause state.  The pause
+//  deadline itself is kept in GMT (an elapsed duration), while the
+//  daily start/stop are read against the PC/VPS local clock.
+int      g_schedStartMin    = -1;   // daily start, minutes since local midnight
+int      g_schedEndMin      = -1;   // daily stop,  minutes since local midnight
+datetime g_pauseUntilGMT    = 0;    // one-shot pause deadline (GMT), 0 = none
+string   g_pauseGVUntil     = "";   // GlobalVariable holding the deadline
+string   g_pauseGVReq       = "";   // GlobalVariable holding the requested hours
+bool     g_timerStateInit   = false;
+bool     g_timerWasAllowed  = false; // last observed timer placement state
+ulong    g_lastPendCancelTryMs = 0;  // throttled pending-cancel retries while OFF
+int      g_pauseMinsShown   = -1;    // pause countdown minute currently on the panel
+
 ENUM_TIMEFRAMES g_drawnTf = (ENUM_TIMEFRAMES)0;  // timeframe the header was drawn for
 
 //+------------------------------------------------------------------+
@@ -397,9 +436,9 @@ ENUM_TIMEFRAMES g_drawnTf = (ENUM_TIMEFRAMES)0;  // timeframe the header was dra
 //     - E/R, ATR, range box : a handful of bars each
 //
 //  The pull is the largest of those, never below BARS_BASE.  So the
-//  default settings keep pulling 700, but raising the Hurst window to
-//  900 or a trend period to 400 raises the pull automatically -
-//  there is nothing to remember to change alongside them.
+//  standard profile keeps pulling 700, but raising the Hurst window to
+//  900 or a trend period to 400 in THE ENGINE PROFILE raises the pull
+//  automatically - there is nothing to remember to change alongside it.
 //+------------------------------------------------------------------+
 int BarsNeeded()
 {
@@ -408,14 +447,14 @@ int BarsNeeded()
    //  The trend filter's long period (shared by all three timeframes).
    //  Clamped BEFORE the multiply, so a typo (L1 = 900,000,000) cannot
    //  overflow the int and hand the loader a negative count.
-   int l1max = InpTrendL1;
+   int l1max = TREND_L1;
    if(l1max < 1)          l1max = 1;
    if(l1max > BARS_MAX)   l1max = BARS_MAX;
    int l1need = MathMin(BARS_MAX, BARS_WARMUP_X * l1max);
    if(l1need > need) need = l1need;
 
    //  Hurst window plus margin for the block averaging (same guard).
-   int hneed = InpHurstWindow;
+   int hneed = HURST_WINDOW;
    if(hneed < 32)         hneed = 32;
    if(hneed > BARS_MAX)   hneed = BARS_MAX;
    if(hneed + 50 > need)  need = hneed + 50;
@@ -423,7 +462,7 @@ int BarsNeeded()
    //  Short lookbacks: only matter if someone sets them very large.
    if(RANGE_BARS    + 5 > need) need = RANGE_BARS    + 5;
    if(ATR_PERIOD    + 5 > need) need = ATR_PERIOD    + 5;
-   if(InpERPeriod   + 5 > need) need = InpERPeriod   + 5;
+   if(ER_PERIOD     + 5 > need) need = ER_PERIOD     + 5;
 
    if(need > BARS_MAX) need = BARS_MAX;
    return(need);
@@ -465,17 +504,19 @@ int OnInit()
    //  One filter, one regime test, three timeframes: each row gets the
    //  shared numbers and applies them to its own closed bars.  (Give a
    //  row different numbers here and only that row changes.)
-   ConfigureRow(0, PERIOD_M5,  "M5",  "Scalp",      InpTrendL1, InpTrendL2,
+   ConfigureRow(0, PERIOD_M5,  "M5",  "Scalp",      TREND_L1, TREND_L2,
                 HURST_TREND,    HURST_REVERT,    SL_ATR_M5,  TP_ATR_M5);
-   ConfigureRow(1, PERIOD_M15, "M15", "Short-term", InpTrendL1, InpTrendL2,
+   ConfigureRow(1, PERIOD_M15, "M15", "Short-term", TREND_L1, TREND_L2,
                 HURST_TREND,    HURST_REVERT,    SL_ATR_M15, TP_ATR_M15);
-   ConfigureRow(2, PERIOD_M30, "M30", "Intraday",   InpTrendL1, InpTrendL2,
+   ConfigureRow(2, PERIOD_M30, "M30", "Intraday",   TREND_L1, TREND_L2,
                 HURST_TREND,    HURST_REVERT,    SL_ATR_M30, TP_ATR_M30);
 
-   if(InpTrendL1 < InpTrendL2)
+   //  The trend periods are baked in (THE ENGINE PROFILE), so this can
+   //  only trip for someone who has just edited them the wrong way round.
+   if(TREND_L1 < TREND_L2)
    {
       Print("SimpleEA: the long trend period must be greater than the short one. ",
-            "Set InpTrendL1 > InpTrendL2.");
+            "Set TREND_L1 > TREND_L2 in THE ENGINE PROFILE.");
       return(INIT_PARAMETERS_INCORRECT);
    }
    //  The regime boundaries are baked in, so this can only trip for
@@ -524,13 +565,22 @@ int OnInit()
                   "far above the shipped 0.5%% / 1.0%%.", InpRiskPct,
                   InpRiskPct * RISK_SCORE3_X);
 
+   if(!InitAutoTimer())
+      return(INIT_PARAMETERS_INCORRECT);
+
+   //  The standard engine, stated once so the log always records which
+   //  calibration produced the reads (these are not inputs any more).
+   PrintFormat("SimpleEA: standard engine - Precision Trend %d/%d, Hurst window %d bars, "
+               "E/R %d with dead-market gate %.2f (all three timeframes).",
+               TREND_L1, TREND_L2, HURST_WINDOW, ER_PERIOD, ER_DEAD);
+
    g_rowH   = InpFontSize + 11;
    // Each timeframe takes TWO lines: Trend/Regime on the first,
    // Signal (BUY/SELL/HOLD)/Score on the second.
    //  height is only provisional here: DrawSupportedPanel() recomputes it
    //  because the second group's height depends on how many timeframes
    //  actually have a signal.
-   g_panelH = HEAD_H + TF_COUNT * 2 * g_rowH + 8;
+   g_panelH = MainHeaderHeight() + TF_COUNT * 2 * g_rowH + 8;
 
    //  The notice is the one line that must always be readable in full, so
    //  the width that line needs is a floor for BOTH panels - the normal one
@@ -589,6 +639,7 @@ void OnTick()
    //  live timeframe change is caught whether or not MetaTrader re-started
    //  the EA for it.  On a wrong chart that call costs one comparison.
    CheckNewBars();
+   CheckAutoTimerTransition();
 
    //  Real-time tick checks for TP1/TP2/TP3 partial closes, break-even SL,
    //  and live Ask/Bid/P&L updates on the 2nd Panel.
@@ -600,6 +651,7 @@ void OnTick()
 void OnTimer()
 {
    CheckNewBars();
+   CheckAutoTimerTransition();
    if(ChartSupported() && g_panelOK)
       ManageAutoTick();
 }
@@ -969,8 +1021,8 @@ void EvaluateRow(int idx)
    //     Mixed   (in between)  -> stand aside: nothing is calculable
    //  Each row uses ITS OWN timeframe's eyes - M5's chop never touches
    //  M15/M30 and vice versa.
-   double H  = HurstExponent(c, last, InpHurstWindow);
-   double ER = EfficiencyRatio(c, last, InpERPeriod);
+   double H  = HurstExponent(c, last, HURST_WINDOW);
+   double ER = EfficiencyRatio(c, last, ER_PERIOD);
 
    int v3   = 0;
    int mode = 0;                          // 0 stand aside | 1 trend game | 2 range game
@@ -991,7 +1043,7 @@ void EvaluateRow(int idx)
 
    // ---- the decision -----------------------------------------------
    int dir = 0;
-   if(ER < InpERDead)
+   if(ER < ER_DEAD)
    {
       mode = 0;
       g_rows[idx].blockReason = "quiet — nothing worth trading";
@@ -1712,6 +1764,359 @@ bool CanTradeNow()
    if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))   return(false);
    return(true);
 }
+//+------------------------------------------------------------------+
+//  AUTOTRADING TIMER (PC LOCAL TIME) & ONE-SHOT PAUSE
+//
+//  CanTradeNow() above remains the MANAGEMENT permission: master
+//  switch, supported chart, market open, terminal/account allowed.
+//  The timer is only a PLACEMENT gate on top of it.  That split is
+//  deliberate: while the timer is OFF the EA must keep trailing,
+//  taking TP1/TP2/TP3 and applying its exit rules to trades that are
+//  already open - with InpUseStopLoss=false a hard freeze could
+//  leave a position with no SL at all.  Waiting pendings are the
+//  opposite case: they are unfilled entries resting at the broker,
+//  so the OFF transition cancels them instead of letting them fill
+//  while the user believes autotrading is off.
+//
+//  Daily start/stop read the PC/VPS local clock (TimeLocal), as
+//  requested - NOT broker server time.  The one-shot pause deadline
+//  is stored in GMT so a 48-hour pause lasts 48 elapsed hours even
+//  across a daylight-saving change; it is persisted in a terminal
+//  GlobalVariable together with the requested hours, so a restart
+//  neither extends it nor restarts a completed request.  Inputs are
+//  read-only in MQL5, so the EA cannot rewrite InpAutoOffHours to 0
+//  in the dialog; instead the completed request stays recorded and
+//  the EFFECTIVE pause becomes 0 by itself.  Set 0 (clears the
+//  record), then the hours again, to run another one-shot pause.
+//+------------------------------------------------------------------+
+bool ParseClockMinutes(const string value, int &minutes)
+{
+   minutes = -1;
+   string txt = value;
+   StringTrimLeft(txt);
+   StringTrimRight(txt);
+
+   string parts[];
+   if(StringSplit(txt, 58, parts) != 2) return(false);   // 58 = ':'
+   if(StringLen(parts[0]) < 1 || StringLen(parts[0]) > 2) return(false);
+   if(StringLen(parts[1]) < 1 || StringLen(parts[1]) > 2) return(false);
+   for(int part = 0; part < 2; part++)
+      for(int k = 0; k < StringLen(parts[part]); k++)
+      {
+         ushort ch = StringGetCharacter(parts[part], k);
+         if(ch < '0' || ch > '9') return(false);
+      }
+
+   int hour   = (int)StringToInteger(parts[0]);
+   int minute = (int)StringToInteger(parts[1]);
+   if(hour < 0 || hour > 23 || minute < 0 || minute > 59) return(false);
+   minutes = hour * 60 + minute;
+   return(true);
+}
+
+//+------------------------------------------------------------------+
+datetime PauseUntilLocal()
+{
+   if(g_pauseUntilGMT <= 0) return(0);
+   long offset = (long)TimeLocal() - (long)TimeGMT();
+   return((datetime)((long)g_pauseUntilGMT + offset));
+}
+
+//+------------------------------------------------------------------+
+bool AutoPauseActive()
+{
+   return(g_pauseUntilGMT > 0 && TimeGMT() < g_pauseUntilGMT);
+}
+
+//+------------------------------------------------------------------+
+bool InAutoScheduleWindow()
+{
+   if(!InpUseAutoSchedule) return(true);
+   if(g_schedStartMin < 0 || g_schedEndMin < 0) return(false);
+
+   MqlDateTime dt;
+   TimeToStruct(TimeLocal(), dt);
+   int nowMin = dt.hour * 60 + dt.min;
+   if(g_schedStartMin < g_schedEndMin)
+      return(nowMin >= g_schedStartMin && nowMin < g_schedEndMin);
+   return(nowMin >= g_schedStartMin || nowMin < g_schedEndMin); // overnight
+}
+
+//+------------------------------------------------------------------+
+bool AutoTimerAllowsPlacement()
+{
+   return(!AutoPauseActive() && InAutoScheduleWindow());
+}
+
+//+------------------------------------------------------------------+
+bool CanPlaceAutoOrders()
+{
+   return(CanTradeNow() && AutoTimerAllowsPlacement());
+}
+
+//+------------------------------------------------------------------+
+bool InitAutoTimer()
+{
+   if(InpAutoOffHours < 0 || InpAutoOffHours > 8760)
+   {
+      PrintFormat("SimpleEA: InpAutoOffHours (%d) must be between 0 and 8760 hours "
+                  "(0 = no pause, 48 = two days).", InpAutoOffHours);
+      return(false);
+   }
+
+   if(InpUseAutoSchedule)
+   {
+      if(!ParseClockMinutes(InpAutoStartTime, g_schedStartMin) ||
+         !ParseClockMinutes(InpAutoEndTime,   g_schedEndMin))
+      {
+         PrintFormat("SimpleEA: autotrading timer times must be HH:MM between 00:00 and "
+                     "23:59 (PC local); got start '%s', stop '%s'.",
+                     InpAutoStartTime, InpAutoEndTime);
+         return(false);
+      }
+      if(g_schedStartMin == g_schedEndMin)
+      {
+         Print("SimpleEA: autotrading timer start and stop times must be different "
+               "(for 24-hour autotrading, turn InpUseAutoSchedule off).");
+         return(false);
+      }
+   }
+
+   //  Persisted one-shot pause identity: one deadline per account +
+   //  symbol + magic base, so other charts/EAs never share it.
+   long   login    = AccountInfoInteger(ACCOUNT_LOGIN);
+   string identity = StringFormat("%I64d.%s.%I64d", login, _Symbol, InpMagicBase);
+   string base     = "SimpleEA.Pause." + identity;
+   if(StringLen(base) > 54)
+   {
+      uint hash = 2166136261;
+      for(int k = 0; k < StringLen(identity); k++)
+         hash = (hash ^ (uint)StringGetCharacter(identity, k)) * 16777619;
+      base = StringFormat("SimpleEA.Pause.%u", hash);
+   }
+   g_pauseGVUntil = base + ".Until";
+   g_pauseGVReq   = base + ".Req";
+
+   datetime nowGMT = TimeGMT();
+   if(InpAutoOffHours == 0)
+   {
+      bool had = (GlobalVariableCheck(g_pauseGVUntil) ||
+                  GlobalVariableCheck(g_pauseGVReq));
+      GlobalVariableDel(g_pauseGVUntil);
+      GlobalVariableDel(g_pauseGVReq);
+      if(had)
+      {
+         GlobalVariablesFlush();
+         Print("SimpleEA: one-shot autotrading pause cleared (InpAutoOffHours = 0).");
+      }
+      g_pauseUntilGMT = 0;
+   }
+   else
+   {
+      double storedUntil = 0.0, storedReq = 0.0;
+      bool hasUntil = (GlobalVariableCheck(g_pauseGVUntil) &&
+                       GlobalVariableGet(g_pauseGVUntil, storedUntil));
+      bool hasReq   = (GlobalVariableCheck(g_pauseGVReq) &&
+                       GlobalVariableGet(g_pauseGVReq, storedReq));
+      if(hasUntil && hasReq && storedUntil > 0.0 &&
+         (int)MathRound(storedReq) == InpAutoOffHours)
+      {
+         //  Same request seen again (restart / reinit): keep the
+         //  original deadline, completed or not.  Never extend it.
+         g_pauseUntilGMT = (datetime)(long)storedUntil;
+         if(g_pauseUntilGMT > nowGMT)
+            PrintFormat("SimpleEA: one-shot pause continues until %s PC local "
+                        "(%I64d minutes remaining); new orders are paused, open trades stay managed.",
+                        TimeToString(PauseUntilLocal(), TIME_DATE | TIME_MINUTES),
+                        ((long)g_pauseUntilGMT - (long)nowGMT + 59) / 60);
+         else
+            PrintFormat("SimpleEA: the previous %d-hour pause completed at %s PC local.  The input "
+                        "still shows %d, but the effective pause is 0; set 0, then %d again, for another.",
+                        InpAutoOffHours,
+                        TimeToString(PauseUntilLocal(), TIME_DATE | TIME_MINUTES),
+                        InpAutoOffHours, InpAutoOffHours);
+      }
+      else
+      {
+         //  A fresh request (none stored, or a different number of hours).
+         g_pauseUntilGMT = nowGMT + InpAutoOffHours * 3600;
+         bool savedUntil = (GlobalVariableSet(g_pauseGVUntil,
+                                              (double)(long)g_pauseUntilGMT) > 0);
+         bool savedReq   = (GlobalVariableSet(g_pauseGVReq,
+                                              (double)InpAutoOffHours) > 0);
+         if(savedUntil && savedReq)
+            GlobalVariablesFlush();
+         else
+            PrintFormat("SimpleEA: warning - could not save the pause deadline for restart "
+                        "persistence (error %d); it still applies to this run.", GetLastError());
+         PrintFormat("SimpleEA: one-shot pause set for the next %d hours, until %s PC local; "
+                     "new orders are paused, open trades stay managed.",
+                     InpAutoOffHours,
+                     TimeToString(PauseUntilLocal(), TIME_DATE | TIME_MINUTES));
+      }
+   }
+
+   g_timerWasAllowed = AutoTimerAllowsPlacement();
+   g_timerStateInit  = true;
+
+   if(InpUseAutoSchedule)
+      PrintFormat("SimpleEA: daily autotrading timer %02d:%02d-%02d:%02d PC local "
+                  "(PC local now %s) - new orders %s.",
+                  g_schedStartMin / 60, g_schedStartMin % 60,
+                  g_schedEndMin / 60,   g_schedEndMin % 60,
+                  TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS),
+                  g_timerWasAllowed ? "allowed" : "paused");
+   return(true);
+}
+
+//+------------------------------------------------------------------+
+int CancelAllAutoPendings()
+{
+   if(!CanTradeNow()) return(0);
+   SyncAutoState();
+   int cancelled = 0;
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      if(!g_auto[i].active || g_auto[i].isOpen) continue;
+      if(TradeDeleteOrder(g_auto[i].ticket))
+      {
+         g_auto[i].lastSignalBar = g_rows[i].lastBar;
+         ResetAutoSlot(i, true);
+         cancelled++;
+      }
+   }
+   if(cancelled > 0)
+   {
+      SyncAutoState();
+      UpdatePlan();
+      UpdateAutoPanel();
+   }
+   return(cancelled);
+}
+
+//+------------------------------------------------------------------+
+void CheckAutoTimerTransition()
+{
+   bool allowed = AutoTimerAllowsPlacement();
+   if(!g_timerStateInit)
+   {
+      g_timerWasAllowed = allowed;
+      g_timerStateInit  = true;
+      return;
+   }
+   if(allowed == g_timerWasAllowed)
+   {
+      //  Still OFF: keep retrying a failed/unavailable pending cancel
+      //  (throttled), so a resting limit cannot quietly survive.
+      if(!allowed && InpAutoTrading && ChartSupported())
+      {
+         ulong nowMs = GetTickCount64();
+         if(nowMs - g_lastPendCancelTryMs >= 2000)
+         {
+            g_lastPendCancelTryMs = nowMs;
+            CancelAllAutoPendings();
+         }
+      }
+      //  The status line's long-pause countdown is minute-granular:
+      //  redraw only when the displayed minute actually rolls over.
+      if(AutoPauseActive() && ChartSupported() && g_panelOK &&
+         PauseRemainingMinutes() != g_pauseMinsShown)
+      {
+         DrawPanel();
+         ChartRedraw(0);
+      }
+      return;
+   }
+   g_timerWasAllowed = allowed;
+
+   if(!InpAutoTrading || !ChartSupported()) return;
+
+   if(!allowed)
+   {
+      g_lastPendCancelTryMs = GetTickCount64();
+      int cancelled = CancelAllAutoPendings();
+      PrintFormat("SimpleEA: autotrading timer OFF at %s PC local - no new orders; "
+                  "cancelled %d pending order(s); open trades remain managed.",
+                  TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS), cancelled);
+   }
+   else
+   {
+      PrintFormat("SimpleEA: autotrading timer ON at %s PC local - new orders allowed again.",
+                  TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS));
+      if(g_panelOK && CanTradeNow())
+      {
+         ManageAutoBar();
+         UpdateAutoPanel();
+      }
+   }
+   DrawPanel();
+   ChartRedraw(0);
+}
+
+//+------------------------------------------------------------------+
+string AutoTradingHeaderText()
+{
+   if(!InpAutoTrading) return("Off");
+   return(AutoTimerAllowsPlacement() ? "On" : "Paused");
+}
+
+//+------------------------------------------------------------------+
+color AutoTradingHeaderColor()
+{
+   if(!InpAutoTrading) return(InpSellColor);
+   return(AutoTimerAllowsPlacement() ? InpBuyColor : clrOrange);
+}
+
+//+------------------------------------------------------------------+
+//  The Main Panel header has a second line (mode/status), so its
+//  band is one row taller than the one-line headers used by the
+//  notice panel and the 2nd Panel.  HEAD_H remains that one-line
+//  height everywhere else.
+//+------------------------------------------------------------------+
+int MainHeaderHeight()
+{
+   return(HEAD_H + g_rowH);
+}
+
+//+------------------------------------------------------------------+
+int PauseRemainingMinutes()
+{
+   if(!AutoPauseActive()) return(0);
+   long secs = (long)g_pauseUntilGMT - (long)TimeGMT();
+   return((int)((secs + 59) / 60));   // rounded up: never shows 0 while paused
+}
+
+//+------------------------------------------------------------------+
+//  "Off" = no daily schedule and no active long pause; "On <window>"
+//  = the schedule is enabled and currently open; "Paused <window>" =
+//  enabled but outside it; an active long pause replaces the window
+//  with its remaining time.  The longest form is 18 characters.
+//+------------------------------------------------------------------+
+string TimerHeaderText()
+{
+   if(AutoPauseActive())
+   {
+      int mins = PauseRemainingMinutes();
+      if(mins >= 60)
+         return(StringFormat("Paused %dh %02dm", mins / 60, mins % 60));
+      return(StringFormat("Paused %dm", mins));
+   }
+   if(!InpUseAutoSchedule) return("Off");
+
+   string window = StringFormat("%02d:%02d-%02d:%02d",
+                                g_schedStartMin / 60, g_schedStartMin % 60,
+                                g_schedEndMin / 60,   g_schedEndMin % 60);
+   return((InAutoScheduleWindow() ? "On " : "Paused ") + window);
+}
+
+//+------------------------------------------------------------------+
+color TimerHeaderColor()
+{
+   if(AutoPauseActive()) return(clrOrange);
+   if(!InpUseAutoSchedule) return(clrGray);
+   return(InAutoScheduleWindow() ? InpBuyColor : clrOrange);
+}
+
 
 //+------------------------------------------------------------------+
 ENUM_ORDER_TYPE_FILLING FillingMode()
@@ -1818,13 +2223,14 @@ double CalcTP2CloseLot(double curLot)
 }
 
 //+------------------------------------------------------------------+
-//  Rule 8: M5 trades its own signal directly; M15 and M30 require their
-//  trends (Going up / Going down) to match before placing an order.
+//  Rule 8: every timeframe trades its own signal directly.  Only when
+//  InpRequireM15M30SameTrend=true are M15 and M30 tied together: their
+//  trends (Going up / Going down) must match before either can place.
 //+------------------------------------------------------------------+
 bool TrendMatchForTF(int i)
 {
-   if(i == 0)
-      return(g_rows[0].ok && g_rows[0].direction != 0);
+   if(i == 0 || !InpRequireM15M30SameTrend)
+      return(g_rows[i].ok && g_rows[i].direction != 0);
    if(!g_rows[1].ok || !g_rows[2].ok)
       return(false);
    if(g_rows[1].direction == 0 || g_rows[2].direction == 0)
@@ -2479,7 +2885,7 @@ void SyncAutoState()
 //+------------------------------------------------------------------+
 bool PlacePlanOrder(int i)
 {
-   if(!CanTradeNow()) return(false);
+   if(!CanPlaceAutoOrders()) return(false);
    if(g_plans[i].state != 2 || g_plans[i].dir == 0) return(false);
    if(!TrendMatchForTF(i)) return(false);
 
@@ -2592,7 +2998,7 @@ bool PlacePlanOrder(int i)
 //    - Manages waiting pending limit orders (updates Entry/SL/TP,
 //      upgrades 2/3 -> 3/3 to Market, or cancels on flip/HOLD/expiry).
 //    - Opens new Market/Limit orders for flat timeframes with a valid
-//      plan (M5 independent; M15 & M30 require matching trend).
+//      plan (independent rows; M15 & M30 tied only if that input is on).
 //+------------------------------------------------------------------+
 void ManageAutoBar()
 {
@@ -2602,6 +3008,7 @@ void ManageAutoBar()
       UpdatePlan();
       return;
    }
+   bool timerAllowsPlacement = AutoTimerAllowsPlacement();
 
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -2728,6 +3135,20 @@ void ManageAutoBar()
       if(g_auto[i].active && !g_auto[i].isOpen)
       {
          int  dir     = g_auto[i].dir;
+
+         // Timer/pause OFF: a waiting order is an unfilled entry, so
+         // cancel it rather than refresh it (it could otherwise fill
+         // while new placements are supposed to be paused).
+         if(!timerAllowsPlacement)
+         {
+            if(TradeDeleteOrder(g_auto[i].ticket))
+            {
+               g_auto[i].lastSignalBar = g_rows[i].lastBar;
+               ResetAutoSlot(i, true);
+            }
+            continue;
+         }
+
          int  tfSec   = PeriodSeconds(g_rows[i].tf);
          //  Range fades live on RANGE_VALID_BARS: the box-kill above
          //  (a close outside the box) is their real invalidation, and
@@ -2753,7 +3174,7 @@ void ManageAutoBar()
             continue;
          }
 
-         // 1) Direction changed / HOLD / M15-M30 mismatch / expired -> cancel pending order
+         // 1) Direction changed / HOLD / trend gate failed / expired -> cancel pending order
          if(!g_rows[i].ok || g_rows[i].direction != dir || !TrendMatchForTF(i) ||
             expired || g_plans[i].state != 2)
          {
@@ -2813,7 +3234,7 @@ void ManageAutoBar()
       // ---- CASE C: Flat on this timeframe -> check new placement ----
       if(!g_auto[i].active)
       {
-         if(g_rows[i].ok && g_rows[i].direction != 0 && g_plans[i].state == 2 &&
+         if(timerAllowsPlacement && g_rows[i].ok && g_rows[i].direction != 0 && g_plans[i].state == 2 &&
             TrendMatchForTF(i) && !HasTradedOnBar(i, g_rows[i].lastBar))
          {
             PlacePlanOrder(i);
@@ -3468,7 +3889,7 @@ void BuildPanel()
 {
    int x = InpPanelX, y = InpPanelY;
    MakeRect("bg",  x, y, g_panelW, g_panelH, InpBgColor, clrDimGray);
-   MakeRect("sep", x + 4, y + HEAD_H - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
+   MakeRect("sep", x + 4, y + MainHeaderHeight() - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
 }
 
 //+------------------------------------------------------------------+
@@ -3487,7 +3908,8 @@ void DrawPanel()
 //+------------------------------------------------------------------+
 //  Supported chart timeframe (M5 / M15 / M30) - the full panel:
 //
-//     SimpleEA                                      SYMBOL  M15
+//     SimpleEA | Autotrading : On                 SYMBOL  M15
+//     Timer: Off | Choppy Trade: On | M15/M30 Same Trend: Off
 //     --------------------------------------------------------------
 //     M5   Scalp       Trend: Going up     Regime: Steady
 //                      Signal: BUY         Score: +3 / 3
@@ -3502,29 +3924,60 @@ void DrawSupportedPanel()
    //  Size the panel to its content BEFORE drawing the background, so the
    //  trade plan can never be clipped on the right - and so the box hugs
    //  the content instead of leaving a wide empty edge when signals go.
-   int    em       = CharW(InpFontSize);
-   int    titleW   = 8 * CharW(InpFontSize + 1);
-   string symRight = "|  " + _Symbol + "  |  " + ChartTimeframeText();
-   int    headW    = pad + titleW + em + (16 + 3 + 2 + StringLen(symRight)) * em + pad;
-   int    wantW    = (int)MathMax(NoticeWidth(), headW);
-   wantW           = (int)MathMax(wantW, PlanWidthNeed());
-   g_panelW        = wantW;
-   g_panelH        = HEAD_H + TF_COUNT * 2 * rowH + 8
-                     + PLAN_SEP_H + TotalPlanLines() * rowH;
+   int    em        = CharW(InpFontSize);
+   int    titleW    = 8 * CharW(InpFontSize + 1);
+   string symRight  = "|  " + _Symbol + "  |  " + ChartTimeframeText();
+   int    titleHeadW = pad + titleW + em + (16 + 6 + 2 + StringLen(symRight)) * em + pad;
+   int    statusHeadW = pad + STATUS_LINE_C * em + pad;
+   int    headW     = (int)MathMax(titleHeadW, statusHeadW);
+   int    wantW     = (int)MathMax(NoticeWidth(), headW);
+   wantW            = (int)MathMax(wantW, PlanWidthNeed());
+   int    mainHeadH = MainHeaderHeight();
+   g_panelW         = wantW;
+   g_panelH         = mainHeadH + TF_COUNT * 2 * rowH + 8
+                      + PLAN_SEP_H + TotalPlanLines() * rowH;
    MakeRect("bg",  x, y, g_panelW, g_panelH, InpBgColor, clrDimGray);
-   MakeRect("sep", x + 4, y + HEAD_H - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
+   MakeRect("sep", x + 4, y + mainHeadH - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
 
-   // ---- header: SimpleEA | Autotrading : On/Off | SYMBOL | TF -----
+   // ---- header: SimpleEA | Autotrading : On/Off/Paused | SYMBOL | TF -----
    MakeLabel("title", x + pad, y + 7, "SimpleEA",
              InpTitleColor, InpFontSize + 1, false);
    int autoCapX = x + pad + titleW + em;
    MakeLabel("autoCap", autoCapX, y + 8, "| Autotrading : ",
              clrSilver, InpFontSize, false);
    int autoValX = autoCapX + 16 * em;
-   MakeLabel("autoVal", autoValX, y + 8, InpAutoTrading ? "On" : "Off",
-             InpAutoTrading ? InpBuyColor : InpSellColor, InpFontSize, false);
+   MakeLabel("autoVal", autoValX, y + 8, AutoTradingHeaderText(),
+             AutoTradingHeaderColor(), InpFontSize, false);
    MakeLabel("sym", x + g_panelW - pad, y + 8, symRight,
              InpTitleColor, InpFontSize, true);
+
+   // ---- header line 2: the modes behind that On/Off/Paused -----------
+   //  Fixed character columns (widest timer text reserved), so the
+   //  three settings never shuffle sideways as their values change.
+   //  Off is grey, not red: a switched-off mode is a choice, not an
+   //  error.  Orange is reserved for a timer that is blocking trades.
+   int statusY   = y + 8 + rowH;
+   int timerCapX = x + pad;
+   MakeLabel("timerCap", timerCapX, statusY, "Timer: ",
+             clrSilver, InpFontSize, false);
+   MakeLabel("timerVal", timerCapX + 7 * em, statusY, TimerHeaderText(),
+             TimerHeaderColor(), InpFontSize, false);
+   g_pauseMinsShown = AutoPauseActive() ? PauseRemainingMinutes() : -1;
+
+   int choppyCapX = timerCapX + 26 * em;  // 7 + 18-char timer reserve + 1 space
+   MakeLabel("choppyCap", choppyCapX, statusY, "| Choppy Trade: ",
+             clrSilver, InpFontSize, false);
+   MakeLabel("choppyVal", choppyCapX + 16 * em, statusY,
+             InpRangeMode ? "On" : "Off",
+             InpRangeMode ? InpBuyColor : clrGray, InpFontSize, false);
+
+   int linkCapX = timerCapX + 46 * em;    // choppy value (3) + 1 space further on
+   MakeLabel("linkCap", linkCapX, statusY, "| M15/M30 Same Trend: ",
+             clrSilver, InpFontSize, false);
+   MakeLabel("linkVal", linkCapX + 22 * em, statusY,
+             InpRequireM15M30SameTrend ? "On" : "Off",
+             InpRequireM15M30SameTrend ? InpBuyColor : clrGray,
+             InpFontSize, false);
 
    // ---- two lines per timeframe -------------------------------------
    //  One column grid for both groups: the plan's captions and the row's
@@ -3542,7 +3995,7 @@ void DrawSupportedPanel()
    //  Signal/Score = what the old panel used to show on its own.
    for(int i = 0; i < TF_COUNT; i++)
    {
-      int    ry  = y + HEAD_H + 2 + i * 2 * rowH;
+      int    ry  = y + mainHeadH + 2 + i * 2 * rowH;
       string sfx = "_" + IntegerToString(i);
 
       MakeLabel("tf" + sfx,    x + pad,      ry, g_rows[i].tag,
@@ -3737,7 +4190,7 @@ void DrawPlanBlock(int x, int y)
    if(RowForChartTF() < 0) return;              // only on M5/M15/M30 charts
 
    int rowH = g_rowH;
-   int gy   = y + HEAD_H + 2 + TF_COUNT * 2 * rowH + PLAN_SEP_H;
+   int gy   = y + MainHeaderHeight() + 2 + TF_COUNT * 2 * rowH + PLAN_SEP_H;
 
    //  the separator between the two groups
    MakeRect("planSep", x + 4, gy - 8, g_panelW - 8, 1, clrDimGray, clrDimGray);
@@ -4127,6 +4580,12 @@ void DrawNoticePanel(const string noticeTxt)
    DeleteObject("sep");
    DeleteObject("autoCap");
    DeleteObject("autoVal");
+   DeleteObject("timerCap");
+   DeleteObject("timerVal");
+   DeleteObject("choppyCap");
+   DeleteObject("choppyVal");
+   DeleteObject("linkCap");
+   DeleteObject("linkVal");
    DeletePlanObjects();
    DeleteAutoPanel();
 
