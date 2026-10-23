@@ -19,7 +19,8 @@ line and verifies every rule:
           (InpRequireM15M30SameTrend=false); with that input true, M15
           and M30 require matching trend direction between them
   Rule 10 2nd Panel header: "Autotrading | Trailstop : Off/On/Active | Stoploss : On/Off | SYMBOL"
-          Main Panel header: "SimpleEA | Autotrading : On/Off/Paused | SYMBOL | TF" + full-width sep
+          Main Panel header: "SimpleEA | Autotrading : On/Off/Paused | SYMBOL | TF",
+          then "Timer: ... | Choppy Trade: On/Off | M15/M30 Same Trend: On/Off" + full-width sep
   Rule 11 2nd Panel placement input InpAutoPanelPos (AUTO_POS_RIGHT default, or
           AUTO_POS_BOTTOM below Main Panel); opens when orders exist and closes
           completely (0 objects) when no trade/order is open
@@ -216,7 +217,7 @@ class AutoTraderSim:
     #  first SL); the no-SL behaviour is verified explicitly further down
     #  with use_stop_loss=False.
     def __init__(self, symbol="XAUUSD", spec=None, balance=800.0, auto_trading=True,
-                 require_m15_m30_same_trend=False,
+                 require_m15_m30_same_trend=False, range_mode=True,
                  use_auto_schedule=False, auto_start_time="08:00",
                  auto_end_time="17:00", auto_off_hours=0,
                  local_minute_of_day=600, gmt_now=1700000000, pause_store=None,
@@ -230,6 +231,7 @@ class AutoTraderSim:
         self.cur = "USD"
         self.auto_trading = auto_trading
         self.require_m15_m30_same_trend = require_m15_m30_same_trend
+        self.range_mode = range_mode
         self.use_auto_schedule = use_auto_schedule
         self.auto_start_time = auto_start_time
         self.auto_end_time = auto_end_time
@@ -428,6 +430,37 @@ class AutoTraderSim:
         if not self.auto_trading:
             return "Off"
         return "On" if self.auto_timer_allows_placement() else "Paused"
+
+    def pause_remaining_minutes(self):
+        """PauseRemainingMinutes() in SimpleAdvisor.mq5."""
+        if not self.auto_pause_active():
+            return 0
+        return (self.pause_until_gmt - self.gmt_now + 59) // 60
+
+    def timer_header_text(self):
+        """TimerHeaderText() in SimpleAdvisor.mq5."""
+        if self.auto_pause_active():
+            mins = self.pause_remaining_minutes()
+            if mins >= 60:
+                return "Paused %dh %02dm" % (mins // 60, mins % 60)
+            return "Paused %dm" % mins
+        if not self.use_auto_schedule:
+            return "Off"
+        window = "%02d:%02d-%02d:%02d" % (
+            self.sched_start_min // 60, self.sched_start_min % 60,
+            self.sched_end_min // 60, self.sched_end_min % 60)
+        return ("On " if self.in_auto_schedule_window() else "Paused ") + window
+
+    def header_status_values(self):
+        """The three values on Main Panel header line 2."""
+        return (self.timer_header_text(),
+                "On" if self.range_mode else "Off",
+                "On" if self.require_m15_m30_same_trend else "Off")
+
+    def header_status_line(self):
+        timer, choppy, same_trend = self.header_status_values()
+        return "Timer: %s | Choppy Trade: %s | M15/M30 Same Trend: %s" % (
+            timer, choppy, same_trend)
 
     def is_score_strong(self, tag):
         """IsScoreStrongForTrade() in SimpleAdvisor.mq5."""
@@ -1374,8 +1407,12 @@ def main():
           "before the start time no timeframe may place")
     check(sched.auto_trading_header_text() == "Paused",
           "header must read Paused while the timer is OFF")
+    check(sched.timer_header_text() == "Paused 08:00-17:00",
+          "status line must show the closed daily window; got %r" % sched.timer_header_text())
 
     sched.local_minute_of_day = 8 * 60
+    check(sched.timer_header_text() == "On 08:00-17:00",
+          "status line must show the open daily window; got %r" % sched.timer_header_text())
     sched.check_auto_timer_transition()
     check(sched.auto["M5"].active and sched.auto["M5"].is_open
           and sched.auto["M15"].active and sched.auto["M15"].is_open
@@ -1383,6 +1420,8 @@ def main():
           "the ON transition must run a placement pass (Market M5/M15, Limit M30)")
 
     sched.local_minute_of_day = 17 * 60
+    check(sched.timer_header_text() == "Paused 08:00-17:00",
+          "the stop minute must already read Paused; got %r" % sched.timer_header_text())
     sched.check_auto_timer_transition()
     check(not sched.auto["M30"].active,
           "the OFF transition must cancel a waiting pending order")
@@ -1402,6 +1441,9 @@ def main():
           "a fresh 48h request must persist its deadline; got %r" % (pause_store,))
     check(pause1.auto_pause_active() and not pause1.can_place_auto_orders(),
           "the one-shot pause must block placement immediately")
+    pause1.gmt_now = t0 + 48 * 60
+    check(pause1.timer_header_text() == "Paused 47h 12m",
+          "status line must count down the long pause; got %r" % pause1.timer_header_text())
     pause2 = AutoTraderSim(auto_off_hours=48, gmt_now=t0 + 3600, pause_store=pause_store)
     check(pause2.pause_until_gmt == t0 + 48 * 3600,
           "a restart must continue the original deadline, not extend it")
@@ -1416,7 +1458,17 @@ def main():
                            pause_store=pause_store)
     check(pause4.pause_until_gmt == t0 + 98 * 3600 and pause4.auto_pause_active(),
           "after 0, setting 48 again must start a fresh 48h pause")
+    modes = AutoTraderSim(range_mode=False, require_m15_m30_same_trend=True)
+    check(modes.header_status_values() == ("Off", "Off", "On"),
+          "header line 2 must mirror Timer / Choppy Trade / Same Trend inputs; got %r"
+          % (modes.header_status_values(),))
+    widest = AutoTraderSim(use_auto_schedule=True, local_minute_of_day=7 * 60,
+                           range_mode=False, require_m15_m30_same_trend=False)
+    check(len(widest.header_status_line()) == 71,
+          "widest header status line must match STATUS_LINE_C=71; got %d (%r)"
+          % (len(widest.header_status_line()), widest.header_status_line()))
     print("  ok  Rule 15: daily PC-local timer, OFF cancels pendings/manages opens, one-shot pause persists and auto-expires")
+    print("  ok  Header line 2: Timer window/countdown, Choppy Trade and M15/M30 Same Trend modes")
 
     # ------------------------------------------------------------------
     # 3b. Per-timeframe stop/target profile: the three styles aim apart

@@ -285,6 +285,7 @@ this: the executor reads one row and acts on that timeframe.
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
 │  SimpleEA   | Autotrading :   On                                             |  XAUUSD  |  M5 │
+│  Timer: Off | Choppy Trade: On | M15/M30 Same Trend: Off                                      │
 ├─────────────────────────────────────────────────────────────────────────────────────────────┤
 │  M5   Scalp            Trend:   Going down       Regime:  Steady                              │
 │                        Signal:  SELL             Score:   -3 / 3                              │
@@ -446,7 +447,11 @@ While the timer is OFF, **no new orders are placed and waiting pending orders ar
 and the signal/exit rules all keep running. When the timer turns back ON, the EA immediately runs a
 placement pass on the most recently closed bars instead of waiting for the next one. The
 `Autotrading :` word in the Main Panel header reads **Paused** (orange) whenever the timer is OFF,
-so a scheduled stand-down never looks like a dead EA.
+so a scheduled stand-down never looks like a dead EA. Directly underneath, a second header line
+explains the operating modes behind that word: `Timer: On/Paused/Off` (with the daily window, or
+the long pause's remaining time), `Choppy Trade: On/Off` (the `InpRangeMode` switch), and
+`M15/M30 Same Trend: On/Off` (the `InpRequireM15M30SameTrend` switch). A running long-pause
+countdown refreshes whenever its displayed minute rolls over.
 
 One MT5 limitation is unavoidable: an EA **cannot rewrite its own input box**, so when the 48
 hours finish the input still *displays* `48`. Internally the request is spent — the effective

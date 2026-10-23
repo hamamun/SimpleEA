@@ -31,6 +31,7 @@ sys.path.insert(0, ".")
 from verify_plan_math import SYMBOLS, plan, point_value_per_lot   # noqa: E402
 
 HEAD_H, TF_COUNT, PLAN_SEP_H, PLAN_COL_A, PLAN_COL_B, PLAN_COL_C = 34, 3, 14, 150, 282, 414
+STATUS_LINE_C = 71          # widest Main Panel mode-status line, in characters
 PLAN_W_MIN = 406
 # IncompatibleNotice() in the EA, verbatim
 NOTICE = "Incompatible chart. Switch to M5/M15/M30."
@@ -94,6 +95,7 @@ class Panel:
                  cur="USD", use_risk=True, use_min_lot=False, risk2=0.5, risk3=1.0,
                  sl_atr=None, tp_atr=None, pend_atr=0.5, valid_bars=3,
                  valid_bars_range=8,
+                 timer_text="Off", range_mode=True, require_same_trend=False,
                  atr=None):
         self.symbol, self.spec, self.balance, self.cur = symbol, spec, balance, cur
         self.tags = tags
@@ -103,6 +105,9 @@ class Panel:
         self.tp_atr = per_tf(tp_atr, TP_ATR)
         self.pend_atr, self.valid_bars = pend_atr, valid_bars
         self.valid_bars_range = valid_bars_range       # RANGE_VALID_BARS in the EA
+        self.timer_text = timer_text                   # TimerHeaderText() in the EA
+        self.range_mode = range_mode                   # InpRangeMode
+        self.require_same_trend = require_same_trend   # InpRequireM15M30SameTrend
         self.panel_w = 406
         self.panel_h = 130
         # g_rows: tag -> the row fields UpdatePlanRow() reads
@@ -310,13 +315,16 @@ class Panel:
     # ---- DrawSupportedPanel() -------------------------------------------
     def draw(self):
         row_h = FONT + 11
-        self.panel_h = (HEAD_H + TF_COUNT * 2 * row_h + 8
+        # MainHeaderHeight(): the main header's second (status) line adds one row
+        self.panel_h = (HEAD_H + row_h + TF_COUNT * 2 * row_h + 8
                         + PLAN_SEP_H + self.total_plan_lines() * row_h)
         # the real EA: NoticeWidth() is the floor for BOTH panels, then the
         # plan's own measured need (when it is shown) can only add to it
         sym_right = "|  %s  |  %s" % (self.symbol, self.tags[0])
         title_w = 8 * char_w(FONT + 1, DPI)
-        head_w = 10 + title_w + EM + (16 + 6 + 2 + len(sym_right)) * EM + 10
+        title_head_w = 10 + title_w + EM + (16 + 6 + 2 + len(sym_right)) * EM + 10
+        status_head_w = 10 + STATUS_LINE_C * EM + 10
+        head_w = max(title_head_w, status_head_w)
         want = max(PLAN_W_MIN,
                    10 + len(NOTICE) * char_w(FONT + 1, DPI) + 10,
                    head_w)
@@ -349,8 +357,20 @@ class Panel:
         put("| Autotrading :", auto_cap_x, 0)
         put("On", auto_cap_x + 16 * EM, 0)
         put(sym_right, self.panel_w - 10 - len(sym_right) * RENDER_CW, 0)
-        separators.add(1)
-        line = 2
+
+        # ---- header line 2: mode/status (fixed columns, widest timer reserved)
+        timer_cap_x = 10
+        put("Timer:", timer_cap_x, 1)
+        put(self.timer_text, timer_cap_x + 7 * EM, 1)
+        choppy_cap_x = timer_cap_x + 26 * EM
+        put("| Choppy Trade:", choppy_cap_x, 1)
+        put("On" if self.range_mode else "Off", choppy_cap_x + 16 * EM, 1)
+        link_cap_x = timer_cap_x + 46 * EM
+        put("| M15/M30 Same Trend:", link_cap_x, 1)
+        put("On" if self.require_same_trend else "Off", link_cap_x + 22 * EM, 1)
+
+        separators.add(2)
+        line = 3
         cA, vA, cB, vB, cC, vC = self.plan_columns()
         for t in self.tags:
             r = self.rows[t]
@@ -517,7 +537,9 @@ def layout_sweep():
                 EM_BASE = char_w(9, dpi)
                 RENDER_CW = size * dpi / 72.0 * ADV_CONSOLAS
                 CELL = RENDER_CW
-                p = Panel("XAUUSD", SYMBOLS["XAUUSD-2d"], 200.0)
+                p = Panel("XAUUSD", SYMBOLS["XAUUSD-2d"], 200.0,
+                          timer_text="Paused 08:00-17:00", range_mode=False,
+                          require_same_trend=False)
                 p.price = 4285.70
                 p.set_reading("M5",  direction=-1, score=-3,
                               trend="Going down", regime="Steady")
@@ -563,6 +585,7 @@ def panel_need_at(p, em):
     cC = max(col_x(PLAN_COL_C, em), vB + wB + em * 2)
     vC = cC + em * PLAN_LBL_C
     need = max(PLAN_W_MIN, 10 + len(NOTICE) * em + 10,
+               10 + STATUS_LINE_C * em + 10,
                10 + 5 * em + len("pending +3/3") * em + 10,
                vA + 5 * em + 10, vB + 6 * em + 10)
     for q in p.plans.values():

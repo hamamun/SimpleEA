@@ -103,6 +103,8 @@
 //|     default; tie them with InpRequireM15M30SameTrend = true.      |
 //|   - Optional PC-local timer/pause: while OFF, no new orders are   |
 //|     placed and pendings are cancelled; open trades stay managed.  |
+//|   - A second Main Panel header line shows Timer, Choppy Trade     |
+//|     and M15/M30 Same Trend mode/status at a glance.               |
 //|   - Three take-profit levels per order:                           |
 //|        TP3 = 100% of SimpleEA's advised target points             |
 //|        TP2 = 25% less than TP3 (75% of TP3)                       |
@@ -155,7 +157,7 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "2.15"
+#property version   "2.16"
 #property description "Multi-timeframe BUY/SELL/HOLD direction panel, trade plan and full-auto executor. M5 / M15 / M30 charts only."
 
 #ifndef M_PI
@@ -334,7 +336,8 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 #define RISK_SCORE3_X   2.0       // score 3 risks this multiple of the score-2 percentage
 #define BAL_PER_001     1000.0    // risk-off mode: balance per 0.01 lot
 #define SCORE3_FACTOR   1.5       // risk-off mode: lot multiplier at score 3
-#define HEAD_H      34     // height of the header band (title + symbol line)
+#define HEAD_H      34     // height of a ONE-LINE header band (notice + 2nd Panel)
+#define STATUS_LINE_C 71   // widest Main Panel mode-status line, in characters
 #define PLAN_W_MIN  406    // panel width with no plan showing
 #define PLAN_LINES  3      // lines an ACTIVE timeframe uses (1 for HOLD)
 //  The three column anchors are the FONT-9 design, not raw pixels: ColX()
@@ -419,6 +422,7 @@ string   g_pauseGVReq       = "";   // GlobalVariable holding the requested hour
 bool     g_timerStateInit   = false;
 bool     g_timerWasAllowed  = false; // last observed timer placement state
 ulong    g_lastPendCancelTryMs = 0;  // throttled pending-cancel retries while OFF
+int      g_pauseMinsShown   = -1;    // pause countdown minute currently on the panel
 
 ENUM_TIMEFRAMES g_drawnTf = (ENUM_TIMEFRAMES)0;  // timeframe the header was drawn for
 
@@ -576,7 +580,7 @@ int OnInit()
    //  height is only provisional here: DrawSupportedPanel() recomputes it
    //  because the second group's height depends on how many timeframes
    //  actually have a signal.
-   g_panelH = HEAD_H + TF_COUNT * 2 * g_rowH + 8;
+   g_panelH = MainHeaderHeight() + TF_COUNT * 2 * g_rowH + 8;
 
    //  The notice is the one line that must always be readable in full, so
    //  the width that line needs is a floor for BOTH panels - the normal one
@@ -2013,6 +2017,14 @@ void CheckAutoTimerTransition()
             CancelAllAutoPendings();
          }
       }
+      //  The status line's long-pause countdown is minute-granular:
+      //  redraw only when the displayed minute actually rolls over.
+      if(AutoPauseActive() && ChartSupported() && g_panelOK &&
+         PauseRemainingMinutes() != g_pauseMinsShown)
+      {
+         DrawPanel();
+         ChartRedraw(0);
+      }
       return;
    }
    g_timerWasAllowed = allowed;
@@ -2053,6 +2065,56 @@ color AutoTradingHeaderColor()
 {
    if(!InpAutoTrading) return(InpSellColor);
    return(AutoTimerAllowsPlacement() ? InpBuyColor : clrOrange);
+}
+
+//+------------------------------------------------------------------+
+//  The Main Panel header has a second line (mode/status), so its
+//  band is one row taller than the one-line headers used by the
+//  notice panel and the 2nd Panel.  HEAD_H remains that one-line
+//  height everywhere else.
+//+------------------------------------------------------------------+
+int MainHeaderHeight()
+{
+   return(HEAD_H + g_rowH);
+}
+
+//+------------------------------------------------------------------+
+int PauseRemainingMinutes()
+{
+   if(!AutoPauseActive()) return(0);
+   long secs = (long)g_pauseUntilGMT - (long)TimeGMT();
+   return((int)((secs + 59) / 60));   // rounded up: never shows 0 while paused
+}
+
+//+------------------------------------------------------------------+
+//  "Off" = no daily schedule and no active long pause; "On <window>"
+//  = the schedule is enabled and currently open; "Paused <window>" =
+//  enabled but outside it; an active long pause replaces the window
+//  with its remaining time.  The longest form is 18 characters.
+//+------------------------------------------------------------------+
+string TimerHeaderText()
+{
+   if(AutoPauseActive())
+   {
+      int mins = PauseRemainingMinutes();
+      if(mins >= 60)
+         return(StringFormat("Paused %dh %02dm", mins / 60, mins % 60));
+      return(StringFormat("Paused %dm", mins));
+   }
+   if(!InpUseAutoSchedule) return("Off");
+
+   string window = StringFormat("%02d:%02d-%02d:%02d",
+                                g_schedStartMin / 60, g_schedStartMin % 60,
+                                g_schedEndMin / 60,   g_schedEndMin % 60);
+   return((InAutoScheduleWindow() ? "On " : "Paused ") + window);
+}
+
+//+------------------------------------------------------------------+
+color TimerHeaderColor()
+{
+   if(AutoPauseActive()) return(clrOrange);
+   if(!InpUseAutoSchedule) return(clrGray);
+   return(InAutoScheduleWindow() ? InpBuyColor : clrOrange);
 }
 
 
@@ -3827,7 +3889,7 @@ void BuildPanel()
 {
    int x = InpPanelX, y = InpPanelY;
    MakeRect("bg",  x, y, g_panelW, g_panelH, InpBgColor, clrDimGray);
-   MakeRect("sep", x + 4, y + HEAD_H - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
+   MakeRect("sep", x + 4, y + MainHeaderHeight() - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
 }
 
 //+------------------------------------------------------------------+
@@ -3846,7 +3908,8 @@ void DrawPanel()
 //+------------------------------------------------------------------+
 //  Supported chart timeframe (M5 / M15 / M30) - the full panel:
 //
-//     SimpleEA                                      SYMBOL  M15
+//     SimpleEA | Autotrading : On                 SYMBOL  M15
+//     Timer: Off | Choppy Trade: On | M15/M30 Same Trend: Off
 //     --------------------------------------------------------------
 //     M5   Scalp       Trend: Going up     Regime: Steady
 //                      Signal: BUY         Score: +3 / 3
@@ -3861,17 +3924,20 @@ void DrawSupportedPanel()
    //  Size the panel to its content BEFORE drawing the background, so the
    //  trade plan can never be clipped on the right - and so the box hugs
    //  the content instead of leaving a wide empty edge when signals go.
-   int    em       = CharW(InpFontSize);
-   int    titleW   = 8 * CharW(InpFontSize + 1);
-   string symRight = "|  " + _Symbol + "  |  " + ChartTimeframeText();
-   int    headW    = pad + titleW + em + (16 + 6 + 2 + StringLen(symRight)) * em + pad;
-   int    wantW    = (int)MathMax(NoticeWidth(), headW);
-   wantW           = (int)MathMax(wantW, PlanWidthNeed());
-   g_panelW        = wantW;
-   g_panelH        = HEAD_H + TF_COUNT * 2 * rowH + 8
-                     + PLAN_SEP_H + TotalPlanLines() * rowH;
+   int    em        = CharW(InpFontSize);
+   int    titleW    = 8 * CharW(InpFontSize + 1);
+   string symRight  = "|  " + _Symbol + "  |  " + ChartTimeframeText();
+   int    titleHeadW = pad + titleW + em + (16 + 6 + 2 + StringLen(symRight)) * em + pad;
+   int    statusHeadW = pad + STATUS_LINE_C * em + pad;
+   int    headW     = (int)MathMax(titleHeadW, statusHeadW);
+   int    wantW     = (int)MathMax(NoticeWidth(), headW);
+   wantW            = (int)MathMax(wantW, PlanWidthNeed());
+   int    mainHeadH = MainHeaderHeight();
+   g_panelW         = wantW;
+   g_panelH         = mainHeadH + TF_COUNT * 2 * rowH + 8
+                      + PLAN_SEP_H + TotalPlanLines() * rowH;
    MakeRect("bg",  x, y, g_panelW, g_panelH, InpBgColor, clrDimGray);
-   MakeRect("sep", x + 4, y + HEAD_H - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
+   MakeRect("sep", x + 4, y + mainHeadH - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
 
    // ---- header: SimpleEA | Autotrading : On/Off/Paused | SYMBOL | TF -----
    MakeLabel("title", x + pad, y + 7, "SimpleEA",
@@ -3884,6 +3950,34 @@ void DrawSupportedPanel()
              AutoTradingHeaderColor(), InpFontSize, false);
    MakeLabel("sym", x + g_panelW - pad, y + 8, symRight,
              InpTitleColor, InpFontSize, true);
+
+   // ---- header line 2: the modes behind that On/Off/Paused -----------
+   //  Fixed character columns (widest timer text reserved), so the
+   //  three settings never shuffle sideways as their values change.
+   //  Off is grey, not red: a switched-off mode is a choice, not an
+   //  error.  Orange is reserved for a timer that is blocking trades.
+   int statusY   = y + 8 + rowH;
+   int timerCapX = x + pad;
+   MakeLabel("timerCap", timerCapX, statusY, "Timer: ",
+             clrSilver, InpFontSize, false);
+   MakeLabel("timerVal", timerCapX + 7 * em, statusY, TimerHeaderText(),
+             TimerHeaderColor(), InpFontSize, false);
+   g_pauseMinsShown = AutoPauseActive() ? PauseRemainingMinutes() : -1;
+
+   int choppyCapX = timerCapX + 26 * em;  // 7 + 18-char timer reserve + 1 space
+   MakeLabel("choppyCap", choppyCapX, statusY, "| Choppy Trade: ",
+             clrSilver, InpFontSize, false);
+   MakeLabel("choppyVal", choppyCapX + 16 * em, statusY,
+             InpRangeMode ? "On" : "Off",
+             InpRangeMode ? InpBuyColor : clrGray, InpFontSize, false);
+
+   int linkCapX = timerCapX + 46 * em;    // choppy value (3) + 1 space further on
+   MakeLabel("linkCap", linkCapX, statusY, "| M15/M30 Same Trend: ",
+             clrSilver, InpFontSize, false);
+   MakeLabel("linkVal", linkCapX + 22 * em, statusY,
+             InpRequireM15M30SameTrend ? "On" : "Off",
+             InpRequireM15M30SameTrend ? InpBuyColor : clrGray,
+             InpFontSize, false);
 
    // ---- two lines per timeframe -------------------------------------
    //  One column grid for both groups: the plan's captions and the row's
@@ -3901,7 +3995,7 @@ void DrawSupportedPanel()
    //  Signal/Score = what the old panel used to show on its own.
    for(int i = 0; i < TF_COUNT; i++)
    {
-      int    ry  = y + HEAD_H + 2 + i * 2 * rowH;
+      int    ry  = y + mainHeadH + 2 + i * 2 * rowH;
       string sfx = "_" + IntegerToString(i);
 
       MakeLabel("tf" + sfx,    x + pad,      ry, g_rows[i].tag,
@@ -4096,7 +4190,7 @@ void DrawPlanBlock(int x, int y)
    if(RowForChartTF() < 0) return;              // only on M5/M15/M30 charts
 
    int rowH = g_rowH;
-   int gy   = y + HEAD_H + 2 + TF_COUNT * 2 * rowH + PLAN_SEP_H;
+   int gy   = y + MainHeaderHeight() + 2 + TF_COUNT * 2 * rowH + PLAN_SEP_H;
 
    //  the separator between the two groups
    MakeRect("planSep", x + 4, gy - 8, g_panelW - 8, 1, clrDimGray, clrDimGray);
@@ -4486,6 +4580,12 @@ void DrawNoticePanel(const string noticeTxt)
    DeleteObject("sep");
    DeleteObject("autoCap");
    DeleteObject("autoVal");
+   DeleteObject("timerCap");
+   DeleteObject("timerVal");
+   DeleteObject("choppyCap");
+   DeleteObject("choppyVal");
+   DeleteObject("linkCap");
+   DeleteObject("linkVal");
    DeletePlanObjects();
    DeleteAutoPanel();
 
