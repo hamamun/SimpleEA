@@ -1,4 +1,4 @@
-﻿//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
 //|                                              SimpleAdvisor.mq5   |
 //|                     A very simple multi-timeframe direction panel |
 //|                                                                  |
@@ -1024,6 +1024,7 @@ void EvaluateRow(int idx)
    double H  = HurstExponent(c, last, HURST_WINDOW);
    double ER = EfficiencyRatio(c, last, ER_PERIOD);
 
+   string emDash = ShortToString((ushort)0x2014); // U+2014 em dash without non-ASCII source bytes
    int v3   = 0;
    int mode = 0;                          // 0 stand aside | 1 trend game | 2 range game
    if(H > g_rows[idx].hTrend)
@@ -1037,7 +1038,7 @@ void EvaluateRow(int idx)
       v3   = 0;
    }
    else
-      g_rows[idx].blockReason = "mixed — no edge either way";   // no memory: nothing to compute
+      g_rows[idx].blockReason = "mixed " + emDash + " no edge either way";   // no memory: nothing to compute
 
    int score = v1 + v2 + v3;              // range mode never reaches 3: v3 stays 0
 
@@ -1046,7 +1047,7 @@ void EvaluateRow(int idx)
    if(ER < ER_DEAD)
    {
       mode = 0;
-      g_rows[idx].blockReason = "quiet — nothing worth trading";
+      g_rows[idx].blockReason = "quiet " + emDash + " nothing worth trading";
    }
    else if(mode == 1)
    {
@@ -1057,7 +1058,7 @@ void EvaluateRow(int idx)
    else if(mode == 2)
    {
       if(!InpRangeMode)
-         g_rows[idx].blockReason = "chop — range mode is off";
+         g_rows[idx].blockReason = "chop " + emDash + " range mode is off";
       else
       {
          // ---- the box: actual highs and lows of the last N closed bars
@@ -1079,15 +1080,15 @@ void EvaluateRow(int idx)
 
          string why = "";
          if(atr <= 0.0 || spread < 0.0 || n < nb || top <= bot)
-            why = "chop — no valid box yet";      // data or geometry not there
+            why = "chop " + emDash + " no valid box yet";      // data or geometry not there
          else if(top - bot < RANGE_MIN_ATR * atr)
-            why = "chop — no valid box yet";      // box too flat to trade
+            why = "chop " + emDash + " no valid box yet";      // box too flat to trade
          else if(ER >= RANGE_ER_MAX)
-            why = "chop — no valid box yet";      // it is a walk, not a box
+            why = "chop " + emDash + " no valid box yet";      // it is a walk, not a box
          else if(bid > top || bid < bot)
-            why = "chop — no valid box yet";      // price broke the box
+            why = "chop " + emDash + " no valid box yet";      // price broke the box
          else if(half < RANGE_SPREAD_X * spread)
-            why = "chop — nothing clears the spread";   // the cost gate
+            why = "chop " + emDash + " nothing clears the spread";   // the cost gate
 
          if(why != "")
             g_rows[idx].blockReason = why;
@@ -4182,7 +4183,7 @@ int PlanWidthNeed()
 //                       Risk: 7.84 USD        Reward: 7.00 USD   Valid: 3/3 bars
 //    M15  range fade    Entry: 4279.10 (limit at the band)           Lot: 0.28
 //                       Stop: 4271.10 80pts   Target: 4287.10 80pts  Reach: ~2 bars
-//    M30  HOLD          mixed — no edge either way
+//    M30  HOLD          mixed - no edge either way
 //
 //+------------------------------------------------------------------+
 void DrawPlanBlock(int x, int y)
