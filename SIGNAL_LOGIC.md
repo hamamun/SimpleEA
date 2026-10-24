@@ -10,7 +10,8 @@ which is RSI, MACD or an EMA crossover:
 |---|---|---|---|
 | **Direction** | Ehlers **Precision Trend Analysis** — difference of two highpass filters (bandpass) | **TASC, Sept 2024** | EMA / SMA cross |
 | **Timing** | **ROC of the Precision Trend line** | TASC, Sept 2024 | RSI / MACD / Stochastic |
-| **Regime** | **Hurst exponent** (long-memory) as a regime switch | 2024–2026 literature | ADX / ATR filters |
+| **Structure** | **net displacement** over the box window, dead-banded by ATR (vote 3) | — | a copied vote |
+| **Regime** | **Hurst exponent** (long-memory) — sets the entry *style*, not the permission | 2024–2026 literature | ADX / ATR filters |
 | **Gate** | **Kaufman Efficiency Ratio** | 1995, revived 2025–26 | volume filters |
 
 This is what `SimpleAdvisor.mq5` v1 ships. §5 explains why, and §6 covers the frontier that
@@ -78,25 +79,31 @@ you actually want for entry timing, and what RSI's overbought/oversold framing g
 
 ---
 
-## 4. Layer 3 — Regime: the Hurst exponent (this is the genuinely new part)
+## 4. Layer 3 — Regime: the Hurst exponent (it prices the entry, it does not veto it)
 
 **Why a regime layer at all:** every direction signal has regimes where it works and regimes
 where it is a coin flip. Measured on real data, *direction alone on liquid FX is ~50/50*
 (see `README.md` §4). So the marginal value of a directional indicator is small, while the value
-of knowing **when not to act** is large.
+of knowing **how to enter when you do act** is large.
 
 **Hurst exponent** measures long-range memory — whether moves tend to continue or revert:
 
-| H | Market character | Action |
+| H | Market character | What the EA does with it |
 |---|---|---|
-| **H > 0.55** | persistent, trends extend | back the trend |
-| 0.45 – 0.55 | random walk, no memory | **abstain** |
-| **H < 0.45** | anti-persistent, moves revert | fade (off by default; see §5) |
+| **H > 0.55** | persistent, trends extend | **Steady** — a `2/3` limit waits half an ATR back |
+| 0.45 – 0.55 | random walk, no memory | **Mixed** — same pullback, no special treatment |
+| **H < 0.45** | anti-persistent, moves revert | **Choppy** — that limit waits at the box band instead |
 
-> **Part 2 changed the Action column** (the H reads did not change): **Steady** plays the
-> trend game, **Choppy** plays the **range game** — the box trade (limit at the opposite band,
-> target = half the box, stop = band + 1 ATR, all gates must pass) — and **Mixed** stands aside
-> with `mixed — no edge either way` on the plan line. The fade row above is historical; see §6.
+The score decides **whether** the row trades (`InpBuyScore` / `InpSellScore`); H decides **where
+the limit sits**. It is no longer a veto: a Mixed row at `±2` places its pullback limit instead of
+standing aside, and a Choppy row at `±3` takes a market order like any other row.
+
+> **The Action column is now about the ORDER, not about permission.** The score decides whether a
+> row trades, in every regime (`3/3` → market, `2/3` → limit, under the gate → nothing), and the
+> regime only decides where a `2/3` limit waits: **Steady** and **Mixed** wait half an ATR back,
+> **Choppy** waits at the box band (target = half the box, stop = band + 1 ATR). A box that fails
+> its own gates falls back to the pullback instead of blocking the trade. The historical fade row
+> above stays for the record; see §6.
 
 **Evidence base:** a 2025 study across five major East Asian indices found strategy performance is
 *strongly conditional on the Hurst regime* — trend-following thrived in high-persistence periods
@@ -142,23 +149,26 @@ discards ~70% of bars. v1 defaults to a *dead-market* gate (0.10), not an *elite
 ## 6. The score
 
 ```
-score = sign(Trend) + sign(Trend ROC) + regime_vote        # -3 .. +3
+score = sign(Trend) + sign(Trend ROC) + sign(20-bar net move)   # -3 .. +3
 BUY  if score >= +2        SELL if score <= -2        else HOLD
+3/3 -> MARKET order        2/3 -> LIMIT order         under the gate -> nothing
 ```
 
-Closed bars only → non-repainting.
+The third vote must be its **own** measurement (a dead-banded net move over the box window),
+or `±2` can never occur and the limit tier is dead code. Closed bars only → non-repainting.
 
 **Deliberate design choice:** `InpFadeInRange` ships **off**. Fading an anti-persistent regime was
 the single best-looking rule in the 2026 sample (+0.21/+0.19 pips, p<0.01) and **inverted to
 −0.31/−0.06** on 2015 data. It is exposed as an input, not enabled as a default. The default
 engine only ever *confirms* a trend in a persistent regime, or **abstains**.
 
-**Superseded by Part 2** (the v1 paragraph above stays for the record): the `InpFadeInRange`
-input has been **removed**. An anti-persistent row is never faded against anymore — it plays the
-**range game** (the box trade: entry at the opposite band, target = the midpoint, stop =
-band + `RANGE_SL_ATR` ATR, with the half-box ≥ `RANGE_SPREAD_X` spreads / box ≥
-`RANGE_MIN_ATR` ATR / ER < `RANGE_ER_MAX` / bid-inside-box gates all-must-pass), or it stands
-aside and says why (`chop — nothing clears the spread`, etc.). The 2015 inversion above is
+**Superseded** (the v1 paragraph above stays for the record): the `InpFadeInRange` input has been
+**removed**, and the score is now three independent votes whose sum decides the ORDER —
+`3/3` = market, `2/3` = limit, under the gate = nothing — in every regime. An anti-persistent
+(Choppy) row simply prices its `2/3` limit at the box band instead of half an ATR back: target =
+the midpoint, stop = band + `RANGE_SL_ATR` ATR, with the half-box ≥ `RANGE_SPREAD_X` spreads /
+box ≥ `RANGE_MIN_ATR` ATR / ER < `RANGE_ER_MAX` / bid-inside-box gates deciding whether the box
+is usable at all. If it is not, the limit falls back to the pullback. The 2015 inversion above is
 exactly why the box trade should be journalled and pre-validated (band touch → midpoint hit
 before band break) before real money goes on it.
 

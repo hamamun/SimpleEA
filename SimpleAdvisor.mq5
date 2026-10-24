@@ -36,25 +36,32 @@
 //|                 trend line, so its sign marks the onset or        |
 //|                 continuation of a push.  Vote = sign(ROC).        |
 //|                                                                  |
-//|   3. REGIME     Rolling Hurst exponent (long-memory estimate).    |
-//|                 Part 2: the regime does not merely abstain - it   |
-//|                 PICKS THE GAME each row plays:                    |
-//|                   Steady (H > threshold) : the trend is real,     |
-//|                                            vote with the trend.   |
-//|                   Choppy (H < revert)    : moves come back -      |
-//|                                            play the range box.    |
-//|                   Mixed  (in between)    : no edge either way,    |
-//|                                            stand aside (says why).|
-//|                 It stops the panel from making confident calls    |
-//|                 when the market has no directional memory.        |
+//|  3. STRUCTURE  Net move over the last STRUCT_PERIOD closed bars,  |
+//|                silent unless it beats STRUCT_DEAD_ATR of ATR.     |
+//|                Vote = sign(move).  It is deliberately its OWN     |
+//|                measurement: three different measurements are      |
+//|                what make 2/3 a real state - and 2/3 is the        |
+//|                LIMIT order.                                       |
+//|                                                                  |
+//|  4. REGIME     Rolling Hurst exponent (long-memory estimate).     |
+//|                Shown as Steady / Mixed / Choppy and used for HOW  |
+//|                a limit entry is priced - never for WHETHER the    |
+//|                row trades:                                        |
+//|                  Steady / Mixed : a limit waits half an ATR back  |
+//|                  Choppy         : a limit waits at the box band   |
+//|                A box that is unusable (too flat, price outside,   |
+//|                spread too wide) falls back to the pullback -      |
+//|                the score already said yes.                        |
 //|                                                                  |
 //|  Score = vote1 + vote2 + vote3      (range -3 .. +3)              |
-//|      BUY  if score >= +2                                          |
-//|      SELL if score <= -2                                          |
-//|      HOLD otherwise (and the plan block says WHY - mixed, dead     |
-//|                      market, or a chop gate that did not clear)    |
-//|  A Choppy row never reaches +3: the regime adds no trend vote in   |
-//|  the range game - it trades through the box gates instead.         |
+//|      BUY  if score >= InpBuyScore     (+2 default)                |
+//|      SELL if score <= InpSellScore    (-2 default)                |
+//|      HOLD otherwise (and the plan block says WHY - dead market,   |
+//|                      or the score under the gate)                 |
+//|  ORDER TYPE, in every regime:                                     |
+//|      3/3 (all three agree) -> MARKET order, taken now             |
+//|      2/3 (two agree)       -> LIMIT order, waiting for a price    |
+//|      under the gate        -> nothing                             |
 //|                                                                  |
 //|  Kaufman's Efficiency Ratio acts as a dead-market gate: below     |
 //|  ER_DEAD   the market is not travelling anywhere, so any          |
@@ -98,7 +105,9 @@
 //|                                                                   |
 //|   - Strictly 1 active trade/order per timeframe (M5, M15, M30)    |
 //|     at a time, tracked by per-timeframe magic numbers.            |
-//|   - Market order at score 3/3; Pending Limit order at score 2/3.  |
+//|   - Market order at score 3/3; Pending Limit order at score 2/3 -  |
+//|     in EVERY regime (the regime only prices the limit: box band    |
+//|     on a Choppy row, half an ATR back otherwise).                  |
 //|   - M5 trades its own signal directly. M15/M30 are untied by      |
 //|     default; tie them with InpRequireM15M30SameTrend = true.      |
 //|   - Optional PC-local timer/pause: while OFF, no new orders are   |
@@ -157,7 +166,7 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "2.16"
+#property version   "2.18"
 #property description "Multi-timeframe BUY/SELL/HOLD direction panel, trade plan and full-auto executor. M5 / M15 / M30 charts only."
 
 #ifndef M_PI
@@ -193,12 +202,16 @@ input group "=== Signal & range mode ==="
 input int      InpBuyScore    = 2;           // Score >= this  => BUY
 input int      InpSellScore   = -2;          // Score <= this  => SELL
 
-//  Part 2: the regime now DECIDES instead of abstaining.  Steady rows
-//  play the trend game as before; Choppy rows (H below the revert
-//  threshold - moves genuinely come back) play the RANGE game: entry at
-//  the box band, target at the box midpoint, stop beyond the band.  All
-//  the box numbers are gates, not guesses - every one must pass or the
-//  row stands aside and the plan block says why.
+//  THE SCORE DECIDES WHETHER; THE REGIME ONLY DECIDES HOW.
+//  InpBuyScore / InpSellScore gate every order in every regime
+//  (ScoreAllowsTrade()), and the score also picks the order type:
+//  3/3 -> market, 2/3 -> limit.
+//  What the regime adds is where a LIMIT waits: on a Choppy row (H below
+//  the revert threshold - moves genuinely come back) the box band prices
+//  the limit (entry at the band, target = the midpoint, stop = band + 1
+//  ATR); on a Steady or Mixed row it waits half an ATR back from the
+//  market.  Every box number is a gate, not a guess; a box that fails one
+//  simply hands the limit back to the half-ATR pullback.
 //  Only the on/off switch is an input: "do I want chop traded at all" is
 //  a user preference.  The six numbers that define the box were inputs
 //  too until they stopped earning a decision - they are calibration, so
@@ -276,6 +289,15 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 #define HURST_WINDOW    256       // Hurst estimate window (bars, each timeframe's own)
 #define ER_PERIOD       20        // Kaufman efficiency-ratio period (= RANGE_BARS)
 #define ER_DEAD         0.10      // efficiency below this => dead market, force HOLD
+//  ---- THE THIRD VOTE (structure) ----------------------------------
+//  The score is three votes, and they must be three DIFFERENT
+//  measurements, or a "2 of 3" reading can never happen.  Vote 3 is the
+//  net move over the last STRUCT_PERIOD closed bars - the same window
+//  the efficiency ratio and the range box use - and it stays silent
+//  unless that move is worth more than STRUCT_DEAD_ATR ATR, so a market
+//  that has not actually travelled votes 0 instead of +1/-1 on noise.
+#define STRUCT_PERIOD   20        // structure vote: net move over this many closed bars
+#define STRUCT_DEAD_ATR 0.25      // ...and it must beat this many ATR to vote at all
 
 //  ---- THE TRADE PROFILE (baked in: this is the tested set) ----------
 //  These were inputs until they stopped earning a decision.  None of
@@ -304,8 +326,8 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 //  days on M5, and the estimator needs that many bars to be stable on
 //  every row.  Widen the band here and the panel goes quieter; narrow it
 //  and it trades more - which is exactly why it is not a user input.
-#define HURST_TREND     0.55      // H above this = persistent: play the trend game
-#define HURST_REVERT    0.45      // H below this = anti-persistent: play the range game
+#define HURST_TREND     0.55      // H above this = persistent: Steady
+#define HURST_REVERT    0.45      // H below this = anti-persistent: Choppy (box-priced limits)
 
 //  ---- THE RANGE PROFILE (baked in: the tested box geometry) ----------
 //  Same reasoning as the two blocks above: these are the calibration the
@@ -387,15 +409,16 @@ struct SRow
    double         hRevert;    // Hurst anti-persistent threshold
    double         slAtr;      // stop loss   = this many ATR (per timeframe)
    double         tpAtr;      // take profit = this many ATR (per timeframe)
-   // ---- Part 2: the regime's decision, per row -----------------------
-   int            mode;       // 0 stand aside, 1 trend game, 2 range game (only set when dir != 0)
+   // ---- the entry style and the reason, per row -----------------------
+   int            mode;       // 0 plain limit/market entry, 2 the box prices the limit
    string         blockReason;// why this row is not trading ("" = quiet or no reason)
    double         rngTop;     // range box: upper band (valid while mode == 2)
    double         rngBot;     // range box: lower band (valid while mode == 2)
    double         lastClose;  // close of the last closed bar (box-kill checks)
    // ---- refreshed every evaluation ----
    int            score;      // -3 .. +3
-   int            direction;  // +1 buy, -1 sell, 0 hold
+   int            direction;  // +1 buy, -1 sell, 0 hold  (what the row TRADES)
+   int            trendDir;   // +1 up, -1 down, 0 flat    (what the TREND line reads)
    double         hurst;      // regime estimate
    double         er;         // efficiency ratio
    bool           ok;         // data available?
@@ -486,6 +509,7 @@ void ConfigureRow(int i, ENUM_TIMEFRAMES tf, string tag, string style,
    g_rows[i].tpAtr   = tpAtr;
    g_rows[i].score      = 0;
    g_rows[i].direction  = 0;
+   g_rows[i].trendDir   = 0;
    g_rows[i].hurst      = 0.5;
    g_rows[i].er         = 0.0;
    g_rows[i].mode       = 0;
@@ -861,7 +885,34 @@ double EfficiencyRatio(const double &close[], int i, int n)
 }
 
 //==================================================================
-//  COMPONENT 3 : ROLLING HURST EXPONENT
+//  COMPONENT 3 : STRUCTURE VOTE  (the independent third opinion)
+//==================================================================
+//     move = close[i] - close[i - STRUCT_PERIOD]
+//     move >  +dead  -> +1      (the window travelled up)
+//     move <  -dead  -> -1      (the window travelled down)
+//     otherwise      ->  0      (no travel worth voting on)
+//  where dead = STRUCT_DEAD_ATR x ATR.
+//
+//  This is the vote that used to be a COPY of vote 1 in a Steady regime
+//  and absent everywhere else, which is why a trend score of +/-2 could
+//  never occur and every trend order was a market order at 3/3.  Being
+//  its own measurement is what makes 2/3 (two of three agree) a real,
+//  recurring state - and 2/3 is the state that places the LIMIT order.
+//+------------------------------------------------------------------+
+int StructureVote(const double &close[], int i, int period, double atr)
+{
+   if(period < 1 || i < period) return(0);
+
+   double move = close[i] - close[i - period];
+   double dead = (atr > 0.0) ? STRUCT_DEAD_ATR * atr : 0.0;
+
+   if(move >  dead) return(1);
+   if(move < -dead) return(-1);
+   return(0);
+}
+
+//==================================================================
+//  COMPONENT 4 : ROLLING HURST EXPONENT  (the regime LABEL)
 //==================================================================
 //  Variance-scaling estimator.  Log returns are aggregated over
 //  non-overlapping blocks of size s.  For a self-similar series the block
@@ -943,6 +994,26 @@ double HurstExponent(const double &close[], int i, int window)
 }
 
 //==================================================================
+//  THE SCORE GATE
+//==================================================================
+//  One rule, used by every place that can produce or send an order:
+//      BUY  only at score >= InpBuyScore
+//      SELL only at score <= InpSellScore
+//  It applies to the TREND game and to the RANGE game alike.  The range
+//  game still takes its entry price, stop and target from the box - the
+//  box decides WHERE the trade is - but it may only trade in a direction
+//  the score actually supports.  Before this gate existed a Choppy row
+//  could send a box order at a score of 0, which reads on screen as
+//  "autotrading traded while the score said 0".
+//+------------------------------------------------------------------+
+bool ScoreAllowsTrade(int dir, int score)
+{
+   if(dir == 0)                          return(false);
+   if(dir > 0)                           return(score >= InpBuyScore);
+   return(score <= InpSellScore);
+}
+
+//==================================================================
 //  EVALUATION
 //==================================================================
 void EvaluateAll()
@@ -957,6 +1028,7 @@ void EvaluateAll()
          g_rows[r].ok           = false;
          g_rows[r].score        = 0;
          g_rows[r].direction    = 0;
+         g_rows[r].trendDir     = 0;
          g_rows[r].mode         = 0;
          g_rows[r].blockReason  = "";
          g_rows[r].rngTop       = 0.0;
@@ -983,6 +1055,7 @@ void EvaluateRow(int idx)
       g_rows[idx].ok           = false;
       g_rows[idx].score        = 0;
       g_rows[idx].direction    = 0;
+      g_rows[idx].trendDir     = 0;
       g_rows[idx].mode         = 0;
       g_rows[idx].blockReason  = "";
       g_rows[idx].rngTop       = 0.0;
@@ -1013,98 +1086,84 @@ void EvaluateRow(int idx)
    int v1 = (trend[last] > 0.0) ? 1 : ((trend[last] < 0.0) ? -1 : 0);
    int v2 = (roc[last]   > 0.0) ? 1 : ((roc[last]   < 0.0) ? -1 : 0);
 
-   // ---- component 3 : regime - and the decision it drives (Part 2) --
-   //  The regime no longer merely abstains from the vote; it picks the
-   //  game this row plays:
-   //     Steady  (H > hTrend)  -> the TREND game (score gates as before)
-   //     Choppy  (H < hRevert) -> the RANGE game (box gates below)
-   //     Mixed   (in between)  -> stand aside: nothing is calculable
-   //  Each row uses ITS OWN timeframe's eyes - M5's chop never touches
-   //  M15/M30 and vice versa.
-   double H  = HurstExponent(c, last, HURST_WINDOW);
-   double ER = EfficiencyRatio(c, last, ER_PERIOD);
+   // ---- component 3 : structure (the independent third vote) --------
+   //  Three votes, three DIFFERENT measurements:
+   //     1. direction : sign of the Precision Trend line
+   //     2. timing    : sign of that line's ROC
+   //     3. structure : sign of the net move over STRUCT_PERIOD bars
+   //  Because they are independent, 2/3 and 1/3 are real recurring states
+   //  - and 2/3 is the state that places a LIMIT order.
+   double atrNow = ATRClosed(g_rows[idx].tf, ATR_PERIOD);
+   int    v3     = StructureVote(c, last, STRUCT_PERIOD, atrNow);
+   int    score  = v1 + v2 + v3;
+
+   //  The regime is a LABEL and an ENTRY STYLE - never a permission.
+   //     Steady (H > hTrend) : a limit entry waits half an ATR back
+   //     Choppy (H < hRevert): a limit entry waits at the far box band
+   //     Mixed  (in between) : a limit entry waits half an ATR back
+   //  Whether the row trades at all is the SCORE's decision, in every
+   //  regime, exactly as InpBuyScore / InpSellScore say.
+   double H    = HurstExponent(c, last, HURST_WINDOW);
+   double ER   = EfficiencyRatio(c, last, ER_PERIOD);
+   int    game = 0;                       // 0 mixed | 1 steady | 2 choppy
+   if(H > g_rows[idx].hTrend)       game = 1;
+   else if(H < g_rows[idx].hRevert) game = 2;
 
    string emDash = ShortToString((ushort)0x2014); // U+2014 em dash without non-ASCII source bytes
-   int v3   = 0;
-   int mode = 0;                          // 0 stand aside | 1 trend game | 2 range game
-   if(H > g_rows[idx].hTrend)
-   {
-      mode = 1;                           // Steady: back the trend
-      v3   = v1;
-   }
-   else if(H < g_rows[idx].hRevert)
-   {
-      mode = 2;                           // Choppy: moves revert - the range game
-      v3   = 0;
-   }
-   else
-      g_rows[idx].blockReason = "mixed " + emDash + " no edge either way";   // no memory: nothing to compute
 
-   int score = v1 + v2 + v3;              // range mode never reaches 3: v3 stays 0
-
-   // ---- the decision -----------------------------------------------
+   // ---- the decision: score 3 = market, score 2 = limit, else nothing -
    int dir = 0;
    if(ER < ER_DEAD)
-   {
-      mode = 0;
       g_rows[idx].blockReason = "quiet " + emDash + " nothing worth trading";
-   }
-   else if(mode == 1)
+   else
    {
-      if(score >= InpBuyScore)       dir = 1;
-      else if(score <= InpSellScore) dir = -1;
-      // quiet trend (|score| below the gate): no reason, "nothing to place"
+      if(ScoreAllowsTrade( 1, score))      dir =  1;
+      else if(ScoreAllowsTrade(-1, score)) dir = -1;
+      if(dir == 0)
+         g_rows[idx].blockReason = StringFormat("score %+d/3 %s under the %+d/%+d gate",
+                                                score, emDash, InpBuyScore, InpSellScore);
    }
-   else if(mode == 2)
+
+   // ---- the entry style: a Choppy 2/3 limit waits at the box band ----
+   //  mode 2 means "this limit's price comes from the box" - the only
+   //  thing the regime changes about the order.  A 3/3 order is a market
+   //  order everywhere (the box has no say in a market fill), and if the
+   //  box is not usable the limit simply falls back to the half-ATR
+   //  pullback.  Neither case blocks the trade: the score said yes.
+   int mode = 0;
+   if(dir != 0 && game == 2 && InpRangeMode && MathAbs(score) < 3)
    {
-      if(!InpRangeMode)
-         g_rows[idx].blockReason = "chop " + emDash + " range mode is off";
-      else
+      int    nb   = MathMax(5, RANGE_BARS);
+      int    from = MathMax(0, n - nb);
+      double top  = -DBL_MAX;
+      double bot  =  DBL_MAX;
+      for(int k = from; k <= last; k++)
       {
-         // ---- the box: actual highs and lows of the last N closed bars
-         int    nb   = MathMax(5, RANGE_BARS);
-         int    from = MathMax(0, n - nb);
-         double top  = -DBL_MAX;
-         double bot  =  DBL_MAX;
-         for(int k = from; k <= last; k++)
-         {
-            if(h[k] > top) top = h[k];
-            if(l[k] < bot) bot = l[k];
-         }
-         double atr    = ATRClosed(g_rows[idx].tf, ATR_PERIOD);
-         double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-         double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-         double spread = ask - bid;
-         double mid    = 0.5 * (top + bot);
-         double half   = 0.5 * (top - bot);       // the target: band -> midpoint
-
-         string why = "";
-         if(atr <= 0.0 || spread < 0.0 || n < nb || top <= bot)
-            why = "chop " + emDash + " no valid box yet";      // data or geometry not there
-         else if(top - bot < RANGE_MIN_ATR * atr)
-            why = "chop " + emDash + " no valid box yet";      // box too flat to trade
-         else if(ER >= RANGE_ER_MAX)
-            why = "chop " + emDash + " no valid box yet";      // it is a walk, not a box
-         else if(bid > top || bid < bot)
-            why = "chop " + emDash + " no valid box yet";      // price broke the box
-         else if(half < RANGE_SPREAD_X * spread)
-            why = "chop " + emDash + " nothing clears the spread";   // the cost gate
-
-         if(why != "")
-            g_rows[idx].blockReason = why;
-         else
-         {
-            g_rows[idx].rngTop = top;
-            g_rows[idx].rngBot = bot;
-            dir = (bid > mid) ? -1 : +1;          // upper half: fade down from the top band
-         }
+         if(h[k] > top) top = h[k];
+         if(l[k] < bot) bot = l[k];
       }
-      if(dir == 0) mode = 0;                      // a failed gate means: stand aside
+      double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double spread = ask - bid;
+      double half   = 0.5 * (top - bot);          // band -> midpoint = the target
+
+      bool usable = (atrNow > 0.0 && spread >= 0.0 && n >= nb && top > bot &&
+                     top - bot >= RANGE_MIN_ATR * atrNow &&        // tall enough for the stop
+                     ER < RANGE_ER_MAX &&                          // a box, not a walk
+                     bid <= top && bid >= bot &&                   // price inside the box
+                     half >= RANGE_SPREAD_X * spread);             // the cost gate
+      if(usable)
+      {
+         g_rows[idx].rngTop = top;
+         g_rows[idx].rngBot = bot;
+         mode = 2;
+      }
    }
 
    g_rows[idx].ok        = true;
    g_rows[idx].score     = score;
    g_rows[idx].direction = dir;
+   g_rows[idx].trendDir  = v1;            // the TREND line: vote 1, not the trade
    g_rows[idx].mode      = (dir != 0) ? mode : 0;
    g_rows[idx].hurst     = H;
    g_rows[idx].er        = ER;
@@ -1115,10 +1174,10 @@ void EvaluateRow(int idx)
    g_rows[idx].lastBar   = LastClosedBarTime(_Symbol, g_rows[idx].tf);
 
    // ---- signal leash birth (the Valid cell counts this) -------------
-   //  The idea is re-born when the direction changes, the game switches
-   //  (trend <-> range), or the old leash has run out - the very bars
-   //  the auto-trader expires and re-places a waiting order on.  A row
-   //  that stands aside carries no leash at all.
+   //  The idea is re-born when the direction changes, the entry style
+   //  switches (box limit <-> plain limit/market), or the old leash has
+   //  run out - the very bars the auto-trader expires and re-places a
+   //  waiting order on.  A row that stands aside carries no leash.
    int  leash = (mode == 2) ? MathMax(1, RANGE_VALID_BARS)
                             : VALID_BARS;
    int  tfSec = (int)PeriodSeconds(g_rows[idx].tf);
@@ -1152,12 +1211,14 @@ void EvaluateRow(int idx)
 //     4. STOP   - stop loss   in points and in account currency
 //     5. UNTIL  - how long the reading is worth acting on
 //
-//  Entry type is decided by the score, not by the user:
+//  Entry type is decided by the score, not by the user, and the same in
+//  every regime:
 //     score 3/3  -> all three components agree -> MARKET entry
 //     score 2/3  -> two of three agree        -> PENDING (wait for a better price)
-//  In the range game (Choppy rows) it is ALWAYS a limit at the opposite
-//  band of the box - the box decides the entry, the score has no say,
-//  and the target is half the box (band -> midpoint), never a wish.
+//  WHERE that pending waits is the only thing the regime changes: on a
+//  Choppy row it sits at the box band (target = half the box, band ->
+//  midpoint, stop = band + 1 ATR); anywhere else it sits half an ATR
+//  back from the market with the timeframe's ATR stop and target.
 //  (Measured behaviour of both is in research/HORIZON.md; the pending price
 //   is PEND_ATR (half an ATR) beyond the market, pushed out further only
 //   when the spread or the broker's stops level demands it.)
@@ -1343,7 +1404,7 @@ void UpdatePlanRow(int i)
    {
       g_plans[i].state = 0;
       g_plans[i].kind  = "HOLD";
-      //  Part 2: the row says WHY it stands aside; a quiet row keeps
+      //  The row says WHY it stands aside (dead market, or score under the gate);
       //  the classic "nothing to place".
       g_plans[i].note  = (g_rows[i].blockReason != "") ? g_rows[i].blockReason
                                                        : "nothing to place";
@@ -1365,8 +1426,13 @@ void UpdatePlanRow(int i)
 
    int    dir        = g_rows[i].direction;
    int    score      = g_rows[i].score;
-   bool   isRange    = (g_rows[i].mode == 2);               // Part 2: this row plays the range game
-   bool   market     = (!isRange && MathAbs(score) >= 3);   // 3 of 3 -> trade now (range is always a limit)
+   //  THE ORDER TYPE IS THE SCORE'S CALL, everywhere:
+   //      3/3 -> MARKET (all three votes agree, take it now)
+   //      2/3 -> LIMIT  (two agree, wait for a better price)
+   //  isRange only says WHERE that limit waits: on a Choppy row the box
+   //  band prices it, otherwise half an ATR back from the market.
+   bool   market     = (MathAbs(score) >= 3);
+   bool   isRange    = (g_rows[i].mode == 2 && !market);
    bool   isOpenNow  = (g_auto[i].active && g_auto[i].isOpen && g_auto[i].dir == dir &&
                         g_auto[i].entryPrice > 0.0);
    bool   isPendNow  = (g_auto[i].active && !g_auto[i].isOpen && g_auto[i].dir == dir &&
@@ -1385,10 +1451,10 @@ void UpdatePlanRow(int i)
    double planEntry  = market ? entry : pend;
 
    // ---- stop and target ---------------------------------------------
-   //  Trend rows keep the per-timeframe ATR profiles (scalp aims near,
-   //  intraday aims far).  Range rows are pure box geometry: entry at
-   //  the OPPOSITE band, stop = band + RANGE_SL_ATR ATR, target =
-   //  half the box (band -> midpoint).  Neither is ever shrunk by hand.
+   //  A plain (market or pullback) entry keeps the per-timeframe ATR
+   //  profiles (scalp aims near, intraday aims far).  A BOX entry is pure
+   //  geometry: entry at the band, stop = band + RANGE_SL_ATR ATR,
+   //  target = half the box (band -> midpoint).  Neither is shrunk by hand.
    int slPts, tpPts;
    if(isRange)
    {
@@ -2889,6 +2955,13 @@ bool PlacePlanOrder(int i)
    if(!CanPlaceAutoOrders()) return(false);
    if(g_plans[i].state != 2 || g_plans[i].dir == 0) return(false);
    if(!TrendMatchForTF(i)) return(false);
+   //  THE SCORE GATE, second key on the same door.  EvaluateRow() already
+   //  refuses to publish a row whose score does not support its
+   //  direction, so this can only fire if that were ever bypassed - but
+   //  the last line before an order leaves the terminal should not rely
+   //  on a caller having checked.  No BUY below InpBuyScore, no SELL
+   //  above InpSellScore, in the trend game or the range game.
+   if(!ScoreAllowsTrade(g_plans[i].dir, g_plans[i].score)) return(false);
 
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -3033,7 +3106,7 @@ void ManageAutoBar()
             g_auto[i].entryScore = g_rows[i].score;
          }
 
-         // 0) RANGE FADE: a closed bar outside the trade's box kills it (Part 2).
+         // 0) BOX TRADE: a closed bar outside the trade's box kills it.
          //    The box captured at placement is the thesis; the market just broke it.
          if(g_auto[i].isRange && g_rows[i].ok &&
             (g_rows[i].lastClose > g_auto[i].rngTop || g_rows[i].lastClose < g_auto[i].rngBot))
@@ -3059,8 +3132,9 @@ void ManageAutoBar()
          }
 
          // 2) After TP1 is hit -> close if score weakened or direction dropped to HOLD.
-         //    Range fades are exempt: their exits are the box midpoint, the stop and
-         //    the box-kill - the trend score has no jurisdiction over them.
+         //    Range fades are exempt: their ENTRY was gated by the score, but once
+         //    filled their exits are the box midpoint, the stop and the box-kill -
+         //    the post-TP1 score watcher has no jurisdiction over them.
          if(g_auto[i].tp1Hit && !g_auto[i].isRange && !IsScoreStrongForTrade(i))
          {
             if(TradeClosePosition(g_auto[i].ticket, dir, g_auto[i].curLot, MagicForTF(i)))
@@ -3104,7 +3178,15 @@ void ManageAutoBar()
             double useSL = g_auto[i].slPrice;
             if(!g_auto[i].tp1Hit && !g_auto[i].trailActive)
             {
-               useSL = InpUseStopLoss ? candSL : 0.0;
+               //  The stop may only ever TIGHTEN (README rule 6): the new
+               //  plan's stop is taken only when it is closer to the entry
+               //  than the one already in place, so a wider ATR on a new
+               //  bar can never push an open trade's stop further away.
+               //  With InpUseStopLoss=false and no SL yet there is nothing
+               //  to keep, and the first stop stays the trailstop's job.
+               double cand2 = InpUseStopLoss ? candSL : 0.0;
+               if(cand2 > 0.0 && IsSLTighter(dir, cand2, g_auto[i].slPrice, point))
+                  useSL = cand2;
             }
             else if(candSL > 0.0 && IsSLTighter(dir, candSL, g_auto[i].slPrice, point))
             {
@@ -3163,7 +3245,7 @@ void ManageAutoBar()
                          g_rows[i].lastBar > g_auto[i].placedBar &&
                          ((int)((g_rows[i].lastBar - g_auto[i].placedBar) / tfSec) >= vBars));
 
-         // 0) RANGE FADE: a closed bar outside the trade's box cancels the pending (Part 2)
+         // 0) BOX TRADE: a closed bar outside the trade's box cancels the pending
          if(g_auto[i].isRange && g_rows[i].ok &&
             (g_rows[i].lastClose > g_auto[i].rngTop || g_rows[i].lastClose < g_auto[i].rngBot))
          {
@@ -3375,7 +3457,7 @@ void ManageAutoTick()
                   g_auto[i].curLot = SymbolMinLot();
             }
 
-            //  Range fades are exempt from the score watcher too (Part 2).
+            //  Box trades are exempt from the score watcher too.
             if(!g_auto[i].isRange && !IsScoreStrongForTrade(i))
             {
                SyncAutoState();
@@ -4015,11 +4097,14 @@ void DrawSupportedPanel()
 
       if(g_rows[i].ok)
       {
-         MakeLabel("dir" + sfx, x + vA, ry, PlainTrendText(g_rows[i].direction),
-                   DirectionColor(g_rows[i].direction), InpFontSize + 1, false);
+         //  THE TREND LINE SHOWS THE TREND (vote 1).  It used to print the
+         //  row's trade direction, which read "Going down" on a range sell
+         //  in an uptrend - the single most misleading thing on the panel.
+         MakeLabel("dir" + sfx, x + vA, ry, PlainTrendText(g_rows[i].trendDir),
+                   DirectionColor(g_rows[i].trendDir), InpFontSize + 1, false);
          MakeLabel("regimeVal" + sfx, x + vB, ry, RegimeText(i),
                    RegimeColor(i), InpFontSize + 1, false);
-         //  Part 2: a blocked row shows the trade it WOULD have fired,
+         //  A blocked row shows the trade its score WOULD have fired,
          //  greyed out - the gate now has a word and a colour instead of
          //  a silent HOLD.  A quiet row keeps its normal HOLD.
          int  sigDir = g_rows[i].direction;
@@ -4183,7 +4268,10 @@ int PlanWidthNeed()
 //                       Risk: 7.84 USD        Reward: 7.00 USD   Valid: 3/3 bars
 //    M15  range fade    Entry: 4279.10 (limit at the band)           Lot: 0.28
 //                       Stop: 4271.10 80pts   Target: 4287.10 80pts  Reach: ~2 bars
-//    M30  HOLD          mixed - no edge either way
+//    M30  pending -2/3  Entry: 4286.55        Lot: 0.01
+//                       Stop: 4289.10 255pts   Target: 4281.45 510pts  Reach: ~9 bars
+//    (a row stands aside only for a dead market or a score under the gate:
+//     HOLD  score +1/3 - under the +2/-2 gate)
 //
 //+------------------------------------------------------------------+
 void DrawPlanBlock(int x, int y)
