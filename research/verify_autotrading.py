@@ -6,6 +6,10 @@ line and verifies every rule:
   Rule 1  InpAutoTrading (default true, full auto hands-free; false = read-only)
   Rule 2  Strictly 1 active trade/order per timeframe (M5, M15, M30) at a time
   Rule 3  Market order at score 3/3; Pending Limit order at score 2/3
+          THE SCORE GATE: no order may be placed in a direction the score
+          does not support (BUY >= InpBuyScore, SELL <= InpSellScore) -
+          in the trend game AND in the range game.  Checked twice: when
+          the row publishes a direction, and again in PlacePlanOrder().
   Rule 4  Smart updates on open positions and waiting pending orders
   Rule 5  Three TP levels: TP3 = 100% advised, TP2 = 75% of TP3, TP1 = 75% of TP2
   Rule 6  TP1 -> 70% partial close (if > minLot) + SL to Break-Even + Trailstop
@@ -261,6 +265,9 @@ class AutoTraderSim:
         self.use_min_lot = use_min_lot
         self.risk2 = risk2
         self.risk3 = risk3
+        #  InpBuyScore / InpSellScore: the absolute score gate
+        self.buy_score = 2
+        self.sell_score = -2
         #  per-timeframe stop/target (SL_ATR_* / TP_ATR_*): None =
         #  the EA's shipped profile - scalp aims near, intraday aims far
         self.sl_atr = per_tf(sl_atr, SL_ATR)
@@ -319,6 +326,17 @@ class AutoTraderSim:
                 reason = "chop — no valid box yet"
             else:
                 reason = ""
+        #  THE SCORE GATE (ScoreAllowsTrade): the range game may only trade
+        #  in a direction the score supports; the box decides WHERE, the
+        #  score still decides WHETHER.  The trend game is gated before a
+        #  direction is ever published (EvaluateRow), so here it only has
+        #  to hold for mode == 2, but the check is written out for both.
+        if direction != 0 and not self.score_allows(direction, score):
+            if mode == 2:
+                reason = "chop — score %+d/3 under the %+d gate" % (
+                    score, self.buy_score if direction > 0 else self.sell_score)
+                mode = 0
+            direction = 0
         r["ok"] = ok
         r["dir"] = direction
         r["score"] = score
@@ -461,6 +479,14 @@ class AutoTraderSim:
         timer, choppy, same_trend = self.header_status_values()
         return "Timer: %s | Choppy Trade: %s | M15/M30 Same Trend: %s" % (
             timer, choppy, same_trend)
+
+    def score_allows(self, dir_, score):
+        """ScoreAllowsTrade() in SimpleAdvisor.mq5 - the absolute gate."""
+        if dir_ == 0:
+            return False
+        if dir_ > 0:
+            return score >= self.buy_score
+        return score <= self.sell_score
 
     def is_score_strong(self, tag):
         """IsScoreStrongForTrade() in SimpleAdvisor.mq5."""
@@ -701,6 +727,8 @@ class AutoTraderSim:
         r = self.rows[tag]
         if p["state"] != 2 or p["dir"] == 0 or not self.trend_match_for_tf(tag):
             return False
+        if not self.score_allows(p["dir"], p["score"]):
+            return False
 
         point = self.spec["point"]
         dir_ = p["dir"]
@@ -856,12 +884,11 @@ class AutoTraderSim:
                     cand_sl = self.norm_price(a.entry_price - a.dir * p["sl_pts"] * point)
                     cand_sl = self.clamp_sl_to_stops(a.dir, cand_sl)
                     if not a.tp1_hit and not a.trail_active:
-                        if self.use_stop_loss and cand_sl > 0.0:
-                            a.sl_price = cand_sl
+                        #  README rule 6: the stop only ever TIGHTENS.
+                        cand2 = cand_sl if self.use_stop_loss else 0.0
+                        if cand2 > 0.0 and self.is_sl_tighter(a.dir, cand2, a.sl_price):
+                            a.sl_price = cand2
                             a.sl_pts = int(round(abs(a.entry_price - a.sl_price) / point))
-                        else:
-                            a.sl_price = 0.0
-                            a.sl_pts = 0
                     elif cand_sl > 0.0 and self.is_sl_tighter(a.dir, cand_sl, a.sl_price):
                         a.sl_price = cand_sl
                         a.sl_pts = int(round(abs(a.entry_price - a.sl_price) / point))
@@ -1640,12 +1667,17 @@ def main():
           "Left Panel must show 'buy +3/3' (not 'market +3/3') when order is [OPEN]; got %r"
           % sim3.plans["M5"]["kind"])
     orig_sl = sim3.auto["M5"].sl_price
-    # New candle with WIDER ATR (0.40) before TP1 is hit -> both TP and SL update to new plan!
+    #  New candle with WIDER ATR (0.40) before TP1: the plan's stop is now
+    #  further from entry, but an OPEN trade's risk must never grow -
+    #  README rule 6 ("only tightens, never widens") is enforced.
     sim3.set_bar("M5", 1, 3, atr=0.40, bar_time=1300)
     sim3.update_plan()
+    check(sim3.plans["M5"]["sl_pts"] > sim3.auto["M5"].sl_pts,
+          "setup: the wider ATR must give the plan a wider stop than the open trade carries")
     sim3.manage_auto_bar()
-    check(sim3.auto["M5"].sl_pts == sim3.plans["M5"]["sl_pts"] and sim3.auto["M5"].sl_price < orig_sl,
-          "Before TP1/Trailstop, open trade SL must update to the new candle's plan")
+    check(abs(sim3.auto["M5"].sl_price - orig_sl) < 1e-9,
+          "Before TP1, a wider ATR must NEVER widen an open trade's SL; got %.2f -> %.2f"
+          % (orig_sl, sim3.auto["M5"].sl_price))
     check(sim3.auto["M5"].tp3_pts == sim3.plans["M5"]["tp3_pts"],
           "Open trade TP1/TP2/TP3 must update to the new candle's plan")
 
@@ -1852,7 +1884,7 @@ def main():
     # 8b. Range fade: limit at the opposite band, box geometry (M5 independent)
     box_top, box_bot = 4286.60, 4284.60      # sell from the top: bid 4285.70 > mid 4285.60
     rng2 = AutoTraderSim(auto_trading=True)
-    rng2.set_bar("M5", -1, -1, regime="Choppy", mode=2,
+    rng2.set_bar("M5", -1, -2, regime="Choppy", mode=2,
                  rng_top=box_top, rng_bot=box_bot, bar_time=1000)
     rng2.update_plan()
     check(rng2.plans["M5"]["kind"] == "range fade",
@@ -1882,7 +1914,7 @@ def main():
     # 8c. Fill at the band, then a close outside the box KILLS the open trade
     rng2.manage_auto_tick(bid=box_top, ask=box_top + 0.02)
     check(rng2.auto["M5"].is_open, "the range sell limit must fill when bid reaches the band")
-    rng2.set_bar("M5", -1, -1, regime="Choppy", mode=2,
+    rng2.set_bar("M5", -1, -2, regime="Choppy", mode=2,
                  rng_top=box_top, rng_bot=box_bot, bar_time=1900,
                  close=box_top + 0.30)         # close broke the top of the trade's box
     rng2.update_plan()
@@ -1892,13 +1924,13 @@ def main():
     print("  ok  Part 2 box-kill (open): a closed bar outside the box closes the trade")
 
     # 8d. Re-place on a new valid bar; a close below the box cancels the pending
-    rng2.set_bar("M5", -1, -1, regime="Choppy", mode=2,
+    rng2.set_bar("M5", -1, -2, regime="Choppy", mode=2,
                  rng_top=box_top, rng_bot=box_bot, bar_time=2500, close=4285.70)
     rng2.update_plan()
     rng2.manage_auto_bar()
     check(rng2.auto["M5"].active and not rng2.auto["M5"].is_open and rng2.auto["M5"].is_range,
           "a fresh bar inside a valid box must re-place the range pending")
-    rng2.set_bar("M5", -1, -1, regime="Choppy", mode=2,
+    rng2.set_bar("M5", -1, -2, regime="Choppy", mode=2,
                  rng_top=box_top, rng_bot=box_bot, bar_time=3100,
                  close=box_bot - 0.30)          # close broke the bottom
     rng2.update_plan()
@@ -1909,7 +1941,7 @@ def main():
 
     # 8e. Range fades are exempt from the post-TP1 score watcher
     rng3 = AutoTraderSim(auto_trading=True)
-    rng3.set_bar("M5", -1, -1, regime="Choppy", mode=2,
+    rng3.set_bar("M5", -1, -2, regime="Choppy", mode=2,
                  rng_top=box_top, rng_bot=box_bot, bar_time=1000)
     rng3.update_plan()
     rng3.manage_auto_bar()
@@ -1927,6 +1959,55 @@ def main():
     check(rng3.auto["M5"].active,
           "range fades are exempt from the score watcher - box, stop and box-kill govern them")
     print("  ok  Part 2 score watcher: trend rows watch the score, range fades do not")
+
+    # ------------------------------------------------------------------
+    # 8f. THE SCORE GATE IS ABSOLUTE (the "it traded at score 0" report)
+    #     InpBuyScore / InpSellScore are a gate on the ORDER, not only on
+    #     the trend game: no direction the score does not support may be
+    #     published by a row, and none may be sent by PlacePlanOrder().
+    # ------------------------------------------------------------------
+    gate = AutoTraderSim(auto_trading=True)
+    gate.set_bar("M5", -1, 0, regime="Choppy", mode=2,
+                 rng_top=box_top, rng_bot=box_bot, bar_time=1000)
+    gate.update_plan()
+    check(gate.rows["M5"]["dir"] == 0,
+          "a box SELL on score 0/3 must be refused by the score gate")
+    check(gate.plans["M5"]["kind"] == "HOLD",
+          "the refused row must show HOLD; got %r" % gate.plans["M5"]["kind"])
+    check(gate.plans["M5"]["note"] == "chop — score +0/3 under the -2 gate",
+          "the refused row must say which gate refused it; got %r" % gate.plans["M5"]["note"])
+    gate.manage_auto_bar()
+    check(not gate.any_auto_active(),
+          "NO order may be placed while the score is under the gate")
+
+    # A trend row below its gate is refused the same way.
+    gate.set_bar("M15", 1, 1, regime="Steady", bar_time=1000)
+    gate.update_plan()
+    check(gate.rows["M15"]["dir"] == 0 and gate.plans["M15"]["kind"] == "HOLD",
+          "a Steady BUY at +1/3 must be refused (InpBuyScore is +2)")
+
+    # The input is what decides: raise the SELL gate to -3 and -2/3 is refused.
+    strict = AutoTraderSim(auto_trading=True)
+    strict.sell_score = -3
+    strict.set_bar("M5", -1, -2, regime="Choppy", mode=2,
+                   rng_top=box_top, rng_bot=box_bot, bar_time=1000)
+    strict.update_plan()
+    check(strict.rows["M5"]["dir"] == 0 and not strict.auto["M5"].active,
+          "InpSellScore=-3 must refuse a -2/3 box sell - the input is obeyed")
+
+    # Second key: even a plan that somehow carries an ungated score cannot
+    # leave the terminal (PlacePlanOrder's own gate).
+    gate2 = AutoTraderSim(auto_trading=True)
+    gate2.set_bar("M5", -1, -2, regime="Choppy", mode=2,
+                  rng_top=box_top, rng_bot=box_bot, bar_time=1000)
+    gate2.update_plan()
+    check(gate2.plans["M5"]["state"] == 2 and gate2.plans["M5"]["dir"] == -1,
+          "setup: a -2/3 box sell is a valid plan")
+    gate2.plans["M5"]["score"] = 0                 # tamper: bypass the row gate
+    check(not gate2.place_plan_order("M5") and not gate2.auto["M5"].active,
+          "PlacePlanOrder must refuse an order whose score is under the gate")
+    print("  ok  Score gate: InpBuyScore/InpSellScore gate the ORDER in both games "
+          "(row + placement), and a refused row says why")
 
     # ------------------------------------------------------------------
     # 9. Rule 14: the time cells - Valid countdown & Hold (open trade)

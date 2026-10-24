@@ -97,6 +97,9 @@ of knowing **when not to act** is large.
 > trend game, **Choppy** plays the **range game** — the box trade (limit at the opposite band,
 > target = half the box, stop = band + 1 ATR, all gates must pass) — and **Mixed** stands aside
 > with `mixed — no edge either way` on the plan line. The fade row above is historical; see §6.
+> **The score gate is not relaxed by the range game:** the box decides the price, but a box
+> trade is only placed in a direction `InpBuyScore` / `InpSellScore` supports
+> (`ScoreAllowsTrade()`, checked again in `PlacePlanOrder()` before any order is sent).
 
 **Evidence base:** a 2025 study across five major East Asian indices found strategy performance is
 *strongly conditional on the Hurst regime* — trend-following thrived in high-persistence periods
@@ -157,8 +160,9 @@ engine only ever *confirms* a trend in a persistent regime, or **abstains**.
 input has been **removed**. An anti-persistent row is never faded against anymore — it plays the
 **range game** (the box trade: entry at the opposite band, target = the midpoint, stop =
 band + `RANGE_SL_ATR` ATR, with the half-box ≥ `RANGE_SPREAD_X` spreads / box ≥
-`RANGE_MIN_ATR` ATR / ER < `RANGE_ER_MAX` / bid-inside-box gates all-must-pass), or it stands
-aside and says why (`chop — nothing clears the spread`, etc.). The 2015 inversion above is
+`RANGE_MIN_ATR` ATR / ER < `RANGE_ER_MAX` / bid-inside-box / score-supports-the-direction
+gates all-must-pass), or it stands aside and says why (`chop — nothing clears the spread`,
+`chop — score +0/3 under the -2 gate`, etc.). The 2015 inversion above is
 exactly why the box trade should be journalled and pre-validated (band touch → midpoint hit
 before band break) before real money goes on it.
 

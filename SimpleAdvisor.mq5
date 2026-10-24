@@ -157,7 +157,7 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "2.16"
+#property version   "2.17"
 #property description "Multi-timeframe BUY/SELL/HOLD direction panel, trade plan and full-auto executor. M5 / M15 / M30 charts only."
 
 #ifndef M_PI
@@ -199,6 +199,10 @@ input int      InpSellScore   = -2;          // Score <= this  => SELL
 //  the box band, target at the box midpoint, stop beyond the band.  All
 //  the box numbers are gates, not guesses - every one must pass or the
 //  row stands aside and the plan block says why.
+//  THE SCORE STILL DECIDES WHETHER.  InpBuyScore / InpSellScore gate the
+//  ORDER in the range game exactly as in the trend game: the box owns
+//  the price, the stop and the target, but it may only trade in a
+//  direction the score supports (ScoreAllowsTrade()).
 //  Only the on/off switch is an input: "do I want chop traded at all" is
 //  a user preference.  The six numbers that define the box were inputs
 //  too until they stopped earning a decision - they are calibration, so
@@ -943,6 +947,26 @@ double HurstExponent(const double &close[], int i, int window)
 }
 
 //==================================================================
+//  THE SCORE GATE
+//==================================================================
+//  One rule, used by every place that can produce or send an order:
+//      BUY  only at score >= InpBuyScore
+//      SELL only at score <= InpSellScore
+//  It applies to the TREND game and to the RANGE game alike.  The range
+//  game still takes its entry price, stop and target from the box - the
+//  box decides WHERE the trade is - but it may only trade in a direction
+//  the score actually supports.  Before this gate existed a Choppy row
+//  could send a box order at a score of 0, which reads on screen as
+//  "autotrading traded while the score said 0".
+//+------------------------------------------------------------------+
+bool ScoreAllowsTrade(int dir, int score)
+{
+   if(dir == 0)                          return(false);
+   if(dir > 0)                           return(score >= InpBuyScore);
+   return(score <= InpSellScore);
+}
+
+//==================================================================
 //  EVALUATION
 //==================================================================
 void EvaluateAll()
@@ -1097,6 +1121,20 @@ void EvaluateRow(int idx)
             g_rows[idx].rngTop = top;
             g_rows[idx].rngBot = bot;
             dir = (bid > mid) ? -1 : +1;          // upper half: fade down from the top band
+
+            //  THE SCORE GATE IS NOT NEGOTIABLE.  The box may only trade
+            //  in a direction the score supports (InpBuyScore /
+            //  InpSellScore) - it decides WHERE, never WHETHER.  A box
+            //  that points the other way, or points the right way on a
+            //  score below the gate, stands aside and says so.
+            if(!ScoreAllowsTrade(dir, score))
+            {
+               string gateTxt = (dir > 0) ? StringFormat("%+d", InpBuyScore)
+                                          : StringFormat("%+d", InpSellScore);
+               g_rows[idx].blockReason = StringFormat("chop %s score %+d/3 under the %s gate",
+                                                      emDash, score, gateTxt);
+               dir = 0;
+            }
          }
       }
       if(dir == 0) mode = 0;                      // a failed gate means: stand aside
@@ -1156,8 +1194,10 @@ void EvaluateRow(int idx)
 //     score 3/3  -> all three components agree -> MARKET entry
 //     score 2/3  -> two of three agree        -> PENDING (wait for a better price)
 //  In the range game (Choppy rows) it is ALWAYS a limit at the opposite
-//  band of the box - the box decides the entry, the score has no say,
-//  and the target is half the box (band -> midpoint), never a wish.
+//  band of the box - the box decides the ENTRY PRICE, the target is half
+//  the box (band -> midpoint), never a wish - but the score still gates
+//  the ORDER: no box trade in a direction InpBuyScore / InpSellScore
+//  does not support, exactly as in the trend game.
 //  (Measured behaviour of both is in research/HORIZON.md; the pending price
 //   is PEND_ATR (half an ATR) beyond the market, pushed out further only
 //   when the spread or the broker's stops level demands it.)
@@ -2889,6 +2929,13 @@ bool PlacePlanOrder(int i)
    if(!CanPlaceAutoOrders()) return(false);
    if(g_plans[i].state != 2 || g_plans[i].dir == 0) return(false);
    if(!TrendMatchForTF(i)) return(false);
+   //  THE SCORE GATE, second key on the same door.  EvaluateRow() already
+   //  refuses to publish a row whose score does not support its
+   //  direction, so this can only fire if that were ever bypassed - but
+   //  the last line before an order leaves the terminal should not rely
+   //  on a caller having checked.  No BUY below InpBuyScore, no SELL
+   //  above InpSellScore, in the trend game or the range game.
+   if(!ScoreAllowsTrade(g_plans[i].dir, g_plans[i].score)) return(false);
 
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -3059,8 +3106,9 @@ void ManageAutoBar()
          }
 
          // 2) After TP1 is hit -> close if score weakened or direction dropped to HOLD.
-         //    Range fades are exempt: their exits are the box midpoint, the stop and
-         //    the box-kill - the trend score has no jurisdiction over them.
+         //    Range fades are exempt: their ENTRY was gated by the score, but once
+         //    filled their exits are the box midpoint, the stop and the box-kill -
+         //    the post-TP1 score watcher has no jurisdiction over them.
          if(g_auto[i].tp1Hit && !g_auto[i].isRange && !IsScoreStrongForTrade(i))
          {
             if(TradeClosePosition(g_auto[i].ticket, dir, g_auto[i].curLot, MagicForTF(i)))
@@ -3104,7 +3152,15 @@ void ManageAutoBar()
             double useSL = g_auto[i].slPrice;
             if(!g_auto[i].tp1Hit && !g_auto[i].trailActive)
             {
-               useSL = InpUseStopLoss ? candSL : 0.0;
+               //  The stop may only ever TIGHTEN (README rule 6): the new
+               //  plan's stop is taken only when it is closer to the entry
+               //  than the one already in place, so a wider ATR on a new
+               //  bar can never push an open trade's stop further away.
+               //  With InpUseStopLoss=false and no SL yet there is nothing
+               //  to keep, and the first stop stays the trailstop's job.
+               double cand2 = InpUseStopLoss ? candSL : 0.0;
+               if(cand2 > 0.0 && IsSLTighter(dir, cand2, g_auto[i].slPrice, point))
+                  useSL = cand2;
             }
             else if(candSL > 0.0 && IsSLTighter(dir, candSL, g_auto[i].slPrice, point))
             {

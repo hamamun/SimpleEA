@@ -174,7 +174,8 @@ The Hurst exponent measures long-range memory in the price series:
 quiet: each timeframe's regime picks between the trend game (Steady), the range game
 (Choppy) and standing aside (Mixed), and every refusal is written on that row's plan line —
 `mixed — no edge either way`, `quiet — nothing worth trading`, `chop — range mode is off`,
-`chop — no valid box yet`, `chop — nothing clears the spread`. The decision is strictly
+`chop — no valid box yet`, `chop — nothing clears the spread`,
+`chop — score +0/3 under the -2 gate`. The decision is strictly
 per-timeframe: no row's regime can veto another.
 
 This is the component that stops the panel from issuing a confident call in a market that has
@@ -196,7 +197,10 @@ HOLD  otherwise (and the plan block says WHY)
 
 A **Choppy** row never reaches ±3 — the regime adds no trend vote in the range game; it
 trades through the box gates instead (entry, stop and target come from the box geometry, not
-from the score). A **Mixed** row stands aside whatever the score says.
+from the score). **The score still gates the order, though:** a box trade is only placed in a
+direction the score supports (`score >= InpBuyScore` for a buy, `score <= InpSellScore` for a
+sell). The box owns the *price*; `InpBuyScore` / `InpSellScore` own the *permission*. A
+**Mixed** row stands aside whatever the score says.
 
 Kaufman's **Efficiency Ratio** is a dead-market gate: if ER is below the standard `ER_DEAD` gate (0.10)
 the instrument is not travelling anywhere, so the row is forced to `HOLD` regardless of score —
@@ -341,7 +345,7 @@ pixel, so a crowded column fails the run instead of the eye.
 
 | Your question | How the panel answers it |
 |---|---|
-| **1. Entry point** | `Entry:` is the price to use — the current ask/bid for that direction (market) or the pending price half an ATR better (pushed out further only when the spread or the broker's stops level demands it). **The EA decides which, per timeframe, from the score**: `market -3/3` = all three components agree, go now; `pending +2/3` = only two agree, so the entry waits for a better price. In the **range game** the box decides instead: `range fade` = a limit at the **opposite band** of the box, no matter what the score says. |
+| **1. Entry point** | `Entry:` is the price to use — the current ask/bid for that direction (market) or the pending price half an ATR better (pushed out further only when the spread or the broker's stops level demands it). **The EA decides which, per timeframe, from the score**: `market -3/3` = all three components agree, go now; `pending +2/3` = only two agree, so the entry waits for a better price. In the **range game** the box decides the price instead: `range fade` = a limit at the **opposite band** of the box — but only when the score supports that direction (the box never overrides `InpBuyScore` / `InpSellScore`). |
 | **2. Lot size** | `Lot:` — from balance, score and that timeframe's own stop distance, snapped to your broker's lot step and clamped to its minimum and maximum. |
 | **3. Take profit** | `Target:` — price **and points**, with the same amount in account currency on the `Reward:` cell. |
 | **4. Stop loss** | `Stop:` — price **and points**, with the money on the `Risk:` cell. Widened automatically (and marked `(min)`) if your broker demands a minimum stop distance. |
@@ -525,8 +529,13 @@ To pause another 48 hours deliberately, set `InpAutoOffHours = 0` → **OK**, th
      `RANGE_VALID_BARS` (8) for range fades.
 7. **Range fades (Part 2 — Choppy rows):**
    - The order is **always a Pending Limit at the opposite band** of the box (never a market
-     order — the score has no say in the entry), with `Stop = band + RANGE_SL_ATR × ATR` and
-     `TP3 = half the box` (the midpoint). The plan block shows it as `range fade`.
+     order — the score has no say in the entry *price*), with `Stop = band + RANGE_SL_ATR × ATR`
+     and `TP3 = half the box` (the midpoint). The plan block shows it as `range fade`.
+   - **The score gate still applies:** the box only trades in a direction `InpBuyScore` /
+     `InpSellScore` supports. Price in the upper half wants a sell — if the score is not at or
+     below `InpSellScore`, the row stands aside and the plan line says
+     `chop — score +0/3 under the -2 gate`. The score decides *whether*, the box decides *where*.
+     `PlacePlanOrder()` checks the gate again immediately before any order is sent.
    - **Box-kill:** if a closed bar closes **outside the trade's box**, the pending is cancelled
      or the open trade closed immediately — the broken box is the thesis being invalidated.
    - The **score watcher does not apply** to range fades (after TP1/TP2): the box midpoint, the
