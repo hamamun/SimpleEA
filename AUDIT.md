@@ -19,7 +19,12 @@ runtime behaviour rather than on the source alone is marked as such.
 | §3.1 — the "Trend:" line showed the *trade* direction | **FIXED (v2.18).** The row now carries `trendDir` (vote 1) and the panel prints that; Signal still shows the trade. |
 | §3.9 — README showed readings the code could not produce | **FIXED (v2.18)** as a side effect: the worked example's `Mixed +2/3` row now really does place a limit. |
 | §1.2 — no initial stop loss by default | **CLOSED / DELIBERATE ARCHITECTURE.** Confirmed by project author as intentional: `InpUseStopLoss = false` leaves initial broker SL at `0.0` to prevent entry noise/spread stop-outs, while the panel's stop distance serves as reference sizing risk. The stepped trailstop attaches the first physical SL dynamically at +40%/+55% to TP1. `InpUseStopLoss = true` is available for immediate hard SL at entry. Docs updated accordingly. |
-| §1.4, 1.5, §2, §3.2–3.8 | **OPEN** — unchanged, details below. |
+| §1.4 — the target moves during the trade | **FIXED.** TP1/TP2/TP3 are now frozen at fill and no longer walk with ATR changes on new bars. |
+| §2.1 — restart forgets range fade | **FIXED.** GlobalVariables persist `isRange`, `rngTop`, `rngBot`, `entryScore`, and `placedBar` across terminal restarts. |
+| §2.3 — EA re-opens what you close by hand | **CLOSED / AS DESIGNED.** Confirmed as intentional automation from bar signals. Documented in `README.md`. |
+| §3.3 — valid countdown vs expiry mismatch | **FIXED.** Pending order expiry clock now checks against `sigBirth`, synchronizing broker-side order cancellation with the on-screen countdown. |
+| §3.4 — `LastClosedBarTime` order index | **FIXED.** Shift 1 is now explicitly requested, returning the finished closed bar rather than the forming live bar. |
+| §1.5, §2.2, §2.4, §2.5, §3.2, §3.5–3.8 | **OPEN** — unchanged, details below. |
 
 **Engine change in v2.18 (this is a real strategy change, not a display fix):** the third vote
 used to be a copy of the first, which made a trend score of ±2 impossible. It is now the sign of
@@ -149,6 +154,9 @@ A trade no longer has the risk/reward it had when it was opened.
 
 Severity: **medium-high**.
 
+> **FIXED.** Take-profit targets (TP1, TP2, TP3) are now frozen at trade fill and no longer
+> walk with ATR on new closed bars. Only the Stop Loss can be updated to tighten risk.
+
 ### 1.5 Minimum lot can exceed the configured risk, and it still trades
 If the risk-based lot comes out below the broker's minimum, the EA rounds **up** to the minimum and
 places the order anyway. The panel admits it (`0.01 (min, 12.40 USD)`), but nothing stops the
@@ -169,6 +177,10 @@ Same trade, different rules before and after a restart.
 
 Severity: **medium**.
 
+> **FIXED.** `SaveAutoSlotState()` persists `isRange`, `rngTop`, `rngBot`, `entryScore`, and `placedBar`
+> in terminal GlobalVariables on placement and tick updates. `RestoreAutoSlotState()` restores them
+> upon terminal restart or recompile.
+
 ### 2.2 The manager stops in several everyday situations
 Position management (trail, TP1/TP2 partials, score exit, box-kill) only runs when *all* of these
 hold: autotrading input is ON, the chart is M5/M15/M30, the market is not "closed", and the panel
@@ -188,6 +200,10 @@ next closed bar, if the signal is still valid, the EA places a new order. The on
 (`HasTradedOnBar`) looks at *entries made by the EA in the current bar*, not at your manual action.
 
 Severity: **medium** (surprising, and it can undo a deliberate decision).
+
+> **CLOSED / CONFIRMED AS DESIGNED.** Confirmed as intentional by the author: SimpleEA executes
+> strictly based on closed-bar signals. Closing a trade manually does not block future signals on
+> subsequent bars. Documented in `README.md`.
 
 ### 2.4 No account-type or margin checks
 - The design assumes a **hedging** account (one position per magic number). On a **netting**
@@ -214,10 +230,10 @@ Severity: **medium**.
 |---|---|---|
 | 3.1 | The panel's **"Trend:"** line prints the *trade* direction, not the trend — so a range BUY reads "Going up" even with a negative score. | Makes finding 1.1 look like a malfunction. |
 | 3.2 | The **Score** colour follows the trade direction, and the 2nd-panel card shows no score / no reason at all. | Hard to audit a trade after the fact. |
-| 3.3 | **"Valid: N/3 bars"** counts from when the *idea* was born, but a pending order's real expiry counts from when it was *placed*. A pending can outlive the countdown shown on screen. | Trust in the panel. |
-| 3.4 | `LastClosedBarTime()` returns the **current (still-forming)** bar's start time, not the last closed one — the "newest first" array flag is missing on that one call. It happens to still fire the once-per-bar update, but every "bars since" number (and the order expiry) is one bar late. *(The only finding that depends on MetaTrader's copy-order semantics rather than on the source alone.)* | Low. |
+| 3.3 | **"Valid: N/3 bars"** countdown vs pending order real expiry. | **FIXED.** `expired` now checks against `sigBirth`, synchronizing cancellation with the screen countdown. |
+| 3.4 | `LastClosedBarTime()` returns forming bar instead of closed bar. | **FIXED.** Now requests shift 1 directly (`CopyTime(..., 1, 1, ...)`). |
 | 3.5 | `IsScoreStrongForTrade` compares against the **strongest score the trade ever had**, not the entry score, so a post-TP1 close can fire earlier than the documented rule. | Low. |
-| 3.6 | After a restart the EA **invents** an entry score of ±2 or ±3 when it cannot know the real one. | Low. |
+| 3.6 | After a restart the EA **invents** an entry score of ±2 or ±3 when it cannot know the real one. | **FIXED.** Real entry/peak score is now saved to and restored from GlobalVariables. |
 | 3.7 | The range box uses the **live bid** (not a closed bar) for the upper/lower-half decision, inside an otherwise "closed bars only" design. | Low (a spike at the open of a bar can flip the side). |
 | 3.8 | `HurstExponent` has an **off-by-one at the window edge** (`close[-1]` if the history were ever exactly the window length). Unreachable today because 700 bars are always demanded, but fragile. | Low / latent. |
 | 3.9 | The README shows readings the code cannot produce (the `pending +2/3` plan line; a `-2/3` trend sell that is really a range sell). | Documentation. |
@@ -272,13 +288,9 @@ For balance, these are the parts that hold up:
    intentional to provide initial breathing room without entry noise stop-outs, using the plan's
    stop as a sizing reference. The pre-TP1 trailstop attaches the first physical SL dynamically.
    Traders wanting an immediate hard stop can set `InpUseStopLoss = true`. Documented in `README.md`.
-4. ~~**Enforce "stop tightens only"** (1.3)~~ — **done in v2.17** — and **freeze TP1/2/3 at entry**
-   (1.4) — or, if targets must float, re-freeze the trail reference whenever TP1 changes.
-5. **Persist `isRange` + the box per magic** so a restart cannot change a trade's rules (2.1), and
-   decide whether "autotrading off / wrong chart / market closed" should really stop *management*
-   of positions that were opened with no stop (2.2).
-6. Then the smaller items: manual-close memory (2.3), a spread cap (2.5), a netting/free-margin
-   guard (2.4), and the "Valid" countdown (3.3, 3.4).
+4. ~~**Enforce "stop tightens only"** (1.3)~~ — **done in v2.17** — and ~~**freeze TP1/2/3 at entry** (1.4)~~ — **FIXED**: TP1/2/3 are now frozen at fill and never walk with ATR.
+5. ~~**Persist `isRange` + the box per magic** (2.1)~~ — **FIXED**: `isRange`, `rngTop`, `rngBot`, `entryScore`, and `placedBar` are stored in terminal GlobalVariables and restored in `SyncAutoState()`.
+6. Then the smaller items: ~~the "Valid" countdown (3.3)~~ — **FIXED**, ~~`LastClosedBarTime` (3.4)~~ — **FIXED**, ~~manual-close memory (2.3)~~ — **CONFIRMED AS DESIGNED (DOCUMENTED)**, a spread cap (2.5), a netting/free-margin guard (2.4).
 
 ---
 

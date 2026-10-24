@@ -499,7 +499,9 @@ To pause another 48 hours deliberately, set `InpAutoOffHours = 0` → **OK**, th
    - Every timeframe trades its own signal and score directly by default: M15 and M30 are **untied**
      (`InpRequireM15M30SameTrend=false`).
    - Set `InpRequireM15M30SameTrend=true` to tie M15 and M30: then neither places a new order unless
-     **both M15 and M30 trends match** (`Both Going up` or `Both Going down`).
+     **both M15 and M30 trade signal directions match** (both produce qualifying `BUY` signals or both
+     produce qualifying `SELL` signals based on `InpBuyScore`/`InpSellScore`). If one is BUY and the
+     other is HOLD or SELL, neither is permitted to place a trade.
 3. **Market vs Pending Limit Placement:**
    - Score `3/3` (`+3` or `-3`) $\rightarrow$ opens a **Market order** immediately.
    - Score `2/3` (`+2` or `-2`) $\rightarrow$ places a **Pending Limit order** (`BUY LIMIT` or `SELL LIMIT`)
@@ -550,9 +552,10 @@ To pause another 48 hours deliberately, set `InpAutoOffHours = 0` → **OK**, th
      - If current lot > minimum lot, closes partial volume to **reduce remaining lot size to the
        broker's minimum lot** and locks Stop Loss to `TP1`; continues watching score for TP3.
    - **At TP3 Hit:** Closes the remaining order in full.
-6. **Candle-by-Candle Smart Updates:**
-   - **Open Market Trade:** On each new closed candle in the same direction, updates `TP1 / TP2 / TP3`
-     from the new plan and **only tightens `SL` (never widens risk)**. If the timeframe drops to
+6. **Candle-by-Candle Smart Updates & Target Stability:**
+   - **Open Market Trade:** On each new closed candle in the same direction, take-profit targets
+     (`TP1 / TP2 / TP3`) **remain frozen from entry** (preventing floating targets mid-trade as ATR
+     changes), and the stop loss **only tightens (never widens risk)**. If the timeframe drops to
      `HOLD` *before* TP1 is hit, closes immediately if the trade is in profit. If the timeframe
      flips to the opposite direction, closes immediately.
    - **Pending Limit Order:** On each new closed candle in the same direction (`2/3`), updates
@@ -560,7 +563,13 @@ To pause another 48 hours deliberately, set `InpAutoOffHours = 0` → **OK**, th
      `3/3` in the same direction, deletes the waiting pending order and opens the **Market order**
      immediately. Cancels if the direction changes, drops to `HOLD`, the optional M15/M30 trend
      tie stops matching, or it reaches its validity expiry — 3 closed bars for trend orders,
-     `RANGE_VALID_BARS` (8) for range fades.
+     `RANGE_VALID_BARS` (8) for range fades. The expiry clock at the broker matches the exact same
+     leash countdown shown on the panel (`Valid: left/total bars`).
+   - **Manual Trade Closes:** SimpleEA executes strictly from closed-bar signals. If a user manually
+     closes a position or deletes a pending order in MT5, the EA does not record this as a permanent
+     veto. On the very next closed candle, if the signal remains qualified (score $\ge +2$ or $\le -2$),
+     the EA will enter again. To stop the EA from placing new trades, use the timer pause
+     (`InpAutoOffHours`), daily schedule, or switch `InpAutoTrading = false`.
 7. **Box-priced limits (Choppy rows):**
    - A Choppy row trades on exactly the same score rules as any other row — `3/3` market, `2/3`
      limit — but a `2/3` limit is priced **at the box band** instead of half an ATR back, with
@@ -577,6 +586,10 @@ To pause another 48 hours deliberately, set `InpAutoOffHours = 0` → **OK**, th
    - The **score watcher does not apply** to range fades (after TP1/TP2): the box midpoint, the
      stop and the box-kill govern their exits. The flip-to-opposite-direction and
      HOLD-in-profit rules still apply, exactly as for trend trades.
+   - **Restart Resilience:** Range fade states (box top, box bottom, entry score, and placement bar)
+     are automatically saved in terminal GlobalVariables. If MT5 restarts or the EA recompiles while a
+     range trade is open or pending, the EA restores the box levels immediately so that box-kill exits
+     and score watcher exemptions remain intact.
    - Range fades follow **rule 2 as usual**: each timeframe places its own box trade by default;
      M15/M30 require their mutual trend match only when `InpRequireM15M30SameTrend=true`.
 8. **Autotrading timer & long pause (placement only):**

@@ -760,12 +760,14 @@ void CheckNewBars()
 
 //+------------------------------------------------------------------+
 //  Time of the most recently CLOSED bar on a timeframe, or 0 if unknown.
+//  Uses shift 1 so it always retrieves the finished candle, never the
+//  currently forming live bar.
 //+------------------------------------------------------------------+
 datetime LastClosedBarTime(string sym, ENUM_TIMEFRAMES tf)
 {
    datetime times[];
-   if(CopyTime(sym, tf, 0, 2, times) == 2)
-      return(times[1]);
+   if(CopyTime(sym, tf, 1, 1, times) == 1)
+      return(times[0]);
    return(0);
 }
 
@@ -1719,6 +1721,62 @@ long MagicForTF(int i)
 }
 
 //+------------------------------------------------------------------+
+//  GlobalVariable persistence for slot state (range box, score, placed bar)
+//  so a terminal restart or EA recompile preserves range trades & rules.
+//+------------------------------------------------------------------+
+string AutoGVKey(int i, string field)
+{
+   return(StringFormat("SEA_%d_%s_%d_%s", (int)AccountInfoInteger(ACCOUNT_LOGIN), _Symbol, MagicForTF(i), field));
+}
+
+void SaveAutoSlotState(int i)
+{
+   if(g_auto[i].isRange)
+   {
+      GlobalVariableSet(AutoGVKey(i, "rng"), 1.0);
+      GlobalVariableSet(AutoGVKey(i, "top"), g_auto[i].rngTop);
+      GlobalVariableSet(AutoGVKey(i, "bot"), g_auto[i].rngBot);
+   }
+   else
+   {
+      GlobalVariableDel(AutoGVKey(i, "rng"));
+      GlobalVariableDel(AutoGVKey(i, "top"));
+      GlobalVariableDel(AutoGVKey(i, "bot"));
+   }
+   if(g_auto[i].entryScore != 0)
+      GlobalVariableSet(AutoGVKey(i, "score"), (double)g_auto[i].entryScore);
+   if(g_auto[i].placedBar > 0)
+      GlobalVariableSet(AutoGVKey(i, "placed"), (double)g_auto[i].placedBar);
+   GlobalVariablesFlush();
+}
+
+void ClearAutoSlotState(int i)
+{
+   GlobalVariableDel(AutoGVKey(i, "rng"));
+   GlobalVariableDel(AutoGVKey(i, "top"));
+   GlobalVariableDel(AutoGVKey(i, "bot"));
+   GlobalVariableDel(AutoGVKey(i, "score"));
+   GlobalVariableDel(AutoGVKey(i, "placed"));
+   GlobalVariablesFlush();
+}
+
+void RestoreAutoSlotState(int i)
+{
+   if(GlobalVariableCheck(AutoGVKey(i, "rng")))
+   {
+      g_auto[i].isRange = (GlobalVariableGet(AutoGVKey(i, "rng")) > 0.5);
+      if(GlobalVariableCheck(AutoGVKey(i, "top")))
+         g_auto[i].rngTop = GlobalVariableGet(AutoGVKey(i, "top"));
+      if(GlobalVariableCheck(AutoGVKey(i, "bot")))
+         g_auto[i].rngBot = GlobalVariableGet(AutoGVKey(i, "bot"));
+   }
+   if(GlobalVariableCheck(AutoGVKey(i, "score")))
+      g_auto[i].entryScore = (int)MathRound(GlobalVariableGet(AutoGVKey(i, "score")));
+   if(GlobalVariableCheck(AutoGVKey(i, "placed")))
+      g_auto[i].placedBar = (datetime)GlobalVariableGet(AutoGVKey(i, "placed"));
+}
+
+//+------------------------------------------------------------------+
 string AutoStatusTag(int i)
 {
    if(!g_auto[i].active) return("");
@@ -1775,6 +1833,7 @@ void ClearAutoCells(int i)
 //+------------------------------------------------------------------+
 void ResetAutoSlot(int i, bool keepSignalBar)
 {
+   ClearAutoSlotState(i);
    datetime sigBar = keepSignalBar ? g_auto[i].lastSignalBar : 0;
    g_auto[i].active        = false;
    g_auto[i].isOpen        = false;
@@ -2813,6 +2872,8 @@ void SyncAutoState()
          // Recover or transition state when a pending order just filled or EA restarted
          if(!wasOpen)
          {
+            if(!wasActive)
+               RestoreAutoSlotState(i);
             if(g_auto[i].initLot <= 0.0)
                g_auto[i].initLot = g_auto[i].curLot;
             if(g_auto[i].entryScore == 0)
@@ -2925,6 +2986,7 @@ void SyncAutoState()
 
          if(!wasActive)
          {
+            RestoreAutoSlotState(i);
             g_auto[i].initLot    = g_auto[i].curLot;
             g_auto[i].entryScore = (g_rows[i].direction == g_auto[i].dir && g_rows[i].score != 0)
                                    ? g_rows[i].score : (g_auto[i].dir * 2);
@@ -3013,6 +3075,7 @@ bool PlacePlanOrder(int i)
       g_auto[i].lastEvalBar   = g_rows[i].lastBar;
       g_auto[i].lastSignalBar = g_rows[i].lastBar;
       InitTrailState(i);          // market fill: freeze the trailstop % now
+      SaveAutoSlotState(i);
       return(true);
    }
    else
@@ -3061,6 +3124,7 @@ bool PlacePlanOrder(int i)
       g_auto[i].placedBar     = g_rows[i].lastBar;
       g_auto[i].lastEvalBar   = g_rows[i].lastBar;
       g_auto[i].lastSignalBar = g_rows[i].lastBar;
+      SaveAutoSlotState(i);
       return(true);
    }
 }
@@ -3104,6 +3168,7 @@ void ManageAutoBar()
             MathAbs(g_rows[i].score) > MathAbs(g_auto[i].entryScore))
          {
             g_auto[i].entryScore = g_rows[i].score;
+            SaveAutoSlotState(i);
          }
 
          // 0) BOX TRADE: a closed bar outside the trade's box kills it.
@@ -3159,21 +3224,12 @@ void ManageAutoBar()
             continue;
          }
 
-         // 4) Closed bar in the SAME direction -> update TP1/TP2/TP3 and SL
+         // 4) Closed bar in the SAME direction -> SL may only TIGHTEN;
+         //    TP targets (TP1/TP2/TP3) are frozen at entry and do not walk with ATR.
          if(g_rows[i].ok && g_rows[i].direction == dir && g_plans[i].state == 2)
          {
-            int newTp3 = g_plans[i].tp3Pts;
-            int newTp1 = 1, newTp2 = 1;
-            ComputeTPLevels(newTp3, newTp1, newTp2);
-
-            if(!g_auto[i].tp1Hit) g_auto[i].tp1Pts = newTp1;
-            if(!g_auto[i].tp2Hit) g_auto[i].tp2Pts = newTp2;
-            g_auto[i].tp3Pts = newTp3;
-
-            double rawTpPrice = NormPrice(g_auto[i].entryPrice + (double)dir * (double)newTp3 * point);
-            double newTpPrice = ClampTPToStopsLevel(dir, rawTpPrice, bid, ask, point);
-            double candSL     = NormPrice(g_auto[i].entryPrice - (double)dir * (double)g_plans[i].slPts * point);
-            candSL            = ClampSLToStopsLevel(dir, candSL, bid, ask, point);
+            double candSL = NormPrice(g_auto[i].entryPrice - (double)dir * (double)g_plans[i].slPts * point);
+            candSL        = ClampSLToStopsLevel(dir, candSL, bid, ask, point);
 
             double useSL = g_auto[i].slPrice;
             if(!g_auto[i].tp1Hit && !g_auto[i].trailActive)
@@ -3193,13 +3249,11 @@ void ManageAutoBar()
                useSL = candSL;
             }
 
-            if(MathAbs(newTpPrice - g_auto[i].tpPrice) >= 0.5 * point ||
-               MathAbs(useSL      - g_auto[i].slPrice) >= 0.5 * point)
+            if(MathAbs(useSL - g_auto[i].slPrice) >= 0.5 * point)
             {
-               if(TradeModifyPosition(g_auto[i].ticket, useSL, newTpPrice))
+               if(TradeModifyPosition(g_auto[i].ticket, useSL, g_auto[i].tpPrice))
                {
                   g_auto[i].slPrice       = useSL;
-                  g_auto[i].tpPrice       = newTpPrice;
                   g_auto[i].lastEvalBar   = g_rows[i].lastBar;
                   g_auto[i].slPts         = (useSL > 0.0)
                                             ? (int)MathRound(MathAbs(g_auto[i].entryPrice - useSL) / point)
@@ -3241,9 +3295,10 @@ void ManageAutoBar()
          //  cycle while the thesis was intact.
          int  vBars   = g_auto[i].isRange ? MathMax(1, RANGE_VALID_BARS)
                                           : VALID_BARS;
-         bool expired = (g_auto[i].placedBar > 0 && tfSec > 0 &&
-                         g_rows[i].lastBar > g_auto[i].placedBar &&
-                         ((int)((g_rows[i].lastBar - g_auto[i].placedBar) / tfSec) >= vBars));
+         datetime birthBar = (g_rows[i].sigBirth > 0) ? g_rows[i].sigBirth : g_auto[i].placedBar;
+         bool expired = (birthBar > 0 && tfSec > 0 &&
+                         g_rows[i].lastBar > birthBar &&
+                         ((int)((g_rows[i].lastBar - birthBar) / tfSec) >= vBars));
 
          // 0) BOX TRADE: a closed bar outside the trade's box cancels the pending
          if(g_auto[i].isRange && g_rows[i].ok &&
