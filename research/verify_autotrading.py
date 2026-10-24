@@ -320,22 +320,15 @@ class AutoTraderSim:
         if mode is None:
             mode = 1 if direction != 0 else 0
         if reason is None:
-            if direction == 0 and regime == "Mixed":
-                reason = "mixed — no edge either way"
-            elif direction == 0 and regime == "Choppy":
-                reason = "chop — no valid box yet"
-            else:
-                reason = ""
-        #  THE SCORE GATE (ScoreAllowsTrade): the range game may only trade
-        #  in a direction the score supports; the box decides WHERE, the
-        #  score still decides WHETHER.  The trend game is gated before a
-        #  direction is ever published (EvaluateRow), so here it only has
-        #  to hold for mode == 2, but the check is written out for both.
+            reason = "" if direction != 0 else (
+                "score %+d/3 — under the %+d/%+d gate" % (score, self.buy_score, self.sell_score))
+        #  THE SCORE GATE (ScoreAllowsTrade): the score decides WHETHER the
+        #  row trades, in every regime.  The regime only decides HOW the
+        #  limit is priced (mode == 2 = at the box band).
         if direction != 0 and not self.score_allows(direction, score):
-            if mode == 2:
-                reason = "chop — score %+d/3 under the %+d gate" % (
-                    score, self.buy_score if direction > 0 else self.sell_score)
-                mode = 0
+            reason = "score %+d/3 — under the %+d/%+d gate" % (
+                score, self.buy_score, self.sell_score)
+            mode = 0
             direction = 0
         r["ok"] = ok
         r["dir"] = direction
@@ -608,8 +601,10 @@ class AutoTraderSim:
                 continue
 
             dir_, score = r["dir"], r["score"]
-            is_range = r["mode"] == 2
-            market = (not is_range) and abs(score) >= 3
+            #  3/3 -> market, 2/3 -> limit, in EVERY regime.  mode == 2 only
+            #  says the box prices this limit.
+            market = abs(score) >= 3
+            is_range = (r["mode"] == 2) and not market
             a = self.auto[t]
             is_open_now = (a.active and a.is_open and a.dir == dir_ and a.entry_price > 0.0)
             is_pend_now = (a.active and not a.is_open and a.dir == dir_ and a.entry_price > 0.0)
@@ -1858,28 +1853,80 @@ def main():
     print("  ok  Rule 4, 7, 10, 11, 12: Candle updates, 2/3->3/3 upgrade, HOLD-in-profit close, and 2nd panel auto-close")
 
     # ------------------------------------------------------------------
-    # 8. Part 2: the regime decides - reasons, range fade, box-kill
+    # 8. The score decides (in every regime); the regime prices the limit
     # ------------------------------------------------------------------
-    # 8a. Blocked rows say WHY on the plan block, and never place
+    # 8a. Rows that stand aside say WHY, and never place
     rng = AutoTraderSim(auto_trading=True)
-    rng.set_bar("M5", 0, 2, regime="Mixed", bar_time=1000)
-    rng.set_bar("M15", 0, -3, regime="Steady", bar_time=1000,
+    rng.set_bar("M5", 0, 1, regime="Mixed", bar_time=1000)          # under the gate
+    rng.set_bar("M15", 0, -3, regime="Steady", bar_time=1000,       # dead market (ER)
                 reason="quiet — nothing worth trading")
-    rng.set_bar("M30", 0, 0, regime="Choppy", bar_time=1000)
+    rng.set_bar("M30", 0, 0, regime="Choppy", bar_time=1000)        # under the gate
     rng.update_plan()
     check(rng.plans["M5"]["kind"] == "HOLD" and rng.plans["M5"]["state"] == 0,
-          "a Mixed row with score +2 must HOLD (the score leak is closed); got %r"
-          % (rng.plans["M5"],))
-    check(rng.plans["M5"]["note"] == "mixed — no edge either way",
-          "Mixed row must say why; got %r" % rng.plans["M5"]["note"])
+          "a +1/3 row is under the +2 gate and must HOLD; got %r" % (rng.plans["M5"],))
+    check(rng.plans["M5"]["note"] == "score +1/3 — under the +2/-2 gate",
+          "an under-gate row must say which gate refused it; got %r" % rng.plans["M5"]["note"])
     check(rng.plans["M15"]["note"] == "quiet — nothing worth trading",
           "quiet row must say why; got %r" % rng.plans["M15"]["note"])
-    check(rng.plans["M30"]["note"] == "chop — no valid box yet",
-          "gated chop row must say why; got %r" % rng.plans["M30"]["note"])
+    check(rng.plans["M30"]["note"] == "score +0/3 — under the +2/-2 gate",
+          "a chop row under the gate must say why; got %r" % rng.plans["M30"]["note"])
     rng.manage_auto_bar()
     check(not rng.any_auto_active(),
-          "blocked rows must never place an order")
-    print("  ok  Part 2 decisions: Mixed/dead/chop rows hold with a reason and place nothing")
+          "rows under the gate must never place an order")
+    print("  ok  8a: rows under the score gate (and a dead market) hold with a reason, place nothing")
+
+    # 8a-2. THE RULE, UNIFORM IN EVERY REGIME: 3 -> market, 2 -> limit.
+    #       A Mixed row at +2 places a LIMIT (it used to stand aside), and
+    #       a Choppy row at -3 places a MARKET order (the range game used
+    #       to be limit-only).
+    for regime, score, want_market in (("Mixed", 2, False), ("Steady", 2, False),
+                                       ("Mixed", 3, True), ("Choppy", 3, True),
+                                       ("Steady", 3, True)):
+        u = AutoTraderSim(auto_trading=True)
+        u.set_bar("M5", +1, score, regime=regime, bar_time=1000,
+                  mode=(2 if regime == "Choppy" else 1),
+                  rng_top=4286.60, rng_bot=4284.60)
+        u.update_plan()
+        p5 = u.plans["M5"]
+        check(p5["state"] == 2 and p5["market"] == want_market,
+              "%s at %+d/3 must be a %s; got market=%r"
+              % (regime, score, "market" if want_market else "limit", p5["market"]))
+        u.manage_auto_bar()
+        a5 = u.auto["M5"]
+        check(a5.active and a5.is_open == want_market,
+              "%s at %+d/3 must place a%s %s order; got open=%r"
+              % (regime, score, "" if want_market else " waiting",
+                 "market" if want_market else "limit", a5.is_open))
+    print("  ok  8a-2: 3/3 -> market and 2/3 -> limit in EVERY regime (Mixed included)")
+
+    # 8a-3. The THIRD VOTE is its own measurement, so 2/3 is reachable.
+    #       StructureVote() in SimpleAdvisor.mq5: net move over
+    #       STRUCT_PERIOD bars, silent unless it beats STRUCT_DEAD_ATR ATR.
+    def structure_vote(close, i, period=20, atr=0.28, dead_atr=0.25):
+        if period < 1 or i < period:
+            return 0
+        move = close[i] - close[i - period]
+        dead = dead_atr * atr if atr > 0 else 0.0
+        if move > dead:
+            return 1
+        if move < -dead:
+            return -1
+        return 0
+
+    flat = [4285.70] * 40
+    up = [4285.00 + 0.02 * k for k in range(40)]        # +0.38 over 20 bars
+    drift = [4285.00 + 0.002 * k for k in range(40)]    # +0.038: inside the dead band
+    check(structure_vote(up, 39) == 1, "a +0.38 move over 20 bars must vote +1")
+    check(structure_vote(drift, 39) == 0,
+          "a move inside STRUCT_DEAD_ATR (0.38 ATR here) must vote 0, not +1")
+    check(structure_vote(flat, 39) == 0, "no move must vote 0")
+
+    #  The three votes are independent, so every score from -3..+3 exists:
+    #  v1 = trend, v2 = ROC of the trend line, v3 = structure (above).
+    for v1, v2, v3, want in ((1, 1, 1, 3), (1, 1, 0, 2), (1, 0, 1, 2),
+                             (1, -1, 1, 1), (0, 0, 0, 0), (-1, -1, 0, -2)):
+        check(v1 + v2 + v3 == want, "votes %+d/%+d/%+d must score %+d" % (v1, v2, v3, want))
+    print("  ok  8a-3: vote 3 is independent (structure), so 2/3 - the LIMIT state - really occurs")
 
     # 8b. Range fade: limit at the opposite band, box geometry (M5 independent)
     box_top, box_bot = 4286.60, 4284.60      # sell from the top: bid 4285.70 > mid 4285.60
@@ -1974,7 +2021,7 @@ def main():
           "a box SELL on score 0/3 must be refused by the score gate")
     check(gate.plans["M5"]["kind"] == "HOLD",
           "the refused row must show HOLD; got %r" % gate.plans["M5"]["kind"])
-    check(gate.plans["M5"]["note"] == "chop — score +0/3 under the -2 gate",
+    check(gate.plans["M5"]["note"] == "score +0/3 — under the +2/-2 gate",
           "the refused row must say which gate refused it; got %r" % gate.plans["M5"]["note"])
     gate.manage_auto_bar()
     check(not gate.any_auto_active(),

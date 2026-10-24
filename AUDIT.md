@@ -13,17 +13,20 @@ runtime behaviour rather than on the source alone is marked as such.
 
 | Finding | Status |
 |---|---|
-| §0 / §1.1 — the score gate did not cover the range game | **FIXED.** New `ScoreAllowsTrade()` gates the direction in `EvaluateRow()` *and* again in `PlacePlanOrder()`. A box trade in a direction the score does not support now stands aside with `chop — score +0/3 under the -2 gate` on the plan line. README, SIGNAL_LOGIC and the code comments updated; a regression test reproduces the report (`verify_autotrading.py`, block 8f). |
-| §1.3 — an open trade's stop could widen | **FIXED.** Before TP1 the new plan's stop is now taken only if it is *tighter* than the one in place. The old test that asserted the widening was rewritten to assert the documented rule. |
-| §1.1 — score ±2 unreachable in trend mode | **OPEN** (needs a decision, see below). |
-| §1.2, 1.4, 1.5, §2, §3 | **OPEN** — unchanged, details below. |
+| §0 / §1.1 — the score gate did not cover the range game | **FIXED (v2.17).** `ScoreAllowsTrade()` gates the direction in `EvaluateRow()` *and* again in `PlacePlanOrder()`. |
+| §1.3 — an open trade's stop could widen | **FIXED (v2.17).** Before TP1 the new plan's stop is taken only if it is *tighter* than the one in place. |
+| §1.1 — score ±2 unreachable, so the limit tier and the risk tiers were dead | **FIXED (v2.18).** Vote 3 is now its own measurement (`StructureVote()`: dead-banded net move over 20 bars), so every score −3…+3 occurs. The order type is the score's call in **every** regime: `3/3` → market, `2/3` → limit, under the gate → nothing. The regime only prices the limit (box band on a Choppy row, half an ATR back otherwise). The `0.5 % / 1.0 %` risk tiers and the "pending +2/3" plan line are now real. |
+| §3.1 — the "Trend:" line showed the *trade* direction | **FIXED (v2.18).** The row now carries `trendDir` (vote 1) and the panel prints that; Signal still shows the trade. |
+| §3.9 — README showed readings the code could not produce | **FIXED (v2.18)** as a side effect: the worked example's `Mixed +2/3` row now really does place a limit. |
+| §1.2, 1.4, 1.5, §2, §3.2–3.8 | **OPEN** — unchanged, details below. |
 
-**Decision needed for §1.1:** in a Steady regime the third vote is a copy of the first
-(`v3 = v1`), so a trend score of ±2 cannot occur — every trend entry is a market order at "3/3"
-and always takes the doubled risk. Two honest options: make the regime vote a genuinely
-independent value, or accept a two-vote engine and remove the score-2 / pending / risk-tier
-machinery (from code, panel and README) so nothing promises a state that cannot happen. I have
-not changed this, because it changes what the EA trades and that is your call.
+**Engine change in v2.18 (this is a real strategy change, not a display fix):** the third vote
+used to be a copy of the first, which made a trend score of ±2 impossible. It is now the sign of
+the net move over the last 20 closed bars, silent unless that move beats 0.25 × ATR. Consequences
+to be aware of before running it live: **Mixed rows now trade** (they used to stand aside), a
+**Choppy row at ±3 now takes a market order** (Choppy used to be limit-only), and the score-2 risk
+tier is now genuinely used. Journal a demo run before trusting it — the calibration of
+`STRUCT_PERIOD` / `STRUCT_DEAD_ATR` has not been measured against data.
 
 ---
 

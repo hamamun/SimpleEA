@@ -27,10 +27,11 @@ so nothing from the first panel is lost:
   **SELL**, Sideways = **HOLD**, with the score that produced it beside it. When the regime
   blocks a row, the Signal still shows the trade the score *would* have fired — **greyed out**
   — so a gate is never a silent blank.
-- Each regime decides its own row's game (**Part 2**): a **Steady** row trades the trend as
-  before; a **Choppy** row trades the box (band entry, midpoint target — see *Range mode*);
-  a **Mixed** row, a dead market or a failed gate stands aside and the trade plan below says
-  exactly why. Rows never look at each other — M5's chop never holds M15 or M30 back.
+- **The score decides whether a row trades, in every regime**: `3/3` → a **market** order,
+  `2/3` → a **limit** order, anything under the gate → nothing (and the trade plan says why).
+  The regime only decides **how a limit is priced**: a **Choppy** row waits at the box band
+  (midpoint target — see *Range mode*), a **Steady** or **Mixed** row waits half an ATR back.
+  Rows never look at each other — M5's chop never holds M15 or M30 back.
 - Below the three rows, a **second group** gives one trade plan per timeframe — entry, lot, stop,
   target and validity — in the same style. See *Trade plan* below.
 - On any chart timeframe other than M5 / M15 / M30 the panel shows **no data at all** — just the
@@ -164,19 +165,17 @@ marks the onset or continuation of a push rather than its level.
 
 The Hurst exponent measures long-range memory in the price series:
 
-| H | Meaning | Action |
+| H | Meaning | What it changes |
 |---|---|---|
-| **> 0.55** | persistent — trends extend | the trend is real, **play the trend game** (vote with it) |
-| 0.45 – 0.55 | random walk — no memory | **stand aside** — no edge either way (the plan block says why) |
-| **< 0.45** | anti-persistent — moves revert | **play the range game** — the box trade, see *Range mode* |
+| **> 0.55** | persistent — trends extend | **Steady**: a limit entry waits half an ATR back |
+| 0.45 – 0.55 | random walk — no memory | **Mixed**: a limit entry waits half an ATR back |
+| **< 0.45** | anti-persistent — moves revert | **Choppy**: a limit entry waits at the box band (see *Range mode*) |
 
-**The regime decides the game, per row (Part 2).** It is no longer just a vote that can go
-quiet: each timeframe's regime picks between the trend game (Steady), the range game
-(Choppy) and standing aside (Mixed), and every refusal is written on that row's plan line —
-`mixed — no edge either way`, `quiet — nothing worth trading`, `chop — range mode is off`,
-`chop — no valid box yet`, `chop — nothing clears the spread`,
-`chop — score +0/3 under the -2 gate`. The decision is strictly
-per-timeframe: no row's regime can veto another.
+**The regime sets the ENTRY STYLE, not the permission.** Whether a row trades is the score's
+decision in every regime (`InpBuyScore` / `InpSellScore`); the regime only says where a `2/3`
+limit waits. A row that stands aside says why on its plan line — `quiet — nothing worth
+trading` (dead market, `ER < 0.10`) or `score +1/3 — under the +2/-2 gate`. The decision is
+strictly per-timeframe: no row's regime can veto another.
 
 This is the component that stops the panel from issuing a confident call in a market that has
 no directional memory. It is the difference between a signal panel and a coin-flip generator.
@@ -195,12 +194,25 @@ SELL  if score <= -2
 HOLD  otherwise (and the plan block says WHY)
 ```
 
-A **Choppy** row never reaches ±3 — the regime adds no trend vote in the range game; it
-trades through the box gates instead (entry, stop and target come from the box geometry, not
-from the score). **The score still gates the order, though:** a box trade is only placed in a
-direction the score supports (`score >= InpBuyScore` for a buy, `score <= InpSellScore` for a
-sell). The box owns the *price*; `InpBuyScore` / `InpSellScore` own the *permission*. A
-**Mixed** row stands aside whatever the score says.
+**Three votes, three different measurements**, so every score from −3 to +3 really occurs:
+
+| Vote | Measurement |
+|---|---|
+| 1 — direction | sign of the Precision Trend line |
+| 2 — timing | sign of that line's ROC |
+| 3 — structure | sign of the net move over the last `STRUCT_PERIOD` (20) closed bars, silent unless it beats `STRUCT_DEAD_ATR` (0.25) ATR |
+
+The **order type follows the score, in every regime**:
+
+| Score | Order |
+|---|---|
+| `3/3` — all three agree | **MARKET** — take it now |
+| `2/3` — two agree | **LIMIT** — wait for a better price |
+| under the gate | nothing (the plan line says which gate) |
+
+Vote 3 used to be a *copy* of vote 1 in a Steady regime and absent everywhere else, which made
+`±2` unreachable and every trend order a market order. It is now its own measurement — that is
+what makes the `2/3` limit tier real.
 
 Kaufman's **Efficiency Ratio** is a dead-market gate: if ER is below the standard `ER_DEAD` gate (0.10)
 the instrument is not travelling anywhere, so the row is forced to `HOLD` regardless of score —
@@ -223,7 +235,7 @@ reading never changes after the fact.
 |---|---|---|---|
 | Signal & range | `InpBuyScore` | 2 | score ≥ this ⇒ BUY |
 | | `InpSellScore` | −2 | score ≤ this ⇒ SELL |
-| | `InpRangeMode` | **true** | range game on (false ⇒ every chop row says `chop — range mode is off`). One switch for M5, M15 and M30 — each row still reads its own regime |
+| | `InpRangeMode` | **true** | box-priced limits on Choppy rows (false ⇒ a Choppy `2/3` limit waits at the normal half-ATR pullback, exactly like a Steady/Mixed row). One switch for M5, M15 and M30 — each row still reads its own regime |
 | Engine | *standard engine* | baked | `TREND_L1/L2` 150 / 24 · `HURST_WINDOW` 256 · `ER_PERIOD` 20 · `ER_DEAD` 0.10 — not inputs since v2.12; SimpleEA applies them automatically, see below |
 | | *box geometry* | baked | `RANGE_BARS` 20 / `RANGE_SL_ATR` 1.0 / `RANGE_MIN_RR` 1.0 / `RANGE_SPREAD_X` 3.0 / `RANGE_ER_MAX` 0.40 / `RANGE_VALID_BARS` 8 — see below |
 | Panels | `InpPanelX/Y` | 12 / 24 | position in pixels |
@@ -259,7 +271,8 @@ its own, the fix is a one-line change in code, decided by the EA — not an inpu
 row 0 leaves M15 and M30 untouched.
 
 **The regime boundaries are not inputs, and that is deliberate.** `H > 0.55` is *Steady*,
-`H < 0.45` is *Choppy*, and everything between the two is *Mixed* — stand aside. Those two numbers
+`H < 0.45` is *Choppy*, and everything between the two is *Mixed* (a half-ATR pullback for its
+limits). Those two numbers
 are baked in (`HURST_TREND` / `HURST_REVERT` beside the trade profile in the source) because H is a
 property of the series, not of the symbol: 0.5 is the coin-flip, and 0.55 / 0.45 is the band the
 literature uses either side of it before it will call a regime at all (see `SIGNAL_LOGIC.md` §4).
@@ -293,7 +306,7 @@ this: the executor reads one row and acts on that timeframe.
 ├─────────────────────────────────────────────────────────────────────────────────────────────┤
 │  M5   Scalp            Trend:   Going down       Regime:  Steady                              │
 │                        Signal:  SELL             Score:   -3 / 3                              │
-│  M15  Short-term       Trend:   Sideways         Regime:  Mixed                               │
+│  M15  Short-term       Trend:   Going up         Regime:  Mixed                               │
 │                        Signal:  BUY              Score:   +2 / 3                              │
 │  M30  Intraday         Trend:   Going down       Regime:  Steady                              │
 │                        Signal:  SELL             Score:   -2 / 3                              │
@@ -301,18 +314,19 @@ this: the executor reads one row and acts on that timeframe.
 │  M5    market -3/3     Entry:   4285.70          Lot:     0.28                                │
 │                        Stop:    4285.98 28pts    Target:  4285.45 25pts     Reach:  ~1 bar    │
 │                        Risk:    7.84 USD         Reward:  7.00 USD          Valid:  3/3 bars  │
-│  M15   HOLD            mixed — no edge either way                                             │
+│  M15   pending +2/3    Entry:   4285.28          Lot:     0.03                                │
+│                        Stop:    4284.26 102pts   Target:  4286.81 153pts    Reach:  ~3 bars   │
+│                        Risk:    3.06 USD         Reward:  4.59 USD          Valid:  3/3 bars  │
 │  M30   pending -2/3    Entry:   4286.55          Lot:     0.01                                │
 │                        Stop:    4289.10 255pts   Target:  4281.45 510pts    Reach:  ~9 bars   │
 │                        Risk:    2.55 USD         Reward:  5.10 USD          Valid:  3/3 bars  │
 └─────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Two Part 2 readings are visible at once: M15's Mixed regime **blocks** its `+2 / 3` score —
-the `BUY` above is drawn *greyed out* on the chart (the trade that was refused), and its plan
-collapses to the single line `HOLD  mixed — no edge either way`. And when a Choppy regime
-takes the range game instead, the block carries the box's own numbers — entry at the opposite
-band, stop = band + 1 ATR, target = half the box (the midpoint):
+The three order shapes are visible at once: M5 is `-3/3` so it takes a **market** order now;
+M15 is `+2/3` so it waits at a **limit** half an ATR back; M30 is `-2/3` and waits the same
+way. When the limit's row is **Choppy**, the box prices it instead — entry at the band,
+stop = band + 1 ATR, target = half the box (the midpoint):
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────────────────────┐
@@ -345,12 +359,12 @@ pixel, so a crowded column fails the run instead of the eye.
 
 | Your question | How the panel answers it |
 |---|---|
-| **1. Entry point** | `Entry:` is the price to use — the current ask/bid for that direction (market) or the pending price half an ATR better (pushed out further only when the spread or the broker's stops level demands it). **The EA decides which, per timeframe, from the score**: `market -3/3` = all three components agree, go now; `pending +2/3` = only two agree, so the entry waits for a better price. In the **range game** the box decides the price instead: `range fade` = a limit at the **opposite band** of the box — but only when the score supports that direction (the box never overrides `InpBuyScore` / `InpSellScore`). |
+| **1. Entry point** | `Entry:` is the price to use — the current ask/bid for that direction (market) or the pending price half an ATR better (pushed out further only when the spread or the broker's stops level demands it). **The EA decides which, per timeframe, from the score**: `market -3/3` = all three components agree, go now; `pending +2/3` = only two agree, so the entry waits for a better price. On a **Choppy** row the box prices that limit instead: `range fade` = a limit at the **band** — the box owns the price, never the permission (`InpBuyScore` / `InpSellScore` still decide whether the row trades at all). |
 | **2. Lot size** | `Lot:` — from balance, score and that timeframe's own stop distance, snapped to your broker's lot step and clamped to its minimum and maximum. |
 | **3. Take profit** | `Target:` — price **and points**, with the same amount in account currency on the `Reward:` cell. |
 | **4. Stop loss** | `Stop:` — price **and points**, with the money on the `Risk:` cell. Widened automatically (and marked `(min)`) if your broker demands a minimum stop distance. |
 | **5. Reach** | `Reach:` — a rough bar count for how long the target may take (the target's own distance in ATR units, squared — a typical random walk, not a forecast). This is what makes scalp / short-term / intraday visibly different in **time**, not only in points. |
-| **6. Validity / Hold** | On an advice plan or a waiting pending order this is the idea's own leash: **3 bars** from the bar the idea was born (the measured median, see below), shown as a live countdown `left/total bars`. **Range fades use `RANGE_VALID_BARS`** (baked at 8) instead — the box-kill is their real invalidation, so a longer leash only removes the cancel/re-place churn while the box holds. The idea is re-born when the direction changes, the game switches (trend ↔ range), or the leash runs out — the `0/total` bar is the rethink bar, the same bars the auto-trader expires and re-places a waiting order on. Once a **trade is open** the signal's leash is spent and the cell switches to `Hold: N bars (est ~M)` — bars held against the Reach estimate. |
+| **6. Validity / Hold** | On an advice plan or a waiting pending order this is the idea's own leash: **3 bars** from the bar the idea was born (the measured median, see below), shown as a live countdown `left/total bars`. **Range fades use `RANGE_VALID_BARS`** (baked at 8) instead — the box-kill is their real invalidation, so a longer leash only removes the cancel/re-place churn while the box holds. The idea is re-born when the direction changes, the entry style switches (box ↔ pullback), or the leash runs out — the `0/total` bar is the rethink bar, the same bars the auto-trader expires and re-places a waiting order on. Once a **trade is open** the signal's leash is spent and the cell switches to `Hold: N bars (est ~M)` — bars held against the Reach estimate. |
 
 **Sizing: one switch and one number** (`InpUseRisk` / `InpUseMinLot`):
 
@@ -527,15 +541,17 @@ To pause another 48 hours deliberately, set `InpAutoOffHours = 0` → **OK**, th
      immediately. Cancels if the direction changes, drops to `HOLD`, the optional M15/M30 trend
      tie stops matching, or it reaches its validity expiry — 3 closed bars for trend orders,
      `RANGE_VALID_BARS` (8) for range fades.
-7. **Range fades (Part 2 — Choppy rows):**
-   - The order is **always a Pending Limit at the opposite band** of the box (never a market
-     order — the score has no say in the entry *price*), with `Stop = band + RANGE_SL_ATR × ATR`
-     and `TP3 = half the box` (the midpoint). The plan block shows it as `range fade`.
-   - **The score gate still applies:** the box only trades in a direction `InpBuyScore` /
-     `InpSellScore` supports. Price in the upper half wants a sell — if the score is not at or
-     below `InpSellScore`, the row stands aside and the plan line says
-     `chop — score +0/3 under the -2 gate`. The score decides *whether*, the box decides *where*.
-     `PlacePlanOrder()` checks the gate again immediately before any order is sent.
+7. **Box-priced limits (Choppy rows):**
+   - A Choppy row trades on exactly the same score rules as any other row — `3/3` market, `2/3`
+     limit — but a `2/3` limit is priced **at the box band** instead of half an ATR back, with
+     `Stop = band + RANGE_SL_ATR × ATR` and `TP3 = half the box` (the midpoint). The plan block
+     shows it as `range fade`.
+   - **The score is still the gate:** no order at all below `InpBuyScore` / `InpSellScore`, and
+     `PlacePlanOrder()` checks the gate again immediately before any order is sent. The score
+     decides *whether*, the box decides *where*.
+   - If the box is unusable (too flat, price outside it, spread too wide) the limit simply falls
+     back to the half-ATR pullback with the timeframe's ATR stop and target — the score already
+     said yes, so the box cannot veto the trade.
    - **Box-kill:** if a closed bar closes **outside the trade's box**, the pending is cancelled
      or the open trade closed immediately — the broken box is the thesis being invalidated.
    - The **score watcher does not apply** to range fades (after TP1/TP2): the box midpoint, the
@@ -718,8 +734,8 @@ M30/H1+ where the efficiency ratio and cost-to-edge ratio are more favourable, a
 M5 entirely unless you are on a raw-spread account where the cost can drop to ~0.1–0.3 pip.
 
 **A realistic expectation to hold on to:** this panel is a structured, low-lag reading of the
-market that is honest about when the market has no memory. It no longer sits back in chop —
-when the box gates clear it trades the range with calculative numbers, and when they do not it
-tells you *why* (`mixed — no edge either way`, `chop — nothing clears the spread`,
-`quiet — nothing worth trading`) instead of a blank HOLD. That refusal, roughly 55–60% of
-readings in my sampling, is still a feature — it just comes with receipts now.
+market that is honest about when a reading is not worth acting on. The score decides whether a
+timeframe trades (`3/3` market, `2/3` limit, under the gate nothing), and every refusal says
+*why* on the plan line (`score +1/3 — under the +2/-2 gate`, `quiet — nothing worth trading`)
+instead of a blank HOLD. The regime decides the *style* of the entry, not the permission — and
+when a box is unusable the limit falls back to the pullback rather than cancelling the trade.

@@ -135,12 +135,7 @@ class Panel:
         #  market reason depends on ER, which the walk does not model -
         #  cases pass it explicitly.
         if reason is None:
-            if direction == 0 and regime == "Mixed":
-                reason = "mixed — no edge either way"
-            elif direction == 0 and regime == "Choppy":
-                reason = "chop — no valid box yet"
-            else:
-                reason = ""
+            reason = "" if direction != 0 else "score under the gate"
         self.rows[tag].update(ok=ok, dir=direction, score=score,
                               trend=trend, regime=regime, mode=mode,
                               reason=reason, rng_top=rng_top, rng_bot=rng_bot,
@@ -166,8 +161,10 @@ class Panel:
         price = self.price
         pv = point_value_per_lot(spec)
         dir_, score = r["dir"], r["score"]
-        is_range = r["mode"] == 2
-        market = (not is_range) and abs(score) >= 3
+        #  3/3 -> market, 2/3 -> limit, in every regime; mode == 2 only
+        #  says the box prices this limit.
+        market = abs(score) >= 3
+        is_range = (r["mode"] == 2) and not market
         dg = spec["digits"]
         atr = self.atr[tag]
         entry = price + (spec["point"] if dir_ > 0 else 0.0) * 0     # ask ~= bid + spread/2
@@ -646,11 +643,11 @@ def main():
     bad += case("H)  Part 2: blocked rows say WHY; Signal shows the trade "
                 "they would have fired (greyed on the real panel)",
                 {"M5":  dict(direction=0, score=2, trend="Sideways", regime="Mixed",
-                             reason="mixed — no edge either way"),
+                             reason="score +2/3 — under the +3/+2 gate"),
                  "M15": dict(direction=0, score=-3, trend="Sideways", regime="Steady",
                              reason="quiet — nothing worth trading"),
                  "M30": dict(direction=0, score=0, trend="Sideways", regime="Choppy",
-                             reason="chop — nothing clears the spread")})
+                             reason="score +0/3 — under the +2/-2 gate")})
     bad += case("I)  Part 2: range fades on two timeframes - limit at the "
                 "opposite band, target = half the box",
                 {"M5":  dict(direction=-1, score=-1, trend="Going down", regime="Choppy",
