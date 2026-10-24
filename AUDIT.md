@@ -18,7 +18,8 @@ runtime behaviour rather than on the source alone is marked as such.
 | §1.1 — score ±2 unreachable, so the limit tier and the risk tiers were dead | **FIXED (v2.18).** Vote 3 is now its own measurement (`StructureVote()`: dead-banded net move over 20 bars), so every score −3…+3 occurs. The order type is the score's call in **every** regime: `3/3` → market, `2/3` → limit, under the gate → nothing. The regime only prices the limit (box band on a Choppy row, half an ATR back otherwise). The `0.5 % / 1.0 %` risk tiers and the "pending +2/3" plan line are now real. |
 | §3.1 — the "Trend:" line showed the *trade* direction | **FIXED (v2.18).** The row now carries `trendDir` (vote 1) and the panel prints that; Signal still shows the trade. |
 | §3.9 — README showed readings the code could not produce | **FIXED (v2.18)** as a side effect: the worked example's `Mixed +2/3` row now really does place a limit. |
-| §1.2, 1.4, 1.5, §2, §3.2–3.8 | **OPEN** — unchanged, details below. |
+| §1.2 — no initial stop loss by default | **CLOSED / DELIBERATE ARCHITECTURE.** Confirmed by project author as intentional: `InpUseStopLoss = false` leaves initial broker SL at `0.0` to prevent entry noise/spread stop-outs, while the panel's stop distance serves as reference sizing risk. The stepped trailstop attaches the first physical SL dynamically at +40%/+55% to TP1. `InpUseStopLoss = true` is available for immediate hard SL at entry. Docs updated accordingly. |
+| §1.4, 1.5, §2, §3.2–3.8 | **OPEN** — unchanged, details below. |
 
 **Engine change in v2.18 (this is a real strategy change, not a display fix):** the third vote
 used to be a copy of the first, which made a trend score of ±2 impossible. It is now the sign of
@@ -112,6 +113,17 @@ exits before TP1 are "signal flips to the opposite direction" or "signal drops t
 profit*". A losing trade with no stop can therefore sit open indefinitely.
 
 Severity: **high**.
+
+> **CLOSED / CONFIRMED DELIBERATE ARCHITECTURE:** The project author confirmed that this behavior
+> is **intentional by design**. SimpleEA deliberately employs a two-phase risk architecture: the
+> Trade Plan's `Stop:` and `Risk:` define the reference stop distance used to mathematically size
+> the lot (bounding calculated risk to `InpRiskPct`), but `InpUseStopLoss = false` intentionally
+> enters the broker order with `SL = 0.0`. This provides breathing room against initial spread
+> expansion and entry noise whipsaws right at fill. The first physical stop loss is placed
+> dynamically by the stepped trailstop once positive progress is confirmed (+40% or +55% towards TP1),
+> or at Break-Even if TP1 is hit. For traders or accounts requiring an immediate hard stop on entry,
+> setting `InpUseStopLoss = true` attaches the advised Stop Loss directly to the broker order at fill.
+> `README.md` has been updated to document this mechanism clearly.
 
 ### 1.3 The stop can be moved **further away** on a new bar
 README rule 6 promises the open-trade stop "only tightens (never widens risk)". The code does not
@@ -256,8 +268,10 @@ For balance, these are the parts that hold up:
 2. **Make the third vote independent** (1.1) — e.g. let the regime vote be a real, separate value,
    or accept a 2-vote engine and remove the score-2/pending/risk-tier machinery from the code,
    the panel and the README. Either way they must agree.
-3. **Never open without a stop** (1.2): either ship `InpUseStopLoss = true`, or place the
-   ATR stop at entry and let the trail only tighten it.
+3. ~~**Never open without a stop** (1.2)~~ — **CLOSED (DELIBERATE ARCHITECTURE)**: Confirmed as
+   intentional to provide initial breathing room without entry noise stop-outs, using the plan's
+   stop as a sizing reference. The pre-TP1 trailstop attaches the first physical SL dynamically.
+   Traders wanting an immediate hard stop can set `InpUseStopLoss = true`. Documented in `README.md`.
 4. ~~**Enforce "stop tightens only"** (1.3)~~ — **done in v2.17** — and **freeze TP1/2/3 at entry**
    (1.4) — or, if targets must float, re-freeze the trail reference whenever TP1 changes.
 5. **Persist `isRange` + the box per magic** so a restart cannot change a trade's rules (2.1), and

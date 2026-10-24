@@ -362,7 +362,7 @@ pixel, so a crowded column fails the run instead of the eye.
 | **1. Entry point** | `Entry:` is the price to use — the current ask/bid for that direction (market) or the pending price half an ATR better (pushed out further only when the spread or the broker's stops level demands it). **The EA decides which, per timeframe, from the score**: `market -3/3` = all three components agree, go now; `pending +2/3` = only two agree, so the entry waits for a better price. On a **Choppy** row the box prices that limit instead: `range fade` = a limit at the **band** — the box owns the price, never the permission (`InpBuyScore` / `InpSellScore` still decide whether the row trades at all). |
 | **2. Lot size** | `Lot:` — from balance, score and that timeframe's own stop distance, snapped to your broker's lot step and clamped to its minimum and maximum. |
 | **3. Take profit** | `Target:` — price **and points**, with the same amount in account currency on the `Reward:` cell. |
-| **4. Stop loss** | `Stop:` — price **and points**, with the money on the `Risk:` cell. Widened automatically (and marked `(min)`) if your broker demands a minimum stop distance. |
+| **4. Stop loss & reference risk** | `Stop:` — price **and points**, with the money on the `Risk:` cell. Serves as the **reference stop** for ATR-based position sizing and defines the risk boundary. Widened automatically (and marked `(min)`) if your broker demands a minimum stop distance. *Deliberate execution design:* with default `InpUseStopLoss = false`, orders enter with no initial broker SL (`SL = 0.0`) to avoid entry noise stop-outs; the pre-TP1 trailstop places the first physical SL dynamically at activation (+40%/+55% to TP1). Set `InpUseStopLoss = true` to attach the hard SL directly at entry. |
 | **5. Reach** | `Reach:` — a rough bar count for how long the target may take (the target's own distance in ATR units, squared — a typical random walk, not a forecast). This is what makes scalp / short-term / intraday visibly different in **time**, not only in points. |
 | **6. Validity / Hold** | On an advice plan or a waiting pending order this is the idea's own leash: **3 bars** from the bar the idea was born (the measured median, see below), shown as a live countdown `left/total bars`. **Range fades use `RANGE_VALID_BARS`** (baked at 8) instead — the box-kill is their real invalidation, so a longer leash only removes the cancel/re-place churn while the box holds. The idea is re-born when the direction changes, the entry style switches (box ↔ pullback), or the leash runs out — the `0/total` bar is the rethink bar, the same bars the auto-trader expires and re-places a waiting order on. Once a **trade is open** the signal's leash is spent and the cell switches to `Hold: N bars (est ~M)` — bars held against the Reach estimate. |
 
@@ -380,8 +380,14 @@ the broker's point grid first, so the printed points, prices and money are three
 the same level.
 
 **The block is both a plan and a report.** With `InpAutoTrading = false` it prints numbers for you
-to type in yourself — nothing is sent. With it on, the executor places exactly these numbers, and
-the block keeps showing them while the trade runs (Entry/SL/TP from the live position).
+to type in yourself — nothing is sent. With it on, the executor places orders using these levels
+(Entry, Lot, and TP3). Note that by deliberate design, `InpUseStopLoss` defaults to `false`: the advised
+`Stop:` is used as the reference distance to calculate lot size, while the order is placed at the
+broker with no initial stop (`SL = 0.0`) to give trades breathing room against entry noise and spread
+whipsaws. The pre-TP1 stepped trailstop attaches the first physical SL once price makes positive
+progress (+40%/+55% toward TP1). If you prefer a hard stop loss at entry, switch `InpUseStopLoss = true`
+to attach the advised Stop Loss directly to the broker order at entry. The block keeps showing Entry/SL/TP
+from the live position while the trade runs.
 
 Inputs are under *Trade plan & sizing*, followed by *Market closed detection*:
 
@@ -433,7 +439,7 @@ read-only mode):
 | `InpAutoEndTime` | `17:00` | Daily placement stop time, exclusive (`17:00` is already OFF). Before `InpAutoStartTime` means the window crosses midnight |
 | `InpAutoOffHours` | **0** | One-shot long pause from now, in hours (`48` = the next two days); `0` = no pause / cancel + re-arm |
 | `InpRequireM15M30SameTrend` | **false** | M15/M30 trend tie: `false` (default) = untied, each places on its own direction; `true` = both must be Going up or both Going down before either places |
-| `InpUseStopLoss` | **false** | Place initial Stop Loss on order when `true` (default is `false`): no SL is placed at entry — the pre-TP1 trailstop places the first SL at activation (or TP1 places it at Break-Even if the trailstop is off) |
+| `InpUseStopLoss` | **false** | Initial Stop Loss placement switch: **false (deliberate default)** = order enters with no broker SL (`SL = 0.0`) to provide breathing room against entry noise and spread whipsaws, using the plan's `Stop:` distance as the reference for lot sizing; the pre-TP1 stepped trailstop attaches the first physical SL dynamically at activation (40–55% progress to TP1, or at Break-Even when TP1 hits). Set to **true** to attach the advised hard Stop Loss directly onto the order at entry. |
 | `InpUseTrailStop` | **true** | Pre-TP1 stepped trailstop on/off (Entry→TP1 only; hands off to the TP1 logic at TP1) |
 | `InpTrailPctTight` | **40** | Trailstop % used when the regime is NOT Steady (10–70, clamped) |
 | `InpTrailPctSteady` | **55** | Trailstop % used in a Steady regime with a clear trend in the trade's direction (10–70, clamped) |
@@ -503,6 +509,20 @@ To pause another 48 hours deliberately, set `InpAutoOffHours = 0` → **OK**, th
    - **TP2** = 25% less than TP3 (`75%` of TP3).
    - **TP1** = 25% less than TP2 (`75%` of TP2 = `56.25%` of TP3).
 5. **Pre-TP1 Stepped Trailstop, Partial Closes & Score Watcher:**
+   - **Deliberate Stop Loss Architecture (`InpUseStopLoss = false` vs `true`):**
+     By deliberate design, the EA enters trades at the broker without an immediate hard stop loss
+     (`SL = 0.0`) when `InpUseStopLoss` is left at its default `false`. The `Stop:` price and
+     `Risk:` amount shown on the panel are not ignored — they define the **reference ATR stop
+     distance** used to calculate the lot size so that account risk remains strictly bounded.
+     Leaving the initial SL unattached at the broker gives the position necessary breathing room
+     to absorb immediate entry noise and spread widening without suffering premature stop-outs.
+     The first physical protective Stop Loss is then attached dynamically at the broker by the
+     stepped trailstop as soon as the trade shows positive momentum (reaching the activation
+     threshold of +40% or +55% towards TP1). If price runs in reverse before activation, the
+     trade is exited via opposite-signal reversal, box-kill (for range fades), or manual close.
+     Traders requiring a guaranteed hard stop loss placed at the broker from the exact moment of
+     fill can set `InpUseStopLoss = true`, which transmits the planned `Stop:` price directly
+     with the entry order.
    - **Before TP1 (stepped trailstop, Entry→TP1 only):** one selected percentage `P` drives the
      trail. When price has covered `P%` of the Entry→TP1 distance, the trailstop activates and
      places/moves the SL `P%` of the activation→Entry distance back from the activation price
