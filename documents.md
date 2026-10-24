@@ -12,6 +12,30 @@ SimpleEA runs simultaneously as:
 1. **An Analytical On-Chart Dashboard (Main Panel & Trade Plan)**: Evaluates trend, timing, market structure, and statistical memory (Hurst regime) independently across M5, M15, and M30.
 2. **An Automated Execution Engine (`InpAutoTrading`)**: Places, manages, trails, scales out (partials), and protects orders on each timeframe independently via unique magic numbers (`InpMagicBase + TF_INDEX`).
 
+### Main Panel Display Format
+Each of the three timeframes (**M5 Scalp**, **M15 Short-term**, **M30 Intraday**) displays a two-line block:
+- **Line 1: Trend & Regime**
+  - **Trend (3 types)**: **`Going up`** (Green), **`Going down`** (Red), or **`Sideways`** (Grey).
+  - **Regime (3 types)**: **`Steady`** (Blue), **`Mixed`** (Grey), or **`Choppy`** (Orange).
+  - All 9 combinations ($3 \times 3$) can appear independently on each timeframe.
+- **Line 2: Signal & Score**
+  - **Signal**: **`BUY`** (Green, when score $\ge +2$), **`SELL`** (Red, when score $\le -2$), or **`HOLD`** (Grey, when score is between $-1$ and $+1$).
+  - **Score**: Always printed explicitly beside the signal as `+3 / 3`, `+2 / 3`, `+1 / 3`, `+0 / 3`, `-1 / 3`, `-2 / 3`, or `-3 / 3`.
+  - **When score is `+1 / 3` or `-1 / 3`**: The signal clearly shows **`HOLD`** (in grey) with the score beside it, and the Trade Plan row underneath displays: `score +1/3 — under the +2/-2 gate` (stating exactly why no trade is placed). No regime hides the score.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  SimpleEA                                       XAUUSD  M5  │
+├─────────────────────────────────────────────────────────────┤
+│  M5   Scalp       Trend: Going up     Regime: Steady        │
+│                   Signal: BUY         Score: +3 / 3         │
+│  M15  Short-term  Trend: Sideways     Regime: Mixed         │
+│                   Signal: HOLD        Score: +1 / 3         │
+│  M30  Intraday    Trend: Going down   Regime: Choppy        │
+│                   Signal: SELL        Score: -2 / 3         │
+└─────────────────────────────────────────────────────────────┘
+```
+
 ```
                 [ Closed Bar Event on M5 / M15 / M30 ]
                                   │
