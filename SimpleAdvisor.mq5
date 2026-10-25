@@ -112,6 +112,9 @@
 //|     default; tie them with InpRequireM15M30SameTrend = true.      |
 //|   - Optional PC-local timer/pause: while OFF, no new orders are   |
 //|     placed and pendings are cancelled; open trades stay managed.  |
+//|     The header states the EFFECTIVE state ("Timer Pause", never   |
+//|     the untouched input) plus a "Resume 2h14m" countdown to when  |
+//|     placement is allowed again.  The input is never rewritten.    |
 //|   - A second Main Panel header line shows Timer, Choppy Trade     |
 //|     and M15/M30 Same Trend mode/status at a glance.               |
 //|   - Three take-profit levels per order:                           |
@@ -166,7 +169,7 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "2.18"
+#property version   "2.19"
 #property description "Multi-timeframe BUY/SELL/HOLD direction panel, trade plan and full-auto executor. M5 / M15 / M30 charts only."
 
 #ifndef M_PI
@@ -447,7 +450,7 @@ string   g_pauseGVReq       = "";   // GlobalVariable holding the requested hour
 bool     g_timerStateInit   = false;
 bool     g_timerWasAllowed  = false; // last observed timer placement state
 ulong    g_lastPendCancelTryMs = 0;  // throttled pending-cancel retries while OFF
-int      g_pauseMinsShown   = -1;    // pause countdown minute currently on the panel
+int      g_resumeMinsShown  = -1;    // "Resume ..." minute currently on the panel
 
 ENUM_TIMEFRAMES g_drawnTf = (ENUM_TIMEFRAMES)0;  // timeframe the header was drawn for
 
@@ -637,6 +640,10 @@ int OnInit()
       EvaluateAll();
       UpdatePlan();
       ManageAutoBar();
+      //  Cells BEFORE the panel: DrawSupportedPanel() ends with DrawAutoPanel(),
+      //  and DrawAutoPanel() positions itself from g_panelW - which is only
+      //  final once DrawPanel() has run.  So the cell text is formatted here
+      //  and the drawing (with the header's real width) happens below.
       UpdateAutoPanel();
    }
 
@@ -2277,10 +2284,10 @@ void CheckAutoTimerTransition()
             CancelAllAutoPendings();
          }
       }
-      //  The status line's long-pause countdown is minute-granular:
-      //  redraw only when the displayed minute actually rolls over.
-      if(AutoPauseActive() && ChartSupported() && g_panelOK &&
-         PauseRemainingMinutes() != g_pauseMinsShown)
+      //  The header's "Resume ..." countdown is minute-granular: redraw
+      //  only when the displayed minute actually rolls over (the same
+      //  2-second timer tick checks it, so the flip to "On" is never late).
+      if(ChartSupported() && g_panelOK && ResumeMinutes() != g_resumeMinsShown)
       {
          DrawPanel();
          ChartRedraw(0);
@@ -2306,7 +2313,7 @@ void CheckAutoTimerTransition()
       if(g_panelOK && CanTradeNow())
       {
          ManageAutoBar();
-         UpdateAutoPanel();
+         UpdateAutoPanel();   // cells first: DrawPanel() -> DrawAutoPanel() draws them
       }
    }
    DrawPanel();
@@ -2314,10 +2321,21 @@ void CheckAutoTimerTransition()
 }
 
 //+------------------------------------------------------------------+
+//  THE HEADER STATES THE EFFECTIVE STATE, NOT THE INPUT.
+//
+//  MQL5 inputs are read-only at run time, so an EA can never rewrite
+//  InpAutoTrading when its own timer closes the door.  The header is
+//  therefore the one honest place to say what is true right now:
+//     Off          the master switch is off (read-only advice)
+//     Timer Pause  the switch is on but the timer/pause blocks placement
+//     On           the switch is on and nothing blocks placement
+//  "Timer Pause" rather than "Timer Off": Off already means "the feature
+//  is switched off", and the two must not read as the same thing.
+//+------------------------------------------------------------------+
 string AutoTradingHeaderText()
 {
    if(!InpAutoTrading) return("Off");
-   return(AutoTimerAllowsPlacement() ? "On" : "Paused");
+   return(AutoTimerAllowsPlacement() ? "On" : "Timer Pause");
 }
 
 //+------------------------------------------------------------------+
@@ -2347,20 +2365,66 @@ int PauseRemainingMinutes()
 }
 
 //+------------------------------------------------------------------+
+//  Minutes until the daily window next opens; 0 = open now (or no
+//  schedule at all).  An overnight window (22:00-06:00) is handled by
+//  the same modulo: the next start is simply the next 22:00.
+//+------------------------------------------------------------------+
+int MinutesUntilScheduleOpen()
+{
+   if(!InpUseAutoSchedule || g_schedStartMin < 0 || g_schedEndMin < 0) return(0);
+   if(InAutoScheduleWindow()) return(0);
+
+   MqlDateTime dt;
+   TimeToStruct(TimeLocal(), dt);
+   int nowMin = dt.hour * 60 + dt.min;
+   int delta  = (g_schedStartMin - nowMin + 1440) % 1440;
+   return(delta > 0 ? delta : 1440);
+}
+
+//+------------------------------------------------------------------+
+//  Minutes until placement is allowed again: the LATER of the daily
+//  window reopening and the one-shot pause ending, because placement
+//  needs both doors open.  0 = placement is allowed right now.
+//+------------------------------------------------------------------+
+int ResumeMinutes()
+{
+   if(!InpAutoTrading) return(0);
+   int sched = MinutesUntilScheduleOpen();
+   int pause = PauseRemainingMinutes();
+   if(sched <= 0 && pause <= 0) return(0);
+   return((int)MathMax(sched, pause));
+}
+
+//+------------------------------------------------------------------+
+//  "Resume 2h14m" beside the header status - empty when nothing is
+//  blocking, so the header is uncluttered while the timer is off (the
+//  input) or open.  Long pauses read in days, the last hour in minutes.
+//     Resume 2d 0h     (pause >= 24h: 48-hour request shows as 2d)
+//     Resume 23h59m
+//     Resume 25m
+//  The longest form is 13 characters; the panel reserves that width.
+//+------------------------------------------------------------------+
+string ResumeHeaderText()
+{
+   int mins = ResumeMinutes();
+   if(mins <= 0) return("");
+   if(mins >= 1440)
+      return(StringFormat("Resume %dd %dh", mins / 1440, (mins % 1440) / 60));
+   if(mins >= 60)
+      return(StringFormat("Resume %dh%02dm", mins / 60, mins % 60));
+   return(StringFormat("Resume %dm", mins));
+}
+
+//+------------------------------------------------------------------+
 //  "Off" = no daily schedule and no active long pause; "On <window>"
 //  = the schedule is enabled and currently open; "Paused <window>" =
 //  enabled but outside it; an active long pause replaces the window
-//  with its remaining time.  The longest form is 18 characters.
+//  with "Paused by request" - the exact countdown lives on header
+//  line 1 now, so it is not repeated here.  Longest form: 18 chars.
 //+------------------------------------------------------------------+
 string TimerHeaderText()
 {
-   if(AutoPauseActive())
-   {
-      int mins = PauseRemainingMinutes();
-      if(mins >= 60)
-         return(StringFormat("Paused %dh %02dm", mins / 60, mins % 60));
-      return(StringFormat("Paused %dm", mins));
-   }
+   if(AutoPauseActive()) return("Paused by request");
    if(!InpUseAutoSchedule) return("Off");
 
    string window = StringFormat("%02d:%02d-%02d:%02d",
@@ -4290,6 +4354,12 @@ void DrawPanel()
 //     M5   Scalp       Trend: Going up     Regime: Steady
 //                      Signal: BUY         Score: +3 / 3
 //     ...
+//
+//  While the timer blocks placement, line 1 says so and counts down
+//  (line 2 then names the setting that is doing it):
+//
+//     SimpleEA | Autotrading : Timer Pause  Resume 2h14m  SYMBOL  M15
+//     Timer: Paused 08:00-17:00 | Choppy Trade: On | M15/M30 Same Trend: Off
 //+------------------------------------------------------------------+
 void DrawSupportedPanel()
 {
@@ -4303,7 +4373,20 @@ void DrawSupportedPanel()
    int    em        = CharW(InpFontSize);
    int    titleW    = 8 * CharW(InpFontSize + 1);
    string symRight  = "|  " + _Symbol + "  |  " + ChartTimeframeText();
-   int    titleHeadW = pad + titleW + em + (16 + 6 + 2 + StringLen(symRight)) * em + pad;
+
+   //  Line 1: value slot for the status word plus, when something is
+   //  blocking, a 2-character gap and the "Resume ..." countdown.  The
+   //  slot keeps its 6-character floor so the panel measures exactly as
+   //  it did before whenever the timer is not in the way - it can only
+   //  grow while the timer is actually holding placement back, which is
+   //  at most a couple of times a day (and it shrinks again by itself).
+   string autoText   = AutoTradingHeaderText();
+   string resumeText = ResumeHeaderText();
+   int    autoSlot   = (int)MathMax(6, StringLen(autoText));
+   int    resumeSlot = (resumeText == "") ? 0 : (StringLen(resumeText) + 2);
+
+   int    titleHeadW = pad + titleW + em
+                       + (16 + autoSlot + resumeSlot + 2 + StringLen(symRight)) * em + pad;
    int    statusHeadW = pad + STATUS_LINE_C * em + pad;
    int    headW     = (int)MathMax(titleHeadW, statusHeadW);
    int    wantW     = (int)MathMax(NoticeWidth(), headW);
@@ -4315,15 +4398,24 @@ void DrawSupportedPanel()
    MakeRect("bg",  x, y, g_panelW, g_panelH, InpBgColor, clrDimGray);
    MakeRect("sep", x + 4, y + mainHeadH - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
 
-   // ---- header: SimpleEA | Autotrading : On/Off/Paused | SYMBOL | TF -----
+   // ---- header: SimpleEA | Autotrading : On/Off/Timer Pause | SYMBOL | TF --
+   //  The word states the EFFECTIVE state (see AutoTradingHeaderText): the
+   //  input is never rewritten, so the panel - not the dialog - is where
+   //  the truth about "the timer is holding me back" is told.  Beside it,
+   //  while something blocks placement, the countdown to when it reopens.
    MakeLabel("title", x + pad, y + 7, "SimpleEA",
              InpTitleColor, InpFontSize + 1, false);
    int autoCapX = x + pad + titleW + em;
    MakeLabel("autoCap", autoCapX, y + 8, "| Autotrading : ",
              clrSilver, InpFontSize, false);
    int autoValX = autoCapX + 16 * em;
-   MakeLabel("autoVal", autoValX, y + 8, AutoTradingHeaderText(),
+   MakeLabel("autoVal", autoValX, y + 8, autoText,
              AutoTradingHeaderColor(), InpFontSize, false);
+   if(resumeText != "")
+      MakeLabel("resumeVal", autoValX + (autoSlot + 2) * em, y + 8, resumeText,
+                clrOrange, InpFontSize, false);
+   else
+      DeleteObject("resumeVal");
    MakeLabel("sym", x + g_panelW - pad, y + 8, symRight,
              InpTitleColor, InpFontSize, true);
 
@@ -4338,7 +4430,9 @@ void DrawSupportedPanel()
              clrSilver, InpFontSize, false);
    MakeLabel("timerVal", timerCapX + 7 * em, statusY, TimerHeaderText(),
              TimerHeaderColor(), InpFontSize, false);
-   g_pauseMinsShown = AutoPauseActive() ? PauseRemainingMinutes() : -1;
+   //  What the "Resume ..." line currently says, in minutes, so the 2-second
+   //  tick can redraw exactly when the displayed minute rolls over.
+   g_resumeMinsShown = ResumeMinutes();
 
    int choppyCapX = timerCapX + 26 * em;  // 7 + 18-char timer reserve + 1 space
    MakeLabel("choppyCap", choppyCapX, statusY, "| Choppy Trade: ",
@@ -4962,6 +5056,7 @@ void DrawNoticePanel(const string noticeTxt)
    DeleteObject("sep");
    DeleteObject("autoCap");
    DeleteObject("autoVal");
+   DeleteObject("resumeVal");
    DeleteObject("timerCap");
    DeleteObject("timerVal");
    DeleteObject("choppyCap");
