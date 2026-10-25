@@ -298,6 +298,8 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 //  that has not actually travelled votes 0 instead of +1/-1 on noise.
 #define STRUCT_PERIOD   20        // structure vote: net move over this many closed bars
 #define STRUCT_DEAD_ATR 0.25      // ...and it must beat this many ATR to vote at all
+#define ROC_DEAD_ATR    0.02      // Vote 2 (ROC) dead-band: must beat 0.02 x ATR to avoid sub-pip flickering
+#define VOL_RATIO_MIN   0.50      // minimum tick volume vs 20-bar avg to permit aggressive 3/3 market orders
 
 //  ---- THE TRADE PROFILE (baked in: this is the tested set) ----------
 //  These were inputs until they stopped earning a decision.  None of
@@ -760,12 +762,14 @@ void CheckNewBars()
 
 //+------------------------------------------------------------------+
 //  Time of the most recently CLOSED bar on a timeframe, or 0 if unknown.
+//  Uses shift 1 so it always retrieves the finished candle, never the
+//  currently forming live bar.
 //+------------------------------------------------------------------+
 datetime LastClosedBarTime(string sym, ENUM_TIMEFRAMES tf)
 {
    datetime times[];
-   if(CopyTime(sym, tf, 0, 2, times) == 2)
-      return(times[1]);
+   if(CopyTime(sym, tf, 1, 1, times) == 1)
+      return(times[0]);
    return(0);
 }
 
@@ -848,6 +852,49 @@ void HighPass3(const double &price[], int period, double &hp[])
 }
 
 //+------------------------------------------------------------------+
+//  Measure the dominant market cycle period from closed bars using a
+//  3-pole HighPass filter and zero-crossing wavelength analysis.
+//  Clamped to a realistic cycle band [14, 36], centered around 24.
+//+------------------------------------------------------------------+
+int AdaptiveCyclePeriod(const double &close[], int count, int lookback = 120)
+{
+   if(count < 40) return(TREND_L2);
+
+   double hp[];
+   HighPass3(close, 40, hp);
+
+   int start = MathMax(2, count - lookback);
+   int crossIdx[];
+   int numCross = 0;
+
+   for(int k = start + 1; k < count; k++)
+   {
+      if((hp[k - 1] <= 0.0 && hp[k] > 0.0) || (hp[k - 1] >= 0.0 && hp[k] < 0.0))
+      {
+         ArrayResize(crossIdx, numCross + 1);
+         crossIdx[numCross] = k;
+         numCross++;
+      }
+   }
+
+   if(numCross >= 3)
+   {
+      int diffs[];
+      int numDiffs = numCross - 1;
+      ArrayResize(diffs, numDiffs);
+      for(int j = 0; j < numDiffs; j++)
+         diffs[j] = crossIdx[j + 1] - crossIdx[j];
+
+      ArraySort(diffs);
+      int medianHalf = diffs[numDiffs / 2];
+      int cycle = (int)MathRound((double)medianHalf * 2.0);
+      return((int)MathMax(14, MathMin(36, cycle)));
+   }
+
+   return(TREND_L2);
+}
+
+//+------------------------------------------------------------------+
 void PrecisionTrend(const double &close[], int l1, int l2,
                     double &trend[], double &roc[])
 {
@@ -899,16 +946,64 @@ double EfficiencyRatio(const double &close[], int i, int n)
 //  its own measurement is what makes 2/3 (two of three agree) a real,
 //  recurring state - and 2/3 is the state that places the LIMIT order.
 //+------------------------------------------------------------------+
-int StructureVote(const double &close[], int i, int period, double atr)
+//+------------------------------------------------------------------+
+//  Structure Vote: Dow Theory Swing High/Low Structure + Net Move
+//  Inspects swing points across the period window.
+//  A Bullish vote (+1) requires positive displacement beating the deadband
+//  AND no Lower Low structure break.
+//  A Bearish vote (-1) requires negative displacement beating the deadband
+//  AND no Higher High structure break.
+//+------------------------------------------------------------------+
+int StructureVote(const double &close[], const double &high[], const double &low[], int i, int period, double atr)
 {
    if(period < 1 || i < period) return(0);
 
    double move = close[i] - close[i - period];
    double dead = (atr > 0.0) ? STRUCT_DEAD_ATR * atr : 0.0;
 
-   if(move >  dead) return(1);
-   if(move < -dead) return(-1);
+   if(MathAbs(move) <= dead) return(0);
+
+   int start = MathMax(1, i - period + 1);
+   double lastSwLow = 0.0, prevSwLow = 0.0;
+   double lastSwHigh = 0.0, prevSwHigh = 0.0;
+   int numSwLows = 0, numSwHighs = 0;
+
+   for(int k = start; k < i; k++)
+   {
+      if(high[k] >= high[k - 1] && high[k] >= high[k + 1])
+      {
+         prevSwHigh = lastSwHigh;
+         lastSwHigh = high[k];
+         numSwHighs++;
+      }
+      if(low[k] <= low[k - 1] && low[k] <= low[k + 1])
+      {
+         prevSwLow = lastSwLow;
+         lastSwLow = low[k];
+         numSwLows++;
+      }
+   }
+
+   if(move > dead)
+   {
+      if(numSwLows >= 2 && lastSwLow < prevSwLow)
+         return(0); // Lower low invalidates bullish structure
+      return(1);
+   }
+   else if(move < -dead)
+   {
+      if(numSwHighs >= 2 && lastSwHigh > prevSwHigh)
+         return(0); // Higher high invalidates bearish structure
+      return(-1);
+   }
+
    return(0);
+}
+
+// Backward-compatible overload
+int StructureVote(const double &close[], int i, int period, double atr)
+{
+   return(StructureVote(close, close, close, i, period, atr));
 }
 
 //==================================================================
@@ -991,6 +1086,36 @@ double HurstExponent(const double &close[], int i, int window)
    if(sxx <= 0.0) return(0.5);
 
    return(sxy / sxx);
+}
+
+//+------------------------------------------------------------------+
+//  Volume confirmation: check whether finished bar has healthy volume
+//  compared to its 20-period moving average. Returns true if volume
+//  is confirmed, or if tick volume is unsupported by the broker feed.
+//+------------------------------------------------------------------+
+bool IsVolumeConfirmed(ENUM_TIMEFRAMES tf, int period = 20)
+{
+   long vol[];
+   ArraySetAsSeries(vol, true);
+   if(CopyTickVolume(_Symbol, tf, 0, period + 2, vol) < period + 2)
+      return(true); // Insufficient data, do not block
+
+   long lastVol = vol[1]; // Most recently finished closed bar
+   long sumVol  = 0;
+   int  valid   = 0;
+   for(int k = 1; k <= period; k++)
+   {
+      if(vol[k] > 0)
+      {
+         sumVol += vol[k];
+         valid++;
+      }
+   }
+   if(valid < period / 2 || sumVol == 0)
+      return(true); // Broker does not supply tick volume (flat/zero)
+
+   double avgVol = (double)sumVol / (double)valid;
+   return((double)lastVol >= VOL_RATIO_MIN * avgVol);
 }
 
 //==================================================================
@@ -1079,23 +1204,33 @@ void EvaluateRow(int idx)
    g_rows[idx].rngBot      = 0.0;
    g_rows[idx].lastClose   = c[last];
 
+   // ---- adaptive dominant cycle periods ---------------------------
+   int dynL2 = AdaptiveCyclePeriod(c, n, 120);
+   int dynL1 = (int)MathRound((double)dynL2 * 6.25);
+   dynL1 = (int)MathMax(90, MathMin(225, dynL1));
+
+   g_rows[idx].l1 = dynL1;
+   g_rows[idx].l2 = dynL2;
+
    // ---- components 1 and 2 : trend and momentum -------------------
    double trend[], roc[];
-   PrecisionTrend(c, g_rows[idx].l1, g_rows[idx].l2, trend, roc);
+   PrecisionTrend(c, dynL1, dynL2, trend, roc);
+
+   double atrNow  = ATRClosed(g_rows[idx].tf, ATR_PERIOD);
+   double rocDead = (atrNow > 0.0) ? ROC_DEAD_ATR * atrNow : 0.0;
 
    int v1 = (trend[last] > 0.0) ? 1 : ((trend[last] < 0.0) ? -1 : 0);
-   int v2 = (roc[last]   > 0.0) ? 1 : ((roc[last]   < 0.0) ? -1 : 0);
+   int v2 = (roc[last] > rocDead) ? 1 : ((roc[last] < -rocDead) ? -1 : 0);
 
    // ---- component 3 : structure (the independent third vote) --------
    //  Three votes, three DIFFERENT measurements:
    //     1. direction : sign of the Precision Trend line
-   //     2. timing    : sign of that line's ROC
-   //     3. structure : sign of the net move over STRUCT_PERIOD bars
+   //     2. timing    : sign of that line's ROC (dead-banded by 0.02 ATR)
+   //     3. structure : Dow Theory swing structure + net move over 20 bars
    //  Because they are independent, 2/3 and 1/3 are real recurring states
    //  - and 2/3 is the state that places a LIMIT order.
-   double atrNow = ATRClosed(g_rows[idx].tf, ATR_PERIOD);
-   int    v3     = StructureVote(c, last, STRUCT_PERIOD, atrNow);
-   int    score  = v1 + v2 + v3;
+   int v3    = StructureVote(c, h, l, last, STRUCT_PERIOD, atrNow);
+   int score = v1 + v2 + v3;
 
    //  The regime is a LABEL and an ENTRY STYLE - never a permission.
    //     Steady (H > hTrend) : a limit entry waits half an ATR back
@@ -1429,9 +1564,10 @@ void UpdatePlanRow(int i)
    //  THE ORDER TYPE IS THE SCORE'S CALL, everywhere:
    //      3/3 -> MARKET (all three votes agree, take it now)
    //      2/3 -> LIMIT  (two agree, wait for a better price)
-   //  isRange only says WHERE that limit waits: on a Choppy row the box
-   //  band prices it, otherwise half an ATR back from the market.
-   bool   market     = (MathAbs(score) >= 3);
+   //  Volume Confirmation: if score is 3/3 but tick volume has dried up,
+   //  it safely places a Limit order to protect against illiquid slippage.
+   bool   volOK      = IsVolumeConfirmed(g_rows[i].tf, 20);
+   bool   market     = (MathAbs(score) >= 3 && volOK);
    bool   isRange    = (g_rows[i].mode == 2 && !market);
    bool   isOpenNow  = (g_auto[i].active && g_auto[i].isOpen && g_auto[i].dir == dir &&
                         g_auto[i].entryPrice > 0.0);
@@ -1719,6 +1855,62 @@ long MagicForTF(int i)
 }
 
 //+------------------------------------------------------------------+
+//  GlobalVariable persistence for slot state (range box, score, placed bar)
+//  so a terminal restart or EA recompile preserves range trades & rules.
+//+------------------------------------------------------------------+
+string AutoGVKey(int i, string field)
+{
+   return(StringFormat("SEA_%d_%s_%d_%s", (int)AccountInfoInteger(ACCOUNT_LOGIN), _Symbol, MagicForTF(i), field));
+}
+
+void SaveAutoSlotState(int i)
+{
+   if(g_auto[i].isRange)
+   {
+      GlobalVariableSet(AutoGVKey(i, "rng"), 1.0);
+      GlobalVariableSet(AutoGVKey(i, "top"), g_auto[i].rngTop);
+      GlobalVariableSet(AutoGVKey(i, "bot"), g_auto[i].rngBot);
+   }
+   else
+   {
+      GlobalVariableDel(AutoGVKey(i, "rng"));
+      GlobalVariableDel(AutoGVKey(i, "top"));
+      GlobalVariableDel(AutoGVKey(i, "bot"));
+   }
+   if(g_auto[i].entryScore != 0)
+      GlobalVariableSet(AutoGVKey(i, "score"), (double)g_auto[i].entryScore);
+   if(g_auto[i].placedBar > 0)
+      GlobalVariableSet(AutoGVKey(i, "placed"), (double)g_auto[i].placedBar);
+   GlobalVariablesFlush();
+}
+
+void ClearAutoSlotState(int i)
+{
+   GlobalVariableDel(AutoGVKey(i, "rng"));
+   GlobalVariableDel(AutoGVKey(i, "top"));
+   GlobalVariableDel(AutoGVKey(i, "bot"));
+   GlobalVariableDel(AutoGVKey(i, "score"));
+   GlobalVariableDel(AutoGVKey(i, "placed"));
+   GlobalVariablesFlush();
+}
+
+void RestoreAutoSlotState(int i)
+{
+   if(GlobalVariableCheck(AutoGVKey(i, "rng")))
+   {
+      g_auto[i].isRange = (GlobalVariableGet(AutoGVKey(i, "rng")) > 0.5);
+      if(GlobalVariableCheck(AutoGVKey(i, "top")))
+         g_auto[i].rngTop = GlobalVariableGet(AutoGVKey(i, "top"));
+      if(GlobalVariableCheck(AutoGVKey(i, "bot")))
+         g_auto[i].rngBot = GlobalVariableGet(AutoGVKey(i, "bot"));
+   }
+   if(GlobalVariableCheck(AutoGVKey(i, "score")))
+      g_auto[i].entryScore = (int)MathRound(GlobalVariableGet(AutoGVKey(i, "score")));
+   if(GlobalVariableCheck(AutoGVKey(i, "placed")))
+      g_auto[i].placedBar = (datetime)GlobalVariableGet(AutoGVKey(i, "placed"));
+}
+
+//+------------------------------------------------------------------+
 string AutoStatusTag(int i)
 {
    if(!g_auto[i].active) return("");
@@ -1775,6 +1967,7 @@ void ClearAutoCells(int i)
 //+------------------------------------------------------------------+
 void ResetAutoSlot(int i, bool keepSignalBar)
 {
+   ClearAutoSlotState(i);
    datetime sigBar = keepSignalBar ? g_auto[i].lastSignalBar : 0;
    g_auto[i].active        = false;
    g_auto[i].isOpen        = false;
@@ -2448,8 +2641,47 @@ void InitTrailState(int i)
    g_auto[i].trailLastTry    = 0;
 }
 
+#define BE_TRIGGER_RATIO 0.50     // break-even trigger: lock SL to entry once trade covers 50% to TP1
+
+//+------------------------------------------------------------------+
+//  Universal Break-Even (BE) Protection Gate.
+//  Operates whether Trailstop is ON or OFF.
+//  When favorable progress reaches at least 50% of the distance to TP1
+//  (BE_TRIGGER_RATIO = 0.50), locks SL to Break-Even (entry price + 1 point buffer)
+//  so an advancing trade can NEVER reverse into an open-ended loss.
+//+------------------------------------------------------------------+
+bool UpdateUniversalBreakEven(int i, double favPts, double bid, double ask, double point)
+{
+   if(g_auto[i].tp1Hit || g_auto[i].entryPrice <= 0.0 || point <= 0.0) return(false);
+   if(g_auto[i].tp1Pts <= 0) return(false);
+
+   if(favPts < BE_TRIGGER_RATIO * (double)g_auto[i].tp1Pts) return(false);
+
+   int dir = g_auto[i].dir;
+   double beSL = NormPrice(g_auto[i].entryPrice + (double)dir * point);
+   beSL = ClampSLToStopsLevel(dir, beSL, bid, ask, point);
+   if(beSL <= 0.0) return(false);
+
+   if(!IsSLTighter(dir, beSL, g_auto[i].slPrice, point))
+      return(false);
+
+   datetime now = TimeCurrent();
+   if(g_auto[i].trailLastTry > 0 && now - g_auto[i].trailLastTry < 3)
+      return(false);
+
+   g_auto[i].trailLastTry = now;
+   if(!TradeModifyPosition(g_auto[i].ticket, beSL, g_auto[i].tpPrice))
+      return(false);
+
+   g_auto[i].slPrice     = beSL;
+   g_auto[i].slPts       = (int)MathRound(MathAbs(g_auto[i].entryPrice - beSL) / point);
+   g_auto[i].trailActive = true;
+   return(true);
+}
+
 //+------------------------------------------------------------------+
 //  Tick-level pre-TP1 trailstop.  Returns true when the trail state
+
 //  changed (activation or a step applied), so the caller can flag a
 //  panel redraw.  Never moves an SL backwards, and places the first
 //  SL itself when the order was opened without one
@@ -2813,6 +3045,8 @@ void SyncAutoState()
          // Recover or transition state when a pending order just filled or EA restarted
          if(!wasOpen)
          {
+            if(!wasActive)
+               RestoreAutoSlotState(i);
             if(g_auto[i].initLot <= 0.0)
                g_auto[i].initLot = g_auto[i].curLot;
             if(g_auto[i].entryScore == 0)
@@ -2925,6 +3159,7 @@ void SyncAutoState()
 
          if(!wasActive)
          {
+            RestoreAutoSlotState(i);
             g_auto[i].initLot    = g_auto[i].curLot;
             g_auto[i].entryScore = (g_rows[i].direction == g_auto[i].dir && g_rows[i].score != 0)
                                    ? g_rows[i].score : (g_auto[i].dir * 2);
@@ -3013,6 +3248,7 @@ bool PlacePlanOrder(int i)
       g_auto[i].lastEvalBar   = g_rows[i].lastBar;
       g_auto[i].lastSignalBar = g_rows[i].lastBar;
       InitTrailState(i);          // market fill: freeze the trailstop % now
+      SaveAutoSlotState(i);
       return(true);
    }
    else
@@ -3061,6 +3297,7 @@ bool PlacePlanOrder(int i)
       g_auto[i].placedBar     = g_rows[i].lastBar;
       g_auto[i].lastEvalBar   = g_rows[i].lastBar;
       g_auto[i].lastSignalBar = g_rows[i].lastBar;
+      SaveAutoSlotState(i);
       return(true);
    }
 }
@@ -3104,6 +3341,7 @@ void ManageAutoBar()
             MathAbs(g_rows[i].score) > MathAbs(g_auto[i].entryScore))
          {
             g_auto[i].entryScore = g_rows[i].score;
+            SaveAutoSlotState(i);
          }
 
          // 0) BOX TRADE: a closed bar outside the trade's box kills it.
@@ -3129,6 +3367,34 @@ void ManageAutoBar()
                   PlacePlanOrder(i);
             }
             continue;
+         }
+
+         // Candle Wick Check: if finished closed bar reached TP1, confirm hit
+         if(!g_auto[i].tp1Hit && g_auto[i].tp1Pts > 0 && point > 0.0)
+         {
+            double ch[], cl[];
+            ArraySetAsSeries(ch, true);
+            ArraySetAsSeries(cl, true);
+            if(CopyHigh(_Symbol, g_rows[i].tf, 1, 1, ch) == 1 &&
+               CopyLow (_Symbol, g_rows[i].tf, 1, 1, cl) == 1)
+            {
+               double barFav = (dir > 0) ? (ch[0] - g_auto[i].entryPrice) / point
+                                         : (g_auto[i].entryPrice - cl[0]) / point;
+               if(barFav >= (double)g_auto[i].tp1Pts - 1e-6)
+               {
+                  g_auto[i].tp1Hit      = true;
+                  g_auto[i].trailActive = true;
+                  double beSL = ClampSLToStopsLevel(dir, g_auto[i].entryPrice, bid, ask, point);
+                  if(beSL > 0.0 && IsSLTighter(dir, beSL, g_auto[i].slPrice, point))
+                  {
+                     if(TradeModifyPosition(g_auto[i].ticket, beSL, g_auto[i].tpPrice))
+                     {
+                        g_auto[i].slPrice = beSL;
+                        g_auto[i].slPts   = (int)MathRound(MathAbs(g_auto[i].entryPrice - beSL) / point);
+                     }
+                  }
+               }
+            }
          }
 
          // 2) After TP1 is hit -> close if score weakened or direction dropped to HOLD.
@@ -3159,21 +3425,12 @@ void ManageAutoBar()
             continue;
          }
 
-         // 4) Closed bar in the SAME direction -> update TP1/TP2/TP3 and SL
+         // 4) Closed bar in the SAME direction -> SL may only TIGHTEN;
+         //    TP targets (TP1/TP2/TP3) are frozen at entry and do not walk with ATR.
          if(g_rows[i].ok && g_rows[i].direction == dir && g_plans[i].state == 2)
          {
-            int newTp3 = g_plans[i].tp3Pts;
-            int newTp1 = 1, newTp2 = 1;
-            ComputeTPLevels(newTp3, newTp1, newTp2);
-
-            if(!g_auto[i].tp1Hit) g_auto[i].tp1Pts = newTp1;
-            if(!g_auto[i].tp2Hit) g_auto[i].tp2Pts = newTp2;
-            g_auto[i].tp3Pts = newTp3;
-
-            double rawTpPrice = NormPrice(g_auto[i].entryPrice + (double)dir * (double)newTp3 * point);
-            double newTpPrice = ClampTPToStopsLevel(dir, rawTpPrice, bid, ask, point);
-            double candSL     = NormPrice(g_auto[i].entryPrice - (double)dir * (double)g_plans[i].slPts * point);
-            candSL            = ClampSLToStopsLevel(dir, candSL, bid, ask, point);
+            double candSL = NormPrice(g_auto[i].entryPrice - (double)dir * (double)g_plans[i].slPts * point);
+            candSL        = ClampSLToStopsLevel(dir, candSL, bid, ask, point);
 
             double useSL = g_auto[i].slPrice;
             if(!g_auto[i].tp1Hit && !g_auto[i].trailActive)
@@ -3193,13 +3450,39 @@ void ManageAutoBar()
                useSL = candSL;
             }
 
-            if(MathAbs(newTpPrice - g_auto[i].tpPrice) >= 0.5 * point ||
-               MathAbs(useSL      - g_auto[i].slPrice) >= 0.5 * point)
+            // ---- Post-TP1 Runner Trailing: Trail stop behind recent 2-bar swing extrema ----
+            if(InpUseTrailStop && g_auto[i].tp1Hit && point > 0.0)
             {
-               if(TradeModifyPosition(g_auto[i].ticket, useSL, newTpPrice))
+               double bh[2], bl[2];
+               ArraySetAsSeries(bh, true);
+               ArraySetAsSeries(bl, true);
+               if(CopyHigh(_Symbol, g_rows[i].tf, 1, 2, bh) == 2 &&
+                  CopyLow (_Symbol, g_rows[i].tf, 1, 2, bl) == 2)
+               {
+                  double atrVal = ATRClosed(g_rows[i].tf, ATR_PERIOD);
+                  double cushion = (atrVal > 0.0) ? 0.10 * atrVal : point;
+                  double runnerSL = 0.0;
+                  if(dir > 0)
+                  {
+                     double minL = MathMin(bl[0], bl[1]);
+                     runnerSL = NormPrice(minL - cushion);
+                  }
+                  else
+                  {
+                     double maxH = MathMax(bh[0], bh[1]);
+                     runnerSL = NormPrice(maxH + cushion);
+                  }
+                  runnerSL = ClampSLToStopsLevel(dir, runnerSL, bid, ask, point);
+                  if(runnerSL > 0.0 && IsSLTighter(dir, runnerSL, useSL, point))
+                     useSL = runnerSL;
+               }
+            }
+
+            if(MathAbs(useSL - g_auto[i].slPrice) >= 0.5 * point)
+            {
+               if(TradeModifyPosition(g_auto[i].ticket, useSL, g_auto[i].tpPrice))
                {
                   g_auto[i].slPrice       = useSL;
-                  g_auto[i].tpPrice       = newTpPrice;
                   g_auto[i].lastEvalBar   = g_rows[i].lastBar;
                   g_auto[i].slPts         = (useSL > 0.0)
                                             ? (int)MathRound(MathAbs(g_auto[i].entryPrice - useSL) / point)
@@ -3241,9 +3524,10 @@ void ManageAutoBar()
          //  cycle while the thesis was intact.
          int  vBars   = g_auto[i].isRange ? MathMax(1, RANGE_VALID_BARS)
                                           : VALID_BARS;
-         bool expired = (g_auto[i].placedBar > 0 && tfSec > 0 &&
-                         g_rows[i].lastBar > g_auto[i].placedBar &&
-                         ((int)((g_rows[i].lastBar - g_auto[i].placedBar) / tfSec) >= vBars));
+         datetime birthBar = (g_rows[i].sigBirth > 0) ? g_rows[i].sigBirth : g_auto[i].placedBar;
+         bool expired = (birthBar > 0 && tfSec > 0 &&
+                         g_rows[i].lastBar > birthBar &&
+                         ((int)((g_rows[i].lastBar - birthBar) / tfSec) >= vBars));
 
          // 0) BOX TRADE: a closed bar outside the trade's box cancels the pending
          if(g_auto[i].isRange && g_rows[i].ok &&
@@ -3383,6 +3667,12 @@ void ManageAutoTick()
             }
          }
 
+         // ---- Universal Break-Even Protection Gate:
+         //      Locks SL to break-even once trade covers 50% of distance to TP1.
+         //      Protects trade from loss even if Trailstop is OFF.
+         if(UpdateUniversalBreakEven(i, favPts, bid, ask, point))
+            stateChanged = true;
+
          // ---- Pre-TP1 stepped trailstop: ratchet the SL in 5% steps
          //      on the way to TP1.  Runs before the TP1 check so a tick
          //      that lands on TP1 first lands the final trailed SL;
@@ -3392,8 +3682,11 @@ void ManageAutoTick()
 
          // ---- TP1 hit: move SL to Break-Even (only if tighter than
          //      the trailed SL) and partial-close 70% if lot > minLot -
+         double grossPts = (dir > 0) ? (ask - g_auto[i].entryPrice) / point
+                                     : (g_auto[i].entryPrice - bid) / point;
          if(!g_auto[i].tp1Hit && g_auto[i].tp1Pts > 0 &&
-            favPts >= (double)g_auto[i].tp1Pts - 1e-6)
+            (favPts >= (double)g_auto[i].tp1Pts - 1e-6 ||
+             (grossPts >= (double)g_auto[i].tp1Pts - 1e-6 && favPts > 0.0)))
          {
             g_auto[i].tp1Hit      = true;
             g_auto[i].trailActive = true;
