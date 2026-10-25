@@ -99,14 +99,18 @@ Each of the three timeframes (**M5 Scalp**, **M15 Short-term**, **M30 Intraday**
 
 ## 2. Signal Engine & 3-Vote Scoring Architecture
 
-SimpleEA rejects classic lagging filters (e.g., standard moving averages, RSI, MACD). Instead, it isolates actionable cycle frequencies using modern bandpass and long-memory techniques.
+SimpleEA rejects classic lagging filters (e.g., standard moving averages, RSI, MACD). Instead, it isolates actionable cycle frequencies using modern bandpass, self-adapting wavelength analysis, and institutional market structure.
 
-### Component 1 — Direction (Vote 1): Ehlers Precision Trend
-*Transcribed directly from John F. Ehlers (Technical Analysis of Stocks & Commodities, September 2024).*
+### Component 1 — Direction (Vote 1): Ehlers Precision Trend with Adaptive Cycle Periods
+*Transcribed directly from John F. Ehlers (Technical Analysis of Stocks & Commodities, September 2024), enhanced with self-adaptive cycle wavelength detection.*
 
-Unlike laggy low-pass moving averages, Precision Trend subtracts two 3-pole high-pass filters (`L1 = 150`, `L2 = 24`), creating a zero-lag bandpass filter tuned to the tradable frequency band:
+Unlike laggy low-pass moving averages, Precision Trend subtracts two 3-pole high-pass filters (`L1`, `L2`), creating a zero-lag bandpass filter tuned to the tradable frequency band:
 
-$$\text{Trend} = \text{HighPass3}(\text{Price}, 150) - \text{HighPass3}(\text{Price}, 24)$$
+$$\text{Trend} = \text{HighPass3}(\text{Price}, L_1) - \text{HighPass3}(\text{Price}, L_2)$$
+
+- **Self-Adaptive Cycle Detection**: The engine automatically measures the live dominant cycle period ($T$) across the last 120 closed bars via zero-crossing wavelength analysis, clamped to $[14, 36]$ bars (baseline $24$). It automatically tunes:
+  $$L_2 = T, \quad L_1 = \operatorname{round}(T \times 6.25) \in [90, 225]$$
+  This allows the filter to turn faster during fast London/NY momentum breakouts and smooth out false turns during quiet consolidation.
 
 High-pass filter formula for period $P$:
 $$f = \frac{1.414 \times \pi}{P}, \quad a_1 = e^{-f}, \quad c_2 = 2 a_1 \cos(f), \quad c_3 = -a_1^2, \quad c_1 = \frac{1 + c_2 - c_3}{4}$$
@@ -114,23 +118,36 @@ $$\text{HP}[i] = c_1 (P_i - 2P_{i-1} + P_{i-2}) + c_2 \text{HP}[i-1] + c_3 \text
 
 $$\mathbf{Vote\ 1} = \operatorname{sign}(\text{Trend}) \in \{+1, -1, 0\}$$
 
-### Component 2 — Timing (Vote 2): Rate of Change (ROC)
+### Component 2 — Timing (Vote 2): Rate of Change (ROC) with Noise Dead-Band
 The rate of change of the Precision Trend line is zero at its exact turning peaks and troughs. Its sign indicates the acceleration/onset of a momentum push:
 $$\text{ROC}[i] = \frac{L_2}{2\pi} (\text{Trend}[i] - \text{Trend}[i-1])$$
 
-$$\mathbf{Vote\ 2} = \operatorname{sign}(\text{ROC}) \in \{+1, -1, 0\}$$
+- **Adaptive Noise Dead-Band (`ROC_DEAD_ATR = 0.02`)**: To eliminate single-candle sub-pip micro-flickering, Vote 2 requires ROC momentum to exceed a volatility threshold of $0.02 \times \text{ATR}_{14}$ before awarding a vote:
 
-### Component 3 — Structure (Vote 3): 20-Bar Net Displacement
-To ensure that a score of $\pm 2$ is an independent, recurring reality (and not a mathematical duplicate of Vote 1), Vote 3 measures the net price move over the last 20 closed bars (`STRUCT_PERIOD = 20`) relative to a volatility threshold:
+$$\mathbf{Vote\ 2} = \begin{cases} +1 & \text{if } \text{ROC}[last] > +0.02 \times \text{ATR} \\ -1 & \text{if } \text{ROC}[last] < -0.02 \times \text{ATR} \\ 0 & \text{otherwise (neutral/noise)} \end{cases}$$
+
+### Component 3 — Structure (Vote 3): Dow Theory Swing Structure & Displacement
+Vote 3 ensures that a score of $\pm 2$ is an independent structural measurement, combining 20-bar net displacement with Dow Theory swing high/low validation:
 $$\text{Move} = \text{Close}[i] - \text{Close}[i - 20]$$
 $$\text{DeadBand} = 0.25 \times \text{ATR}_{14}$$
 
-$$\mathbf{Vote\ 3} = \begin{cases} +1 & \text{if } \text{Move} > +\text{DeadBand} \\ -1 & \text{if } \text{Move} < -\text{DeadBand} \\ 0 & \text{otherwise} \end{cases}$$
+- **Swing Structure Validation**:
+  - Across the 20-bar window, local swing highs and swing lows are tracked.
+  - **Bullish (+1)**: Requires $\text{Move} > +\text{DeadBand}$ AND confirms no Lower Low structure break has occurred.
+  - **Bearish (-1)**: Requires $\text{Move} < -\text{DeadBand}$ AND confirms no Higher High structure break has occurred.
+  - If market structure has broken in the opposing direction despite the net displacement, Vote 3 votes 0.
+
+$$\mathbf{Vote\ 3} = \begin{cases} +1 & \text{if Bullish Move \& Valid Structure} \\ -1 & \text{if Bearish Move \& Valid Structure} \\ 0 & \text{otherwise} \end{cases}$$
 
 ### Market Filter Gate: Kaufman Efficiency Ratio (ER)
 Measures net directional progress divided by total market travel:
 $$\text{ER} = \frac{|\text{Close}[i] - \text{Close}[i-20]|}{\sum_{k=0}^{19} |\text{Close}[i-k] - \text{Close}[i-k-1]|}$$
 - If $\text{ER} < 0.10$ (`ER_DEAD`): Market is flat noise. Trade is blocked with the reason: `quiet — nothing worth trading`.
+
+### Tick Volume Confirmation Gate (`VOL_RATIO_MIN = 0.50`)
+- Compares the finished bar's tick volume against its 20-bar moving average.
+- If market volume has dried up ($< 50\%$ of average), an aggressive `3/3` Market Order is automatically stepped down to a **Pending Limit Order**, protecting against illiquid rollover spread spikes.
+- Gracefully permits trading if the broker feed does not provide tick volume.
 
 ### Regime Classification: Rolling Hurst Exponent (H)
 Calculated via variance-scaling over a 256-bar window:

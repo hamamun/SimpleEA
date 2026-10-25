@@ -298,6 +298,8 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 //  that has not actually travelled votes 0 instead of +1/-1 on noise.
 #define STRUCT_PERIOD   20        // structure vote: net move over this many closed bars
 #define STRUCT_DEAD_ATR 0.25      // ...and it must beat this many ATR to vote at all
+#define ROC_DEAD_ATR    0.02      // Vote 2 (ROC) dead-band: must beat 0.02 x ATR to avoid sub-pip flickering
+#define VOL_RATIO_MIN   0.50      // minimum tick volume vs 20-bar avg to permit aggressive 3/3 market orders
 
 //  ---- THE TRADE PROFILE (baked in: this is the tested set) ----------
 //  These were inputs until they stopped earning a decision.  None of
@@ -850,6 +852,49 @@ void HighPass3(const double &price[], int period, double &hp[])
 }
 
 //+------------------------------------------------------------------+
+//  Measure the dominant market cycle period from closed bars using a
+//  3-pole HighPass filter and zero-crossing wavelength analysis.
+//  Clamped to a realistic cycle band [14, 36], centered around 24.
+//+------------------------------------------------------------------+
+int AdaptiveCyclePeriod(const double &close[], int count, int lookback = 120)
+{
+   if(count < 40) return(TREND_L2);
+
+   double hp[];
+   HighPass3(close, 40, hp);
+
+   int start = MathMax(2, count - lookback);
+   int crossIdx[];
+   int numCross = 0;
+
+   for(int k = start + 1; k < count; k++)
+   {
+      if((hp[k - 1] <= 0.0 && hp[k] > 0.0) || (hp[k - 1] >= 0.0 && hp[k] < 0.0))
+      {
+         ArrayResize(crossIdx, numCross + 1);
+         crossIdx[numCross] = k;
+         numCross++;
+      }
+   }
+
+   if(numCross >= 3)
+   {
+      int diffs[];
+      int numDiffs = numCross - 1;
+      ArrayResize(diffs, numDiffs);
+      for(int j = 0; j < numDiffs; j++)
+         diffs[j] = crossIdx[j + 1] - crossIdx[j];
+
+      ArraySort(diffs);
+      int medianHalf = diffs[numDiffs / 2];
+      int cycle = (int)MathRound((double)medianHalf * 2.0);
+      return((int)MathMax(14, MathMin(36, cycle)));
+   }
+
+   return(TREND_L2);
+}
+
+//+------------------------------------------------------------------+
 void PrecisionTrend(const double &close[], int l1, int l2,
                     double &trend[], double &roc[])
 {
@@ -901,16 +946,64 @@ double EfficiencyRatio(const double &close[], int i, int n)
 //  its own measurement is what makes 2/3 (two of three agree) a real,
 //  recurring state - and 2/3 is the state that places the LIMIT order.
 //+------------------------------------------------------------------+
-int StructureVote(const double &close[], int i, int period, double atr)
+//+------------------------------------------------------------------+
+//  Structure Vote: Dow Theory Swing High/Low Structure + Net Move
+//  Inspects swing points across the period window.
+//  A Bullish vote (+1) requires positive displacement beating the deadband
+//  AND no Lower Low structure break.
+//  A Bearish vote (-1) requires negative displacement beating the deadband
+//  AND no Higher High structure break.
+//+------------------------------------------------------------------+
+int StructureVote(const double &close[], const double &high[], const double &low[], int i, int period, double atr)
 {
    if(period < 1 || i < period) return(0);
 
    double move = close[i] - close[i - period];
    double dead = (atr > 0.0) ? STRUCT_DEAD_ATR * atr : 0.0;
 
-   if(move >  dead) return(1);
-   if(move < -dead) return(-1);
+   if(MathAbs(move) <= dead) return(0);
+
+   int start = MathMax(1, i - period + 1);
+   double lastSwLow = 0.0, prevSwLow = 0.0;
+   double lastSwHigh = 0.0, prevSwHigh = 0.0;
+   int numSwLows = 0, numSwHighs = 0;
+
+   for(int k = start; k < i; k++)
+   {
+      if(high[k] >= high[k - 1] && high[k] >= high[k + 1])
+      {
+         prevSwHigh = lastSwHigh;
+         lastSwHigh = high[k];
+         numSwHighs++;
+      }
+      if(low[k] <= low[k - 1] && low[k] <= low[k + 1])
+      {
+         prevSwLow = lastSwLow;
+         lastSwLow = low[k];
+         numSwLows++;
+      }
+   }
+
+   if(move > dead)
+   {
+      if(numSwLows >= 2 && lastSwLow < prevSwLow)
+         return(0); // Lower low invalidates bullish structure
+      return(1);
+   }
+   else if(move < -dead)
+   {
+      if(numSwHighs >= 2 && lastSwHigh > prevSwHigh)
+         return(0); // Higher high invalidates bearish structure
+      return(-1);
+   }
+
    return(0);
+}
+
+// Backward-compatible overload
+int StructureVote(const double &close[], int i, int period, double atr)
+{
+   return(StructureVote(close, close, close, i, period, atr));
 }
 
 //==================================================================
@@ -993,6 +1086,36 @@ double HurstExponent(const double &close[], int i, int window)
    if(sxx <= 0.0) return(0.5);
 
    return(sxy / sxx);
+}
+
+//+------------------------------------------------------------------+
+//  Volume confirmation: check whether finished bar has healthy volume
+//  compared to its 20-period moving average. Returns true if volume
+//  is confirmed, or if tick volume is unsupported by the broker feed.
+//+------------------------------------------------------------------+
+bool IsVolumeConfirmed(ENUM_TIMEFRAMES tf, int period = 20)
+{
+   long vol[];
+   ArraySetAsSeries(vol, true);
+   if(CopyTickVolume(_Symbol, tf, 0, period + 2, vol) < period + 2)
+      return(true); // Insufficient data, do not block
+
+   long lastVol = vol[1]; // Most recently finished closed bar
+   long sumVol  = 0;
+   int  valid   = 0;
+   for(int k = 1; k <= period; k++)
+   {
+      if(vol[k] > 0)
+      {
+         sumVol += vol[k];
+         valid++;
+      }
+   }
+   if(valid < period / 2 || sumVol == 0)
+      return(true); // Broker does not supply tick volume (flat/zero)
+
+   double avgVol = (double)sumVol / (double)valid;
+   return((double)lastVol >= VOL_RATIO_MIN * avgVol);
 }
 
 //==================================================================
@@ -1081,23 +1204,33 @@ void EvaluateRow(int idx)
    g_rows[idx].rngBot      = 0.0;
    g_rows[idx].lastClose   = c[last];
 
+   // ---- adaptive dominant cycle periods ---------------------------
+   int dynL2 = AdaptiveCyclePeriod(c, n, 120);
+   int dynL1 = (int)MathRound((double)dynL2 * 6.25);
+   dynL1 = (int)MathMax(90, MathMin(225, dynL1));
+
+   g_rows[idx].l1 = dynL1;
+   g_rows[idx].l2 = dynL2;
+
    // ---- components 1 and 2 : trend and momentum -------------------
    double trend[], roc[];
-   PrecisionTrend(c, g_rows[idx].l1, g_rows[idx].l2, trend, roc);
+   PrecisionTrend(c, dynL1, dynL2, trend, roc);
+
+   double atrNow  = ATRClosed(g_rows[idx].tf, ATR_PERIOD);
+   double rocDead = (atrNow > 0.0) ? ROC_DEAD_ATR * atrNow : 0.0;
 
    int v1 = (trend[last] > 0.0) ? 1 : ((trend[last] < 0.0) ? -1 : 0);
-   int v2 = (roc[last]   > 0.0) ? 1 : ((roc[last]   < 0.0) ? -1 : 0);
+   int v2 = (roc[last] > rocDead) ? 1 : ((roc[last] < -rocDead) ? -1 : 0);
 
    // ---- component 3 : structure (the independent third vote) --------
    //  Three votes, three DIFFERENT measurements:
    //     1. direction : sign of the Precision Trend line
-   //     2. timing    : sign of that line's ROC
-   //     3. structure : sign of the net move over STRUCT_PERIOD bars
+   //     2. timing    : sign of that line's ROC (dead-banded by 0.02 ATR)
+   //     3. structure : Dow Theory swing structure + net move over 20 bars
    //  Because they are independent, 2/3 and 1/3 are real recurring states
    //  - and 2/3 is the state that places a LIMIT order.
-   double atrNow = ATRClosed(g_rows[idx].tf, ATR_PERIOD);
-   int    v3     = StructureVote(c, last, STRUCT_PERIOD, atrNow);
-   int    score  = v1 + v2 + v3;
+   int v3    = StructureVote(c, h, l, last, STRUCT_PERIOD, atrNow);
+   int score = v1 + v2 + v3;
 
    //  The regime is a LABEL and an ENTRY STYLE - never a permission.
    //     Steady (H > hTrend) : a limit entry waits half an ATR back
@@ -1431,9 +1564,10 @@ void UpdatePlanRow(int i)
    //  THE ORDER TYPE IS THE SCORE'S CALL, everywhere:
    //      3/3 -> MARKET (all three votes agree, take it now)
    //      2/3 -> LIMIT  (two agree, wait for a better price)
-   //  isRange only says WHERE that limit waits: on a Choppy row the box
-   //  band prices it, otherwise half an ATR back from the market.
-   bool   market     = (MathAbs(score) >= 3);
+   //  Volume Confirmation: if score is 3/3 but tick volume has dried up,
+   //  it safely places a Limit order to protect against illiquid slippage.
+   bool   volOK      = IsVolumeConfirmed(g_rows[i].tf, 20);
+   bool   market     = (MathAbs(score) >= 3 && volOK);
    bool   isRange    = (g_rows[i].mode == 2 && !market);
    bool   isOpenNow  = (g_auto[i].active && g_auto[i].isOpen && g_auto[i].dir == dir &&
                         g_auto[i].entryPrice > 0.0);
