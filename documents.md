@@ -93,7 +93,7 @@ Each of the three timeframes (**M5 Scalp**, **M15 Short-term**, **M30 Intraday**
    - TP1 Hit: 70% partial close, SL -> Break-Even, Score Watcher armed
    - TP2 Hit: Close down to broker minLot, SL locked to TP1
    - TP3 Hit: Full exit
-   - Reversal / Box-kill: Immediate protection exit
+   - Reversal / Box-kill: protection exit — closes immediately only while in profit (default); `InpImmediateFlipClose = true` restores the immediate exit whatever the P&L
 ```
 
 The panel's top band is two lines: the master status, then the modes behind it.
@@ -295,9 +295,9 @@ Each active position is managed candle-by-candle and tick-by-tick through a stru
 - Closes remaining position volume in full.
 
 ### 5. Invalidation & Protective Exits
-- **Opposite Signal Reversal**: If a qualified signal fires in the opposite direction, the position closes immediately, permitting a clean reversal.
+- **Opposite Signal Reversal**: If a qualified signal fires in the opposite direction, the position closes **only while it is in profit** by default; if the trade is under water it is held and the flip is re-checked on every later closed bar, so a reversal never banks a loss (and no reverse order is placed while the old trade is kept). Set `InpImmediateFlipClose = true` to restore the old immediate-close behaviour at any P&L.
 - **HOLD-in-Profit**: If a timeframe drops to HOLD before TP1 while the trade is in net profit, it closes immediately to bank gains.
-- **Box-Kill (Range Fades)**: If a bar closes outside the 20-bar box, the trade is invalidated and immediately closed (or pending limit deleted).
+- **Box-Kill (Range Fades)**: If a bar closes outside the 20-bar box, the trade is invalidated and closed **only while it is in profit** by default; under water the position is held (with normal SL/TP management continuing) and re-tested each closed bar until it returns to profit. `InpImmediateFlipClose = true` closes immediately regardless of P&L. Waiting pending limits carry no P&L, so they are still deleted on a box-break.
 - **Pending Order Leash Expiry**: Waiting limit orders expire and cancel after 3 closed bars (trend) or 8 closed bars (range fade) from signal birth (`sigBirth`), matching the on-screen `Valid: left/total bars` countdown.
 - **Manual Closes**: SimpleEA executes automatically on closed bars. If a trader manually closes a trade in MT5, the EA does not treat this as a permanent block. If the signal remains qualified on the next bar close, the EA will enter again. (To stop trading, use `InpAutoOffHours` or set `InpAutoTrading = false`).
 - **Restart Resilience**: Active range states (`isRange`, `rngTop`, `rngBot`, `entryScore`, `placedBar`) are persisted in terminal GlobalVariables so that terminal restarts or recompiles never strip a range trade of its box-kill rules.
@@ -314,6 +314,7 @@ Each active position is managed candle-by-candle and tick-by-tick through a stru
 | | `InpAutoEndTime` | `"17:00"` | Daily trading stop time (`HH:MM`, PC local). At the stop minute, waiting pendings are cancelled and no new orders are placed; open trades keep being managed (see §8). |
 | | `InpAutoOffHours` | `0` | One-shot pause in hours from when applied (`48` = 2-day pause; `0` = off/re-arm). Persisted across restarts; same rules as the daily window (see §8). |
 | | `InpRequireM15M30SameTrend` | `false` | Timeframe alignment: `false` = untied; `true` = both M15 and M30 must have matching trade directions (`BUY` or `SELL`) to place. |
+| | `InpImmediateFlipClose` | `false` | Direction-flip / range box-kill exit mode: `false` = close on the flip only while the open trade is in profit (wait for profit when under water); `true` = close immediately whatever the P&L, as before. |
 | | `InpUseStopLoss` | `false` | Initial Stop Loss switch: `false` = deliberate breathing room (`SL = 0.0`), first SL placed by trailstop; `true` = initial hard ATR stop attached at fill. |
 | | `InpUseTrailStop` | `true` | Pre-TP1 stepped trailstop enabled. |
 | | `InpTrailPctTight` | `40` | Trailstop activation % for Mixed and Choppy regimes (10–70%). |
