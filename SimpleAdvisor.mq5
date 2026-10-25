@@ -141,7 +141,10 @@
 //|                   and locks SL to TP1; continues watching score.  |
 //|        TP3 hit -> closes order in full.                           |
 //|        Before TP1 -> if timeframe drops to HOLD while in profit,  |
-//|                   closes immediately; if opposite signal, closes. |
+//|                   closes immediately; an opposite signal or a     |
+//|                   range box-break closes only while in profit     |
+//|                   unless InpImmediateFlipClose = true (default    |
+//|                   false: wait for profit, never bank the loss).   |
 //|        New candle (same direction) -> updates TP1/TP2/TP3 and     |
 //|                   tightens SL (never widens past initial risk).   |
 //|   - Pending order management:                                     |
@@ -169,7 +172,7 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "2.19"
+#property version   "2.20"
 #property description "Multi-timeframe BUY/SELL/HOLD direction panel, trade plan and full-auto executor. M5 / M15 / M30 charts only."
 
 #ifndef M_PI
@@ -195,6 +198,7 @@ input string              InpAutoStartTime   = "08:00";      // Autotrading star
 input string              InpAutoEndTime     = "17:00";      // Autotrading stop time (PC local HH:MM)
 input int                 InpAutoOffHours    = 0;            // One-shot pause hours from when set (0=off, 48=2 days)
 input bool                InpRequireM15M30SameTrend = false; // M15/M30 same trend required to place (false = untied)
+input bool                InpImmediateFlipClose = false;     // Immediate close on direction/range flip (false = wait until the trade is in profit)
 input bool                InpUseStopLoss  = false;           // Stoploss (true = place initial SL, false = only when trailstop / TP1 places it)
 input bool                InpUseTrailStop = true;            // Pre-TP1 stepped trailstop (true = on, Entry->TP1 only)
 input int                 InpTrailPctTight  = 40;            // Trailstop % when regime is NOT Steady (10-70)
@@ -2577,6 +2581,26 @@ bool IsScoreStrongForTrade(int i)
 }
 
 //+------------------------------------------------------------------+
+//  May a direction flip or a range box-break close this open trade
+//  right now?
+//     InpImmediateFlipClose = true  -> original behaviour: close on the
+//                                        flip whatever the P&L is.
+//     InpImmediateFlipClose = false -> the flip is held back while the
+//                                        trade is under water.  The same
+//                                        flip is re-checked on every later
+//                                        closed bar, so it exits once the
+//                                        trade is back in profit instead
+//                                        of crystallising a loss.
+//  "In profit" uses the same test as the HOLD-in-profit rule: either the
+//  broker floating P&L or the raw price progress is strictly positive.
+//+------------------------------------------------------------------+
+bool FlipCloseAllowed(int i, double favPts)
+{
+   if(InpImmediateFlipClose) return(true);
+   return(g_auto[i].profitUSD > 0.0 || favPts > 0.0);
+}
+
+//+------------------------------------------------------------------+
 //  Ensure a candidate SL price respects the broker's minimum stop
 //  distance from the current exit price (Bid for BUY, Ask for SELL).
 //+------------------------------------------------------------------+
@@ -3410,25 +3434,39 @@ void ManageAutoBar()
 
          // 0) BOX TRADE: a closed bar outside the trade's box kills it.
          //    The box captured at placement is the thesis; the market just broke it.
+         //    With InpImmediateFlipClose=false (default) a box-break is not allowed
+         //    to bank a loss: while the trade is under water it is held and the same
+         //    break is re-tested on every later closed bar until it is in profit.
+         //    The remaining management rules below keep running meanwhile.
          if(g_auto[i].isRange && g_rows[i].ok &&
             (g_rows[i].lastClose > g_auto[i].rngTop || g_rows[i].lastClose < g_auto[i].rngBot))
          {
-            if(TradeClosePosition(g_auto[i].ticket, dir, g_auto[i].curLot, MagicForTF(i)))
+            if(FlipCloseAllowed(i, favPts))
             {
-               g_auto[i].lastSignalBar = g_rows[i].lastBar;
-               ResetAutoSlot(i, true);
+               if(TradeClosePosition(g_auto[i].ticket, dir, g_auto[i].curLot, MagicForTF(i)))
+               {
+                  g_auto[i].lastSignalBar = g_rows[i].lastBar;
+                  ResetAutoSlot(i, true);
+               }
+               continue;
             }
-            continue;
          }
 
-         // 1) Opposite direction signal -> close immediately (and allow reversing into the new signal)
+         // 1) Opposite direction signal -> close (and allow reversing into the new signal).
+         //    With InpImmediateFlipClose=false (default) the flip only closes while the
+         //    trade is in profit; under water it is held and re-checked on every later
+         //    closed bar, so a reversal never crystallises a loss.  No reverse order is
+         //    placed while the old trade is kept.
          if(g_rows[i].ok && g_rows[i].direction != 0 && g_rows[i].direction != dir)
          {
-            if(TradeClosePosition(g_auto[i].ticket, dir, g_auto[i].curLot, MagicForTF(i)))
+            if(FlipCloseAllowed(i, favPts))
             {
-               ResetAutoSlot(i, false);
-               if(g_plans[i].state == 2 && TrendMatchForTF(i))
-                  PlacePlanOrder(i);
+               if(TradeClosePosition(g_auto[i].ticket, dir, g_auto[i].curLot, MagicForTF(i)))
+               {
+                  ResetAutoSlot(i, false);
+                  if(g_plans[i].state == 2 && TrendMatchForTF(i))
+                     PlacePlanOrder(i);
+               }
             }
             continue;
          }
