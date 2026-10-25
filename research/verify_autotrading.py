@@ -23,8 +23,10 @@ line and verifies every rule:
           (InpRequireM15M30SameTrend=false); with that input true, M15
           and M30 require matching trend direction between them
   Rule 10 2nd Panel header: "Autotrading | Trailstop : Off/On/Active | Stoploss : On/Off | SYMBOL"
-          Main Panel header: "SimpleEA | Autotrading : On/Off/Paused | SYMBOL | TF",
-          then "Timer: ... | Choppy Trade: On/Off | M15/M30 Same Trend: On/Off" + full-width sep
+          Main Panel header line 1: "SimpleEA | Autotrading : Off/On/Timer Pause"
+          with "Resume ..." beside the status while the timer blocks placement,
+          then SYMBOL | TF; line 2: "Timer: ... | Choppy Trade: On/Off |
+          M15/M30 Same Trend: On/Off" + full-width sep
   Rule 11 2nd Panel placement input InpAutoPanelPos (AUTO_POS_RIGHT default, or
           AUTO_POS_BOTTOM below Main Panel); opens when orders exist and closes
           completely (0 objects) when no trade/order is open
@@ -56,6 +58,11 @@ line and verifies every rule:
           placed and waiting pendings are cancelled, while open
           trades keep being managed.  The pause deadline persists
           across restarts and a completed request does not restart.
+          The header states the EFFECTIVE state ("Off" only when the
+          master switch is off, "Timer Pause" while the timer blocks,
+          "On" when nothing does) plus a "Resume 2h14m" countdown to
+          the moment placement is allowed again - the input itself is
+          never rewritten (MQL5 inputs are read-only).
 
   Part 2 (the regime now DECIDES instead of abstaining):
           Steady rows trade the trend game exactly as above; Choppy rows
@@ -96,6 +103,7 @@ AUTO_LBL_B = 11
 AUTO_LBL_C = 5
 
 EM = char_w(FONT, DPI)
+STATUS_LINE_C = 71          # SimpleAdvisor.mq5 #define: header line 2 width reserve
 TAGS = ("M5", "M15", "M30")
 STYLES = {"M5": "Scalp", "M15": "Short-term", "M30": "Intraday"}
 TF_SEC = {"M5": 300, "M15": 900, "M30": 1800}
@@ -115,6 +123,29 @@ def parse_clock_minutes(value):
     if hour < 0 or hour > 23 or minute < 0 or minute > 59:
         raise ValueError(value)
     return hour * 60 + minute
+
+
+def header_line1_geometry(word, resume, font=FONT, dpi=DPI, symbol="XAUUSD.s", tf="M15"):
+    """DrawSupportedPanel()'s line-1 geometry, mirrored exactly.
+
+    Returns (panel_w, rightmost_pixel_of_line_1, left_pixel_of_symbol) so the
+    "Timer Pause" word and the "Resume ..." countdown can be proved to fit -
+    with a 2-em gap - at every font size and DPI, without the panel needing
+    to be measured by eye.
+    """
+    em = char_w(font, dpi)
+    title_w = 8 * char_w(font + 1, dpi)
+    sym = "|  %s  |  %s" % (symbol, tf)
+    auto_slot = max(6, len(word))
+    resume_slot = 0 if not resume else len(resume) + 2
+    title_head_w = 10 + title_w + em + (16 + auto_slot + resume_slot + 2 + len(sym)) * em + 10
+    status_head_w = 10 + STATUS_LINE_C * em + 10
+    panel_w = max(title_head_w, status_head_w, PLAN_W_MIN)
+    right = 10 + title_w + em + 16 * em + auto_slot * em
+    if resume:
+        right += 2 * em + len(resume) * em
+    sym_left = panel_w - 10 - len(sym) * em
+    return panel_w, right, sym_left, em
 
 
 def compute_tp_levels(tp3):
@@ -438,9 +469,10 @@ class AutoTraderSim:
             self.manage_auto_bar()
 
     def auto_trading_header_text(self):
+        """AutoTradingHeaderText() - the EFFECTIVE state, never the input."""
         if not self.auto_trading:
             return "Off"
-        return "On" if self.auto_timer_allows_placement() else "Paused"
+        return "On" if self.auto_timer_allows_placement() else "Timer Pause"
 
     def pause_remaining_minutes(self):
         """PauseRemainingMinutes() in SimpleAdvisor.mq5."""
@@ -448,13 +480,48 @@ class AutoTraderSim:
             return 0
         return (self.pause_until_gmt - self.gmt_now + 59) // 60
 
+    def minutes_until_schedule_open(self):
+        """MinutesUntilScheduleOpen() in SimpleAdvisor.mq5: 0 = open now."""
+        if not self.use_auto_schedule or self.sched_start_min < 0:
+            return 0
+        if self.in_auto_schedule_window():
+            return 0
+        now = self.local_minute_of_day
+        delta = (self.sched_start_min - now + 1440) % 1440
+        return delta if delta > 0 else 1440
+
+    def resume_minutes(self):
+        """ResumeMinutes(): the LATER of the window reopening and the pause."""
+        if not self.auto_trading:
+            return 0
+        sched = self.minutes_until_schedule_open()
+        pause = self.pause_remaining_minutes()
+        if sched <= 0 and pause <= 0:
+            return 0
+        return max(sched, pause)
+
+    def resume_header_text(self):
+        """ResumeHeaderText(): the countdown beside the header status."""
+        mins = self.resume_minutes()
+        if mins <= 0:
+            return ""
+        if mins >= 1440:
+            return "Resume %dd %dh" % (mins // 1440, (mins % 1440) // 60)
+        if mins >= 60:
+            return "Resume %dh%02dm" % (mins // 60, mins % 60)
+        return "Resume %dm" % mins
+
+    def header_line1_slots(self):
+        """The two character slots DrawSupportedPanel() reserves on line 1."""
+        auto_slot = max(6, len(self.auto_trading_header_text()))
+        resume = self.resume_header_text()
+        resume_slot = 0 if resume == "" else len(resume) + 2
+        return auto_slot, resume_slot
+
     def timer_header_text(self):
         """TimerHeaderText() in SimpleAdvisor.mq5."""
         if self.auto_pause_active():
-            mins = self.pause_remaining_minutes()
-            if mins >= 60:
-                return "Paused %dh %02dm" % (mins // 60, mins % 60)
-            return "Paused %dm" % mins
+            return "Paused by request"
         if not self.use_auto_schedule:
             return "Off"
         window = "%02d:%02d-%02d:%02d" % (
@@ -1427,8 +1494,11 @@ def main():
     sched.manage_auto_bar()
     check(not sched.any_auto_active(),
           "before the start time no timeframe may place")
-    check(sched.auto_trading_header_text() == "Paused",
-          "header must read Paused while the timer is OFF")
+    check(sched.auto_trading_header_text() == "Timer Pause",
+          "header must read Timer Pause while the timer is OFF; got %r"
+          % sched.auto_trading_header_text())
+    check(sched.auto_trading_header_text() != "Off",
+          "a blocking timer is not the master switch: the word must not be Off")
     check(sched.timer_header_text() == "Paused 08:00-17:00",
           "status line must show the closed daily window; got %r" % sched.timer_header_text())
 
@@ -1464,8 +1534,13 @@ def main():
     check(pause1.auto_pause_active() and not pause1.can_place_auto_orders(),
           "the one-shot pause must block placement immediately")
     pause1.gmt_now = t0 + 48 * 60
-    check(pause1.timer_header_text() == "Paused 47h 12m",
-          "status line must count down the long pause; got %r" % pause1.timer_header_text())
+    check(pause1.timer_header_text() == "Paused by request",
+          "line 2 must name the manual pause; got %r" % pause1.timer_header_text())
+    check(pause1.auto_trading_header_text() == "Timer Pause",
+          "a running one-shot pause must read Timer Pause on line 1")
+    check(pause1.resume_header_text() == "Resume 1d 23h",
+          "line 1 must count the long pause down in days; got %r"
+          % pause1.resume_header_text())
     pause2 = AutoTraderSim(auto_off_hours=48, gmt_now=t0 + 3600, pause_store=pause_store)
     check(pause2.pause_until_gmt == t0 + 48 * 3600,
           "a restart must continue the original deadline, not extend it")
@@ -1480,6 +1555,73 @@ def main():
                            pause_store=pause_store)
     check(pause4.pause_until_gmt == t0 + 98 * 3600 and pause4.auto_pause_active(),
           "after 0, setting 48 again must start a fresh 48h pause")
+    #  Header line 1: the effective word + the "Resume ..." countdown.
+    #  The ON case must keep the exact same slots as before the countdown
+    #  existed (value slot 6, no countdown), so the panel width cannot
+    #  change for anyone who never uses the timer.
+    on_state = AutoTraderSim(auto_trading=True)
+    check(on_state.auto_trading_header_text() == "On"
+          and on_state.resume_header_text() == ""
+          and on_state.header_line1_slots() == (6, 0),
+          "with no timer in the way line 1 must read On and reserve nothing; got %r %r"
+          % (on_state.auto_trading_header_text(), on_state.header_line1_slots()))
+
+    off_state = AutoTraderSim(auto_trading=False)
+    check(off_state.auto_trading_header_text() == "Off"
+          and off_state.resume_header_text() == "",
+          "the master switch off must read Off with no countdown")
+
+    pause_short = AutoTraderSim(auto_off_hours=1, gmt_now=t0, pause_store={})
+    pause_short.gmt_now = t0 + 3600 - 25 * 60
+    check(pause_short.resume_header_text() == "Resume 25m",
+          "under an hour the countdown must show minutes; got %r"
+          % pause_short.resume_header_text())
+
+    #  before the 08:00 opening: one hour to go
+    check(sched.resume_header_text() == "Resume 15h00m",
+          "at 17:00 the countdown must target the next 08:00; got %r"
+          % sched.resume_header_text())
+    sched.local_minute_of_day = 7 * 60
+    check(sched.resume_header_text() == "Resume 1h00m",
+          "at 07:00 the countdown must say one hour; got %r"
+          % sched.resume_header_text())
+    check(sched.header_line1_slots() == (11, len("Resume 1h00m") + 2),
+          "a blocking timer must reserve the 11-character word and the countdown; got %r"
+          % (sched.header_line1_slots(),))
+    sched.local_minute_of_day = 8 * 60
+    check(sched.resume_header_text() == "",
+          "inside the window there is nothing to count down; got %r"
+          % sched.resume_header_text())
+
+    overnight.local_minute_of_day = 12 * 60
+    check(overnight.resume_header_text() == "Resume 10h00m",
+          "an overnight window must count to tonight's start; got %r"
+          % overnight.resume_header_text())
+
+    #  both doors closed: the LATER reopening is the honest countdown
+    pause_store2 = {}
+    both = AutoTraderSim(use_auto_schedule=True, auto_start_time="08:00",
+                         auto_end_time="17:00", auto_off_hours=48,
+                         gmt_now=t0, pause_store=pause_store2,
+                         local_minute_of_day=7 * 60)
+    check(both.resume_minutes() == 48 * 60 and both.resume_header_text() == "Resume 2d 0h",
+          "the pause (48h) must win over the window opening (1h); got %r"
+          % both.resume_header_text())
+
+    #  The header's two new pieces must not collide with the symbol block -
+    #  checked at every font size and DPI the EA supports, for a long symbol.
+    for font in range(6, 17):
+        for dpi in (72, 96, 120, 144, 192):
+            for word, resume in (("On", ""), ("Off", ""),
+                                 ("Timer Pause", "Resume 23h59m"),
+                                 ("Timer Pause", "Resume 2d 0h"),
+                                 ("Timer Pause", "Resume 25m")):
+                pw, right, sym_left, em = header_line1_geometry(word, resume, font, dpi)
+                check(sym_left - right >= 2 * em - 0.001,
+                      "line 1 overlap at font %d dpi %d (%r %r): needs %d px, has %d"
+                      % (font, dpi, word, resume, right + 2 * em, sym_left))
+    print("  ok  Header line 1: the word and the countdown fit at every font 6-16 x DPI 72-192")
+
     modes = AutoTraderSim(range_mode=False, require_m15_m30_same_trend=True)
     check(modes.header_status_values() == ("Off", "Off", "On"),
           "header line 2 must mirror Timer / Choppy Trade / Same Trend inputs; got %r"
@@ -1490,7 +1632,8 @@ def main():
           "widest header status line must match STATUS_LINE_C=71; got %d (%r)"
           % (len(widest.header_status_line()), widest.header_status_line()))
     print("  ok  Rule 15: daily PC-local timer, OFF cancels pendings/manages opens, one-shot pause persists and auto-expires")
-    print("  ok  Header line 2: Timer window/countdown, Choppy Trade and M15/M30 Same Trend modes")
+    print("  ok  Header line 1: Off / On / Timer Pause + Resume countdown (days, hours, minutes; later door wins)")
+    print("  ok  Header line 2: Timer window/manual pause, Choppy Trade and M15/M30 Same Trend modes")
 
     # ------------------------------------------------------------------
     # 3b. Per-timeframe stop/target profile: the three styles aim apart
