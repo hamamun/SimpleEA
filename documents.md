@@ -24,16 +24,17 @@ Each of the three timeframes (**M5 Scalp**, **M15 Short-term**, **M30 Intraday**
   - **When score is `+1 / 3` or `-1 / 3`**: The signal clearly shows **`HOLD`** (in grey) with the score beside it, and the Trade Plan row underneath displays: `score +1/3 — under the +2/-2 gate` (stating exactly why no trade is placed). No regime hides the score.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  SimpleEA                                       XAUUSD  M5  │
-├─────────────────────────────────────────────────────────────┤
-│  M5   Scalp       Trend: Going up     Regime: Steady        │
-│                   Signal: BUY         Score: +3 / 3         │
-│  M15  Short-term  Trend: Sideways     Regime: Mixed         │
-│                   Signal: HOLD        Score: +1 / 3         │
-│  M30  Intraday    Trend: Going down   Regime: Choppy        │
-│                   Signal: SELL        Score: -2 / 3         │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│  SimpleEA  | Autotrading : On                      XAUUSD  |  M5         │
+│  Timer: Off | Choppy Trade: On | M15/M30 Same Trend: Off                 │
+├──────────────────────────────────────────────────────────────────────────┤
+│  M5   Scalp       Trend: Going up     Regime: Steady                     │
+│                   Signal: BUY         Score: +3 / 3                      │
+│  M15  Short-term  Trend: Sideways     Regime: Mixed                      │
+│                   Signal: HOLD        Score: +1 / 3                      │
+│  M30  Intraday    Trend: Going down   Regime: Choppy                     │
+│                   Signal: SELL        Score: -2 / 3                      │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ```
@@ -94,6 +95,51 @@ Each of the three timeframes (**M5 Scalp**, **M15 Short-term**, **M30 Intraday**
    - TP3 Hit: Full exit
    - Reversal / Box-kill: Immediate protection exit
 ```
+
+The panel's top band is two lines: the master status, then the modes behind it.
+
+### Header Line 1 — Autotrading State & Resume Countdown
+
+`SimpleEA | Autotrading : <state>` `[Resume <countdown>]` `| SYMBOL | TF`
+
+The word after *Autotrading* states the **effective** state right now, not the value sitting in the `InpAutoTrading` input box. MQL5 inputs are read-only at run time, so an EA can never rewrite its own input when its timer closes the door — the panel is therefore the only honest place to report it. The input is left untouched.
+
+| Effective state | Colour | Meaning | New orders | Waiting pendings | Open trades |
+|---|---|---|---|---|---|
+| **`Off`** | Red | `InpAutoTrading = false` (read-only advice mode) | none | cancelled | managed |
+| **`Timer Pause`** | Orange | Switch is on, but the daily window is closed and/or a one-shot pause is running | **blocked** | **cancelled** | **still managed** |
+| **`On`** | Green | Switch is on and nothing blocks placement | placed when the rules allow | kept | managed |
+
+`Timer Pause` is deliberately not called `Timer Off`: `Off` already means *the feature is switched off*, and the two must never read as the same thing. When the timer re-opens, the word flips back to `On` by itself within one 2-second tick.
+
+**`Resume ...` countdown** — shown beside the state word, but only while something is actually blocking placement:
+
+- It targets the **later** of two doors: the daily window re-opening, or the one-shot pause ending — because placement needs both open. Example: a 48-hour pause with the window opening in 1 hour reads `Resume 2d 0h`.
+- Formats: `Resume 2d 0h` ($\ge 24$ h), `Resume 23h59m`, `Resume 25m` (under an hour). Maximum 13 characters.
+- Refreshed once a minute (never per second), so the flip back to `On` is never late and the chart is not redrawn needlessly.
+- Absent entirely when nothing blocks — i.e. whenever the timer is not in use, or the window is open.
+- Panel width is reserved only while the countdown is on screen, floored at the old 6-character value slot, so a chart that never uses the timer measures exactly as it did before.
+
+### Header Line 2 — Modes
+
+`Timer: <status> | Choppy Trade: On/Off | M15/M30 Same Trend: On/Off`
+
+- **Timer** — `Off` (no schedule, no pause), `On 08:00-17:00` (window open), `Paused 08:00-17:00` (outside the window), or `Paused by request` (one-shot pause running; the exact remaining time lives on line 1).
+- **Choppy Trade** — mirrors `InpRangeMode`.
+- **M15/M30 Same Trend** — mirrors `InpRequireM15M30SameTrend`.
+- Grey = the mode is switched off (a choice, not an error); orange is reserved for a timer that is blocking trades.
+
+While the timer blocks, the header grows by the wider state word and the countdown:
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  SimpleEA  | Autotrading : Timer Pause  Resume 2h14m   XAUUSD  |  M5     │
+│  Timer: Paused 08:00-17:00 | Choppy Trade: On | M15/M30 Same Trend: Off  │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+…followed by the usual timeframe rows and Trade Plan. The header shrinks back to its normal width the moment the timer re-opens.
+
 
 ---
 
@@ -265,8 +311,8 @@ Each active position is managed candle-by-candle and tick-by-tick through a stru
 | **Autotrading** | `InpAutoTrading` | `true` | Full automation on (`true`) or read-only analytical mode (`false`). |
 | | `InpUseAutoSchedule` | `false` | Enable daily placement schedule window (PC local time). |
 | | `InpAutoStartTime` | `"08:00"` | Daily trading start time (`HH:MM`, PC local time). |
-| | `InpAutoEndTime` | `"17:00"` | Daily trading stop time (`HH:MM`, cancels waiting pendings). |
-| | `InpAutoOffHours` | `0` | One-shot pause in hours from when applied (`48` = 2-day pause; `0` = off/re-arm). |
+| | `InpAutoEndTime` | `"17:00"` | Daily trading stop time (`HH:MM`, PC local). At the stop minute, waiting pendings are cancelled and no new orders are placed; open trades keep being managed (see §8). |
+| | `InpAutoOffHours` | `0` | One-shot pause in hours from when applied (`48` = 2-day pause; `0` = off/re-arm). Persisted across restarts; same rules as the daily window (see §8). |
 | | `InpRequireM15M30SameTrend` | `false` | Timeframe alignment: `false` = untied; `true` = both M15 and M30 must have matching trade directions (`BUY` or `SELL`) to place. |
 | | `InpUseStopLoss` | `false` | Initial Stop Loss switch: `false` = deliberate breathing room (`SL = 0.0`), first SL placed by trailstop; `true` = initial hard ATR stop attached at fill. |
 | | `InpUseTrailStop` | `true` | Pre-TP1 stepped trailstop enabled. |
@@ -299,3 +345,55 @@ Each active position is managed candle-by-candle and tick-by-tick through a stru
 2. **Market Closed Detection**:
    - Detects market closures through: broker trade mode (`SYMBOL_TRADE_MODE_DISABLED`), symbol trade session hours vs. server time, quote staleness $\ge 30$ minutes, or broker return code 10018 (`MARKET_CLOSED`).
    - Collapses to a red `Market Closed` notice and stands down completely until trading resumes.
+
+---
+
+## 8. Autotrading Timer & One-Shot Pause
+
+SimpleEA has two independent gates on **entering** trades. Both are optional, and **both are placement gates only** — neither freezes the management of a position that is already open.
+
+1. **Daily window** (`InpUseAutoSchedule`, `InpAutoStartTime`, `InpAutoEndTime`) — a repeating `HH:MM`–`HH:MM` window read from the **PC/VPS local clock** (`TimeLocal`), *not* broker server time.
+2. **One-shot pause** (`InpAutoOffHours`) — "stop taking new trades for N hours, then resume automatically" (`48` = 2 days). The deadline is stored in **GMT**, so the duration is real elapsed time even across a daylight-saving change.
+
+Both are layered **on top of** the existing permission checks: master switch, supported chart (M5/M15/M30), market open, and the terminal/account "algo trading allowed" flags must all still pass.
+
+### 8.1 What "timer OFF" does — and deliberately does not do
+
+| Action | While the timer is OFF (outside the window, or during a pause) |
+|---|---|
+| Open a new market order | **Blocked** |
+| Place / refresh a waiting pending limit order | **Blocked**, and any existing waiting pending is **cancelled** so it cannot fill while you believe autotrading is off (retried every 2 s if the broker refuses) |
+| Trailstop, break-even, TP1/TP2/TP3 partials, score-based exits, box-kill | **Fully active** — open trades keep being managed exactly as normal |
+| Panel analysis and Trade Plan | **Fully active** — advice is still computed and shown, it is simply not acted on |
+
+The split is deliberate. Pending orders are *unfilled entries resting at the broker*, so they must not survive an OFF transition. Open trades are the opposite case: with `InpUseStopLoss = false` a hard freeze could leave a position with no stop at all, so management must never stop.
+
+When the timer turns back ON, nothing is replayed or "caught up": placement is simply allowed again from that moment, using the freshest plan. Each transition is written to the Experts log.
+
+### 8.2 One-shot pause persistence
+
+- The deadline and the requested hours are saved in terminal GlobalVariables keyed per **account + symbol + magic base**, so a restart neither extends the pause nor restarts a finished one, and other charts never share it.
+- When it expires, the input still *shows* the number (inputs cannot be rewritten by code), but the **effective** pause is `0` and the panel says so.
+- To run another pause: set `InpAutoOffHours = 0` (clears the record), then the hours again. `0` also re-arms after a completed request.
+
+### 8.3 Time-window rules and validation
+
+- Times are `HH:MM` (or `H:MM`) between `00:00` and `23:59`; anything else makes the EA refuse to initialise with an explicit log message, so a typo cannot silently create a 24-hour window.
+- Start **must differ** from stop. For 24-hour autotrading, switch the schedule off — do not set `08:00`–`08:00`.
+- **Overnight windows are supported**: `22:00`–`06:00` means 22:00–23:59 plus 00:00–05:59, and the countdown targets tonight's 22:00.
+- The stop minute is exclusive: at exactly `17:00` the window already reads `Paused`.
+
+### 8.4 On-screen reporting
+
+- **Header line 1** reports the effective state (`Off` / `On` / `Timer Pause`) plus the `Resume …` countdown to the moment placement is allowed again — see §1.
+- **Header line 2** names the setting responsible (`Timer: Paused 08:00-17:00`, `Timer: Paused by request`, …) — see §1.
+- The **2nd (Autotrading) panel** appears only when an order exists and keeps its own header (`Autotrading | Trailstop | Stoploss | SYMBOL`); it is not gated by the timer, because it reports trades that are still being managed.
+- **Notice panels replace both header lines.** When the market is closed or the chart timeframe is unsupported, the panel collapses to a one-line notice, so no countdown is shown there even though the timer keeps counting.
+- Long pauses also print a one-line confirmation to the Experts log when set, when continuing after a restart, and when completed.
+
+### 8.5 Notes and caveats
+
+- The daily window follows the **PC/VPS clock**. Moving the EA to a VPS in another timezone moves `08:00` with it, and a clock left wrong shifts the window.
+- "Timer allows placement" is not the same as "an order will be sent": the signal, score gate, trend gate and broker conditions must also agree. The header can legitimately read `On` while nothing is placed.
+- Loading the EA during an OFF period cancels this EA's waiting pendings within a couple of seconds — by design.
+- The timer never closes positions. It is a schedule and a snooze button for *entering* trades, not a "close everything at 17:00" switch.
