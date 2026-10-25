@@ -3450,6 +3450,34 @@ void ManageAutoBar()
                useSL = candSL;
             }
 
+            // ---- Post-TP1 Runner Trailing: Trail stop behind recent 2-bar swing extrema ----
+            if(InpUseTrailStop && g_auto[i].tp1Hit && point > 0.0)
+            {
+               double bh[2], bl[2];
+               ArraySetAsSeries(bh, true);
+               ArraySetAsSeries(bl, true);
+               if(CopyHigh(_Symbol, g_rows[i].tf, 1, 2, bh) == 2 &&
+                  CopyLow (_Symbol, g_rows[i].tf, 1, 2, bl) == 2)
+               {
+                  double atrVal = ATRClosed(g_rows[i].tf, ATR_PERIOD);
+                  double cushion = (atrVal > 0.0) ? 0.10 * atrVal : point;
+                  double runnerSL = 0.0;
+                  if(dir > 0)
+                  {
+                     double minL = MathMin(bl[0], bl[1]);
+                     runnerSL = NormPrice(minL - cushion);
+                  }
+                  else
+                  {
+                     double maxH = MathMax(bh[0], bh[1]);
+                     runnerSL = NormPrice(maxH + cushion);
+                  }
+                  runnerSL = ClampSLToStopsLevel(dir, runnerSL, bid, ask, point);
+                  if(runnerSL > 0.0 && IsSLTighter(dir, runnerSL, useSL, point))
+                     useSL = runnerSL;
+               }
+            }
+
             if(MathAbs(useSL - g_auto[i].slPrice) >= 0.5 * point)
             {
                if(TradeModifyPosition(g_auto[i].ticket, useSL, g_auto[i].tpPrice))

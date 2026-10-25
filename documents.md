@@ -228,12 +228,15 @@ Each active position is managed candle-by-candle and tick-by-tick through a stru
   - Ratchets forward in +5% increments as price progresses, locking in gains.
   - With `InpUseStopLoss = false`, this trailstop places the **first physical SL** at the broker upon activation.
 
-### 2. At TP1 Hit
+### 2. At TP1 Hit & Stage-2 Runner Trailing
 - **Multi-Condition TP1 Triggering**:
   - Triggers on net favorable tick points (`favPts >= TP1`) OR gross market travel clearing spread (`grossPts >= TP1 && favPts > 0`), ensuring broker bid-ask spread friction does not deny valid target touches.
   - **Closed-Bar Wick Extreme Verification**: On bar close, if the finished candle's high/low wick spiked through the TP1 price level, TP1 is formally confirmed and locked.
 - Closes **70%** of the position volume (if remaining lot $>$ broker minLot).
 - Moves SL to **Break-Even** (or keeps the tighter trailed SL).
+- **Stage-2 Runner Trailing (Post-TP1 to TP3)**:
+  - While holding the remaining 30% runner volume towards TP2 and TP3, SimpleEA continues trailing the stop behind recent 2-bar market swing extrema ($\text{Low}[2] - 0.1\times\text{ATR}$ for BUY, $\text{High}[2] + 0.1\times\text{ATR}$ for SELL).
+  - Automatically locks in higher swing lows / lower swing highs, preventing runner gains from evaporating back to Break-Even.
 - **Score & Direction Watcher**:
   - For trend trades, holds remaining volume for TP2/TP3 only as long as the timeframe's score stays strong in the trade direction. If the score weakens below entry/peak score or changes direction, the trade exits immediately.
   - *Range fades are exempt from the score watcher*: their exits are strictly governed by the box midpoint, stop, and box-kill.
