@@ -2641,8 +2641,47 @@ void InitTrailState(int i)
    g_auto[i].trailLastTry    = 0;
 }
 
+#define BE_TRIGGER_RATIO 0.50     // break-even trigger: lock SL to entry once trade covers 50% to TP1
+
+//+------------------------------------------------------------------+
+//  Universal Break-Even (BE) Protection Gate.
+//  Operates whether Trailstop is ON or OFF.
+//  When favorable progress reaches at least 50% of the distance to TP1
+//  (BE_TRIGGER_RATIO = 0.50), locks SL to Break-Even (entry price + 1 point buffer)
+//  so an advancing trade can NEVER reverse into an open-ended loss.
+//+------------------------------------------------------------------+
+bool UpdateUniversalBreakEven(int i, double favPts, double bid, double ask, double point)
+{
+   if(g_auto[i].tp1Hit || g_auto[i].entryPrice <= 0.0 || point <= 0.0) return(false);
+   if(g_auto[i].tp1Pts <= 0) return(false);
+
+   if(favPts < BE_TRIGGER_RATIO * (double)g_auto[i].tp1Pts) return(false);
+
+   int dir = g_auto[i].dir;
+   double beSL = NormPrice(g_auto[i].entryPrice + (double)dir * point);
+   beSL = ClampSLToStopsLevel(dir, beSL, bid, ask, point);
+   if(beSL <= 0.0) return(false);
+
+   if(!IsSLTighter(dir, beSL, g_auto[i].slPrice, point))
+      return(false);
+
+   datetime now = TimeCurrent();
+   if(g_auto[i].trailLastTry > 0 && now - g_auto[i].trailLastTry < 3)
+      return(false);
+
+   g_auto[i].trailLastTry = now;
+   if(!TradeModifyPosition(g_auto[i].ticket, beSL, g_auto[i].tpPrice))
+      return(false);
+
+   g_auto[i].slPrice     = beSL;
+   g_auto[i].slPts       = (int)MathRound(MathAbs(g_auto[i].entryPrice - beSL) / point);
+   g_auto[i].trailActive = true;
+   return(true);
+}
+
 //+------------------------------------------------------------------+
 //  Tick-level pre-TP1 trailstop.  Returns true when the trail state
+
 //  changed (activation or a step applied), so the caller can flag a
 //  panel redraw.  Never moves an SL backwards, and places the first
 //  SL itself when the order was opened without one
@@ -3330,6 +3369,34 @@ void ManageAutoBar()
             continue;
          }
 
+         // Candle Wick Check: if finished closed bar reached TP1, confirm hit
+         if(!g_auto[i].tp1Hit && g_auto[i].tp1Pts > 0 && point > 0.0)
+         {
+            double ch[], cl[];
+            ArraySetAsSeries(ch, true);
+            ArraySetAsSeries(cl, true);
+            if(CopyHigh(_Symbol, g_rows[i].tf, 1, 1, ch) == 1 &&
+               CopyLow (_Symbol, g_rows[i].tf, 1, 1, cl) == 1)
+            {
+               double barFav = (dir > 0) ? (ch[0] - g_auto[i].entryPrice) / point
+                                         : (g_auto[i].entryPrice - cl[0]) / point;
+               if(barFav >= (double)g_auto[i].tp1Pts - 1e-6)
+               {
+                  g_auto[i].tp1Hit      = true;
+                  g_auto[i].trailActive = true;
+                  double beSL = ClampSLToStopsLevel(dir, g_auto[i].entryPrice, bid, ask, point);
+                  if(beSL > 0.0 && IsSLTighter(dir, beSL, g_auto[i].slPrice, point))
+                  {
+                     if(TradeModifyPosition(g_auto[i].ticket, beSL, g_auto[i].tpPrice))
+                     {
+                        g_auto[i].slPrice = beSL;
+                        g_auto[i].slPts   = (int)MathRound(MathAbs(g_auto[i].entryPrice - beSL) / point);
+                     }
+                  }
+               }
+            }
+         }
+
          // 2) After TP1 is hit -> close if score weakened or direction dropped to HOLD.
          //    Range fades are exempt: their ENTRY was gated by the score, but once
          //    filled their exits are the box midpoint, the stop and the box-kill -
@@ -3572,6 +3639,12 @@ void ManageAutoTick()
             }
          }
 
+         // ---- Universal Break-Even Protection Gate:
+         //      Locks SL to break-even once trade covers 50% of distance to TP1.
+         //      Protects trade from loss even if Trailstop is OFF.
+         if(UpdateUniversalBreakEven(i, favPts, bid, ask, point))
+            stateChanged = true;
+
          // ---- Pre-TP1 stepped trailstop: ratchet the SL in 5% steps
          //      on the way to TP1.  Runs before the TP1 check so a tick
          //      that lands on TP1 first lands the final trailed SL;
@@ -3581,8 +3654,11 @@ void ManageAutoTick()
 
          // ---- TP1 hit: move SL to Break-Even (only if tighter than
          //      the trailed SL) and partial-close 70% if lot > minLot -
+         double grossPts = (dir > 0) ? (ask - g_auto[i].entryPrice) / point
+                                     : (g_auto[i].entryPrice - bid) / point;
          if(!g_auto[i].tp1Hit && g_auto[i].tp1Pts > 0 &&
-            favPts >= (double)g_auto[i].tp1Pts - 1e-6)
+            (favPts >= (double)g_auto[i].tp1Pts - 1e-6 ||
+             (grossPts >= (double)g_auto[i].tp1Pts - 1e-6 && favPts > 0.0)))
          {
             g_auto[i].tp1Hit      = true;
             g_auto[i].trailActive = true;

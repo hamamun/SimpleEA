@@ -211,19 +211,27 @@ SimpleEA features an intentional, two-phase stop loss design:
 Each active position is managed candle-by-candle and tick-by-tick through a structured four-stage process:
 
 ```
-  Entry ──► Pre-TP1 Trailstop ──► TP1 Hit (70% Exit & BE) ──► TP2 Hit (MinLot) ──► TP3 Hit (Full Exit)
+  Entry ──► Universal Break-Even (50% TP1) / Pre-TP1 Trailstop ──► TP1 Hit (70% Exit & BE) ──► TP2 Hit (MinLot) ──► TP3 Hit (Full Exit)
 ```
 
-### 1. Pre-TP1 Stepped Trailstop
-- Operates between Entry and TP1.
-- Activation threshold $P$:
-  - **40% (Tight)** in Choppy or Mixed regimes.
-  - **55% (Steady)** in Steady regimes with matching trend.
-  - Gap widened by $\times 1.25$ on M15 and $\times 1.50$ on M30 for breathing room.
-- Ratchets forward in +5% increments as price progresses, locking in gains.
-- With `InpUseStopLoss = false`, this trailstop places the **first physical SL** at the broker upon activation.
+### 1. Universal Zero-Risk Break-Even & Pre-TP1 Trailstop
+- **Universal Break-Even Protection Gate (`BE_TRIGGER_RATIO = 0.50`)**:
+  - Operates automatically **whether Trailstop is ON or OFF**.
+  - The instant favorable trade progress reaches $50\%$ of the distance to TP1, the Stop Loss is locked to **Break-Even** ($\text{Entry Price} + \text{dir} \times 1\text{ point}$).
+  - Guarantees that any trade covering half the distance to TP1 can **never reverse into an open-ended loss**, solving the vulnerability of running with Trailstop OFF.
+- **Pre-TP1 Stepped Trailstop** (when `InpUseTrailStop = true`):
+  - Operates between Entry and TP1.
+  - Activation threshold $P$:
+    - **40% (Tight)** in Choppy or Mixed regimes.
+    - **55% (Steady)** in Steady regimes with matching trend.
+    - Gap widened by $\times 1.25$ on M15 and $\times 1.50$ on M30 for breathing room.
+  - Ratchets forward in +5% increments as price progresses, locking in gains.
+  - With `InpUseStopLoss = false`, this trailstop places the **first physical SL** at the broker upon activation.
 
 ### 2. At TP1 Hit
+- **Multi-Condition TP1 Triggering**:
+  - Triggers on net favorable tick points (`favPts >= TP1`) OR gross market travel clearing spread (`grossPts >= TP1 && favPts > 0`), ensuring broker bid-ask spread friction does not deny valid target touches.
+  - **Closed-Bar Wick Extreme Verification**: On bar close, if the finished candle's high/low wick spiked through the TP1 price level, TP1 is formally confirmed and locked.
 - Closes **70%** of the position volume (if remaining lot $>$ broker minLot).
 - Moves SL to **Break-Even** (or keeps the tighter trailed SL).
 - **Score & Direction Watcher**:
