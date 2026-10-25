@@ -3453,7 +3453,7 @@ void ManageAutoBar()
             // ---- Post-TP1 Runner Trailing: Trail stop behind recent 2-bar swing extrema ----
             if(InpUseTrailStop && g_auto[i].tp1Hit && point > 0.0)
             {
-               double bh[2], bl[2];
+               double bh[], bl[];
                ArraySetAsSeries(bh, true);
                ArraySetAsSeries(bl, true);
                if(CopyHigh(_Symbol, g_rows[i].tf, 1, 2, bh) == 2 &&
