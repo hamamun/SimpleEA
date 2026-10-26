@@ -9,9 +9,20 @@ Mirrors SimpleAdvisor.mq5 line for line:
   PlanWidthNeed() and TotalPlanLines() size the panel BEFORE it is drawn
   DrawPlanBlock() places the text
 
+The calibration-health surface mirrors, also line for line:
+  - header line 1 reserves "| Day: S .. W .. L .." after the
+    Autotrading value (and Resume slot) and before the symbol
+  - each timeframe's Signal line carries one compact health label in
+    the blank left strip, with PlanColumns() reserving that strip
+  - only a Poor lane adds the temporary bottom problem + first-fix
+    line; Watch and Learning add no line
+
 Part 2 mirrors, also line for line:
   - a blocked row shows the trade it WOULD have fired, greyed out
   - the HOLD note carries the row's block reason ("mixed ...", "chop ...")
+  - Choppy permission and Range Mode are separate: header "Choppy
+    Trade" mirrors InpAllowChoppyTrade; permission Off makes a flat
+    Choppy row HOLD, while Range Mode only prices an allowed 2/3
   - range rows build their plan from the box: limit entry at the
     opposite band, stop = band + RANGE_SL_ATR ATR, target = half the
     box, kind "range fade"
@@ -95,8 +106,10 @@ class Panel:
                  cur="USD", use_risk=True, use_min_lot=False, risk2=0.5, risk3=1.0,
                  sl_atr=None, tp_atr=None, pend_atr=0.5, valid_bars=3,
                  valid_bars_range=8,
-                 timer_text="Off", range_mode=True, require_same_trend=False,
-                 atr=None):
+                 timer_text="Off", allow_choppy_trade=True, range_mode=True,
+                 require_same_trend=False, atr=None,
+                 day_text="| Day: S 0 W 0 L 0", health_labels=None,
+                 health_note=""):
         self.symbol, self.spec, self.balance, self.cur = symbol, spec, balance, cur
         self.tags = tags
         self.use_risk, self.use_min_lot = use_risk, use_min_lot
@@ -106,13 +119,20 @@ class Panel:
         self.pend_atr, self.valid_bars = pend_atr, valid_bars
         self.valid_bars_range = valid_bars_range       # RANGE_VALID_BARS in the EA
         self.timer_text = timer_text                   # TimerHeaderText() in the EA
+        self.allow_choppy_trade = allow_choppy_trade   # InpAllowChoppyTrade
         self.range_mode = range_mode                   # InpRangeMode
         self.require_same_trend = require_same_trend   # InpRequireM15M30SameTrend
+        self.day_text = day_text                       # DiaryDayHeaderText()
+        self.health_labels = {t: "Health: Learning" for t in tags}
+        if health_labels:
+            self.health_labels.update(health_labels)   # HealthLabelText() per row
+        self.health_note = health_note                 # HealthNoteText(): Poor only
         self.panel_w = 406
         self.panel_h = 130
         # g_rows: tag -> the row fields UpdatePlanRow() reads
         self.rows = {t: dict(ok=True, dir=0, score=0, trend="Sideways", regime="Mixed",
-                             mode=0, reason="", rng_top=0.0, rng_bot=0.0)
+                             mode=0, choppy_blocked=False, reason="", rng_top=0.0,
+                             rng_bot=0.0)
                      for t in tags}
         self.plans = {t: dict(state=HOLD, dir=0, score=0, market=False, lines=1,
                               head=t, kind="", note="", lbl={}, val={}, clr={})
@@ -123,21 +143,33 @@ class Panel:
 
     def set_reading(self, tag, direction=0, score=0, trend="Sideways",
                     regime="Mixed", ok=True, mode=None, reason=None,
-                    rng_top=0.0, rng_bot=0.0, held=None):
+                    rng_top=0.0, rng_bot=0.0, held=None, choppy_blocked=None):
         #  mode mirrors SRow.mode: 0 stand aside, 1 trend, 2 range.  The
         #  EA only stores a non-zero mode when direction != 0, so a row
         #  that does not trade defaults to 0 here too.
         if mode is None:
             mode = 1 if direction != 0 else 0
+        #  choppy_blocked mirrors SRow.choppyBlocked: the score direction
+        #  remains published, but InpAllowChoppyTrade=false on a Choppy
+        #  row forbids a NEW entry and suppresses box mode.
+        if choppy_blocked is None:
+            choppy_blocked = (direction != 0 and regime == "Choppy"
+                              and not self.allow_choppy_trade)
+        if choppy_blocked:
+            mode = 0
         #  reason mirrors SRow.blockReason as EvaluateRow() writes it:
         #  Mixed and Choppy rows that do not trade always carry their
         #  why; a Steady row stays quiet ("nothing to place").  The dead
         #  market reason depends on ER, which the walk does not model -
         #  cases pass it explicitly.
         if reason is None:
-            reason = "" if direction != 0 else "score under the gate"
+            if choppy_blocked:
+                reason = "choppy — Choppy Trade is Off"
+            else:
+                reason = "" if direction != 0 else "score under the gate"
         self.rows[tag].update(ok=ok, dir=direction, score=score,
                               trend=trend, regime=regime, mode=mode,
+                              choppy_blocked=choppy_blocked,
                               reason=reason, rng_top=rng_top, rng_bot=rng_bot,
                               held=held)
 
@@ -155,14 +187,22 @@ class Panel:
             p.update(state=HOLD, kind="HOLD",
                      note=r["reason"] or "nothing to place")
             return
+        #  Choppy Trade Off publishes no executable plan for a flat lane.
+        #  The walk marks a live same-direction trade with held != None;
+        #  that is the EA's already-open exception, whose plan remains
+        #  available for management (but can never be placed again).
+        if r.get("choppy_blocked") and r.get("held") is None:
+            p.update(state=HOLD, kind="HOLD",
+                     note=r["reason"] or "choppy — Choppy Trade is Off")
+            return
 
         spec = self.spec
         point = spec["point"]
         price = self.price
         pv = point_value_per_lot(spec)
         dir_, score = r["dir"], r["score"]
-        #  3/3 -> market, 2/3 -> limit, in every regime; mode == 2 only
-        #  says the box prices this limit.
+        #  Once Choppy permission passes: 3/3 -> market, 2/3 -> limit;
+        #  mode == 2 only says the box prices this limit.
         market = abs(score) >= 3
         is_range = (r["mode"] == 2) and not market
         dg = spec["digits"]
@@ -278,7 +318,8 @@ class Panel:
         #  same way, which is what keeps the two groups aligned.
         kind_len = max([len("pending -2/3")] +
                        [len(p["kind"]) for p in self.plans.values() if p["kind"]] or [0])
-        cA = max(col_x(PLAN_COL_A), 10 + 5 * EM + kind_len * EM + EM)
+        cA = max(col_x(PLAN_COL_A), 10 + 5 * EM + kind_len * EM + EM,
+                 10 + 17 * EM)   # clear "Health: Learning" + one space
         vA = cA + EM * PLAN_LBL_C
         wA = max([10] + [len(p["val"][(l, 0)]) for t, p in self.plans.items()
                          for l in range(p["lines"]) if (l, 0) in p["val"]]) * EM
@@ -299,6 +340,8 @@ class Panel:
         need = 10 + 5 * EM + len("pending +3/3") * EM + 10
         #  Group 1 shares the grid, so its last cells count too
         need = max(need, vA + 5 * EM + 10, vB + 6 * EM + 10)
+        if self.health_note:
+            need = max(need, 10 + len(self.health_note) * EM + 10)
         for t, p in self.plans.items():
             if p["lines"] == 1:
                 if p["note"]:
@@ -314,18 +357,22 @@ class Panel:
         row_h = FONT + 11
         # MainHeaderHeight(): the main header's second (status) line adds one row
         self.panel_h = (HEAD_H + row_h + TF_COUNT * 2 * row_h + 8
-                        + PLAN_SEP_H + self.total_plan_lines() * row_h)
+                        + PLAN_SEP_H + self.total_plan_lines() * row_h
+                        + ((row_h + 4) if self.health_note else 0))
         # the real EA: NoticeWidth() is the floor for BOTH panels, then the
         # plan's own measured need (when it is shown) can only add to it
         sym_right = "|  %s  |  %s" % (self.symbol, self.tags[0])
         title_w = 8 * char_w(FONT + 1, DPI)
-        title_head_w = 10 + title_w + EM + (16 + 6 + 2 + len(sym_right)) * EM + 10
+        day_slot = len(self.day_text) + 2
+        title_head_w = 10 + title_w + EM + (16 + 6 + day_slot + 2 + len(sym_right)) * EM + 10
         status_head_w = 10 + STATUS_LINE_C * EM + 10
         head_w = max(title_head_w, status_head_w)
         want = max(PLAN_W_MIN,
                    10 + len(NOTICE) * char_w(FONT + 1, DPI) + 10,
                    head_w)
         want = max(want, self.plan_width_need())
+        if self.health_note:
+            want = max(want, 10 + len(self.health_note) * EM + 10)
         self.panel_w = want
 
         w_cols = int((self.panel_w - 4) / CELL)    # usable half-glyph columns
@@ -353,6 +400,7 @@ class Panel:
         auto_cap_x = 10 + title_w + EM
         put("| Autotrading :", auto_cap_x, 0)
         put("On", auto_cap_x + 16 * EM, 0)
+        put(self.day_text, auto_cap_x + 16 * EM + (6 + 2) * EM, 0)
         put(sym_right, self.panel_w - 10 - len(sym_right) * RENDER_CW, 0)
 
         # ---- header line 2: mode/status (fixed columns, widest timer reserved)
@@ -361,7 +409,7 @@ class Panel:
         put(self.timer_text, timer_cap_x + 7 * EM, 1)
         choppy_cap_x = timer_cap_x + 26 * EM
         put("| Choppy Trade:", choppy_cap_x, 1)
-        put("On" if self.range_mode else "Off", choppy_cap_x + 16 * EM, 1)
+        put("On" if self.allow_choppy_trade else "Off", choppy_cap_x + 16 * EM, 1)
         link_cap_x = timer_cap_x + 46 * EM
         put("| M15/M30 Same Trend:", link_cap_x, 1)
         put("On" if self.require_same_trend else "Off", link_cap_x + 22 * EM, 1)
@@ -379,6 +427,7 @@ class Panel:
             put("Regime:", cB, line)
             put(r["regime"], vB, line)
             line += 1
+            put(self.health_labels[t], 10, line)
             put("Signal:", cA, line)
             #  Part 2: a blocked row shows the trade it WOULD have fired,
             #  greyed out (grey is a colour, not a character - the walk
@@ -412,6 +461,10 @@ class Panel:
                     put(p["lbl"][key], (cA, cB, cC)[c], line + l)
                     put(p["val"][key], (vA, vB, vC)[c], line + l)
             line += p["lines"]
+
+        if self.health_note:
+            put(self.health_note, 10, line)
+            line += 1
 
         rows = ["".join(r).rstrip() for r in grid]
         for r in separators:
@@ -535,7 +588,8 @@ def layout_sweep():
                 RENDER_CW = size * dpi / 72.0 * ADV_CONSOLAS
                 CELL = RENDER_CW
                 p = Panel("XAUUSD", SYMBOLS["XAUUSD-2d"], 200.0,
-                          timer_text="Paused 08:00-17:00", range_mode=False,
+                          timer_text="Paused 08:00-17:00",
+                          allow_choppy_trade=False, range_mode=True,
                           require_same_trend=False)
                 p.price = 4285.70
                 p.set_reading("M5",  direction=-1, score=-3,
@@ -571,7 +625,7 @@ def layout_sweep():
 
 def panel_need_at(p, em):
     """PlanWidthNeed()/NoticeWidth() with a given pixel width per character."""
-    cA = col_x(PLAN_COL_A, em)
+    cA = max(col_x(PLAN_COL_A, em), 10 + 17 * em)
     vA = cA + em * PLAN_LBL_C
     wA = max([10] + [len(q["val"][(l, 0)]) for q in p.plans.values()
                      for l in range(q["lines"]) if (l, 0) in q["val"]]) * em
@@ -585,6 +639,8 @@ def panel_need_at(p, em):
                10 + STATUS_LINE_C * em + 10,
                10 + 5 * em + len("pending +3/3") * em + 10,
                vA + 5 * em + 10, vB + 6 * em + 10)
+    if p.health_note:
+        need = max(need, 10 + len(p.health_note) * em + 10)
     for q in p.plans.values():
         if q["lines"] == 1:
             if q["note"]:
@@ -665,6 +721,46 @@ def main():
                  "M30": dict(direction=-1, score=-1, trend="Going down", regime="Choppy",
                              mode=2, rng_top=4290.00, rng_bot=4282.00, held=12)},
                 price=4285.70)
+
+    bad += case("K)  Choppy Trade Off: both Choppy scores stand aside with "
+                "the reason; the Steady row still has its normal plan",
+                {"M5":  dict(direction=1, score=2, trend="Going up", regime="Choppy",
+                             mode=2, rng_top=4290.00, rng_bot=4282.00),
+                 "M15": dict(direction=-1, score=-3, trend="Going down", regime="Choppy"),
+                 "M30": dict(direction=1, score=2, trend="Going up", regime="Steady")},
+                allow_choppy_trade=False, range_mode=True)
+
+    # L) Health on the Main Panel: Day counts in header blank space,
+    # one label per Signal line, and exactly one Poor bottom note.
+    hp = Panel("XAUUSD", SYMBOLS["XAUUSD-2d"], 800.0,
+               day_text="| Day: S 14 W 6 L 4",
+               health_labels={"M5": "Cost: Poor+",
+                              "M15": "TP1: Watch",
+                              "M30": "Health: OK"},
+               health_note=("Health M5: Spread is 15% of TP1. "
+                            "Use minimum lot or avoid expensive hours first."))
+    hp.price = 4285.70
+    hp.set_reading("M5", direction=-1, score=-3, trend="Going down", regime="Steady")
+    hp.set_reading("M15", direction=1, score=2, trend="Going up", regime="Mixed")
+    hp.set_reading("M30", direction=0, score=0, trend="Sideways", regime="Steady")
+    hp.update_plan()
+    hp_base_h = hp.panel_h
+    bad += hp.render("L)  calibration health: Day S/W/L, row labels, Poor-only first-fix note")
+    hp_texts = [txt for _ln, _x0, _x1, txt in hp.placed]
+    if hp.day_text not in hp_texts or "Cost: Poor+" not in hp_texts \
+            or "TP1: Watch" not in hp_texts or hp.health_note not in hp_texts:
+        bad += [("health-main", 0.0, 0.0)]
+        print("  !! Case L is missing a Day/health/note label: %r" % (hp_texts,))
+
+    wp = Panel("XAUUSD", SYMBOLS["XAUUSD-2d"], 800.0,
+               health_labels={"M5": "Cost: Watch"})
+    wp.price = 4285.70
+    wp.set_reading("M5", direction=-1, score=-3, trend="Going down", regime="Steady")
+    wp.update_plan()
+    bad += wp.render("L2) calibration health: Watch labels the row but adds no bottom line")
+    if wp.health_note or any(txt.startswith("Health M5:") for txt in
+                             [x[3] for x in wp.placed]):
+        bad += [("health-watch-note", 0.0, 0.0)]
 
     bad += [("sweep", 0.0, 0.0)] if sweep() else []
     bad += [("layout", 0.0, 0.0)] if layout_sweep() else []
