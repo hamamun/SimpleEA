@@ -362,7 +362,7 @@ class Panel:
         # the real EA: NoticeWidth() is the floor for BOTH panels, then the
         # plan's own measured need (when it is shown) can only add to it
         sym_right = "|  %s  |  %s" % (self.symbol, self.tags[0])
-        title_w = 8 * char_w(FONT + 1, DPI)
+        title_w = len("SimpleEA2.0") * char_w(FONT + 1, DPI)
         day_slot = len(self.day_text) + 2
         title_head_w = 10 + title_w + EM + (16 + 6 + day_slot + 2 + len(sym_right)) * EM + 10
         status_head_w = 10 + STATUS_LINE_C * EM + 10
@@ -396,7 +396,7 @@ class Panel:
         separators = set()
 
         # ---- Group 1 -----------------------------------------------------
-        put("SimpleEA", 10, 0)
+        put("SimpleEA2.0", 10, 0)
         auto_cap_x = 10 + title_w + EM
         put("| Autotrading :", auto_cap_x, 0)
         put("On", auto_cap_x + 16 * EM, 0)
