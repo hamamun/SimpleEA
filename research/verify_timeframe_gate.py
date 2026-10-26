@@ -204,7 +204,7 @@ class SimpleEA:
         self.panel_h = HEAD_H + TF_COUNT * 2 * self.row_h + 8
         self.make_rect("bg", self.panel_w, self.panel_h)
         self.make_rect("sep", self.panel_w - 8, 1)
-        self.make_label("title", "SimpleEA", self.panel_y + 7)
+        self.make_label("title", "SimpleEA2.0", self.panel_y + 7)
         self.make_label("sym", "%s  %s" % (self.symbol, self.chart_timeframe_text()),
                         self.panel_y + 8)
 
@@ -224,7 +224,7 @@ class SimpleEA:
     def draw_incompatible_panel(self):
         self.make_rect("bg", self.panel_w, self.notice_h())
         self.delete_object("sep")
-        self.make_label("title", "SimpleEA", self.panel_y + 7)
+        self.make_label("title", "SimpleEA2.0", self.panel_y + 7)
         self.make_label("sym", "%s  %s" % (self.symbol, self.chart_timeframe_text()),
                         self.panel_y + 8)
         self.make_label("notice", NOTICE, self.panel_y + HEAD_H + 2)
@@ -274,7 +274,7 @@ def check_full_panel(ea, where):
     check("notice" not in ea.objects, "%s: no notice on a supported chart" % where)
     check(len(ea.row_objects_visible()) == 10 * TF_COUNT,
           "%s: every row object should be drawn" % where)
-    check("SimpleEA" in ea.visible_texts(), "%s: header missing" % where)
+    check("SimpleEA2.0" in ea.visible_texts(), "%s: header missing" % where)
 
     bg = ea.objects["bg"]
     assert bg[0] == "rect"
@@ -292,7 +292,7 @@ def check_notice_panel(ea, where):
     check(ea.row_objects_visible() == [], "%s: row objects left behind" % where)
 
     labels = ea.visible_texts()
-    expected = sorted(["SimpleEA", ea.symbol + "  " + ea.tf.value, NOTICE])
+    expected = sorted(["SimpleEA2.0", ea.symbol + "  " + ea.tf.value, NOTICE])
     check(labels == expected, "%s: expected exactly %s, got %s" % (where, expected, labels))
     for forbidden in ("BUY", "SELL", "HOLD", "Trend:", "Regime:",
                       "Signal:", "Score:", "Waiting", "..."):
@@ -392,7 +392,7 @@ def test_notice_follows_the_chart():
     ea.on_init()
     for tf in (TF.H4, TF.H2, TF.D1):
         switch_without_reinit(ea, tf)
-        check(ea.visible_texts() == sorted(["SimpleEA", "USDJPY  " + tf.value, NOTICE]),
+        check(ea.visible_texts() == sorted(["SimpleEA2.0", "USDJPY  " + tf.value, NOTICE]),
               "header stale after unsupported -> unsupported: %s" % tf.value)
     switch_without_reinit(ea, TF.M30)
     check_full_panel(ea, "H1->M30")
@@ -439,6 +439,6 @@ if __name__ == "__main__":
     test_notice_follows_the_chart()
     test_font_sizes()
     test_full_cycle()
-    print("\nheader line : SimpleEA")
+    print("\nheader line : SimpleEA2.0")
     print("notice line : %s" % NOTICE)
     print("all chart-timeframe rule checks passed")

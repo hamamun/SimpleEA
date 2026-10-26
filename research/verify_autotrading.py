@@ -12,8 +12,11 @@ line and verifies every rule:
           the row publishes a direction, and again in PlacePlanOrder().
   Rule 4  Smart updates on open positions and waiting pending orders
   Rule 5  Three TP levels: TP3 = 100% advised, TP2 = 75% of TP3, TP1 = 75% of TP2
-  Rule 6  TP1 -> 70% partial close (if > minLot) + SL to Break-Even + Trailstop
-          ACTIVE + Score/Direction watcher (for BOTH minLot and > minLot);
+  Rule 6  Universal 3-step profit-protection SL floor (Trailstop On or Off):
+          50% of TP1 -> SL at +25% of TP1 ahead of Entry;
+          TP1 (100% of TP1) -> 70% partial close (if > minLot) + SL at +50% of
+          TP1 ahead of Entry (if tighter than trailed SL) + Score/Direction
+          watcher (for BOTH minLot and > minLot);
           TP2 -> reduce lot to minLot + lock SL to TP1; TP3 -> full close
   Rule 7  Candle-by-candle updates: open SL tightens only (never widens);
           pre-TP1 HOLD closes if in profit; pending 2/3 -> 3/3 upgrades to
@@ -23,7 +26,7 @@ line and verifies every rule:
           (InpRequireM15M30SameTrend=false); with that input true, M15
           and M30 require matching trend direction between them
   Rule 10 2nd Panel header: "Autotrading | Trailstop : Off/On/Active | Stoploss : On/Off | SYMBOL"
-          Main Panel header line 1: "SimpleEA | Autotrading : Off/On/Timer Pause"
+          Main Panel header line 1: "SimpleEA2.0 | Autotrading : Off/On/Timer Pause"
           with "Resume ..." beside the status while the timer blocks placement,
           then SYMBOL | TF; line 2: "Timer: ... | Choppy Trade: On/Off |
           M15/M30 Same Trend: On/Off" + full-width sep
@@ -41,11 +44,11 @@ line and verifies every rule:
           counted back from the activation price to place the first SL;
           every further +5% of progress jumps the SL +5% (gap widened
           x1.25 on M15, x1.50 on M30).  Percentages use the Entry->TP1
-          distance frozen at fill.  At TP1 the trail hands off - the
-          TP1 Break-Even move only applies if it is tighter than the
-          trailed SL.  With InpUseStopLoss=false the trail places the
-          first SL itself at activation.  The card shows "TS: 40% Tight"
-          / "55% Steady".
+          distance frozen at fill, respecting the universal +25%-of-TP1
+          floor once 50% of TP1 is covered.  At TP1 the trail hands off -
+          the TP1 +50%-of-TP1 move only applies if it is tighter than the
+          trailed SL.  With InpUseStopLoss=false the trail / floor places
+          the first SL itself.  The card shows "TS: 40% Tight" / "55% Steady".
   Rule 14 Time cells: an advice plan or a waiting pending order shows
           the idea's leash counting down (Valid: left/total bars - 3 for
           trend rows, 8 for range fades), re-born when the direction
@@ -161,7 +164,7 @@ def header_line1_geometry(word, resume, font=FONT, dpi=DPI, symbol="XAUUSD.s", t
     to be measured by eye.
     """
     em = char_w(font, dpi)
-    title_w = 8 * char_w(font + 1, dpi)
+    title_w = len("SimpleEA2.0") * char_w(font + 1, dpi)
     sym = "|  %s  |  %s" % (symbol, tf)
     auto_slot = max(6, len(word))
     resume_slot = 0 if not resume else len(resume) + 2
@@ -467,6 +470,7 @@ class AutoSlot:
         self.head = ""
         self.lbl = {}
         self.val = {}
+        self.clr = {}
 
 
 class AutoTraderSim:
@@ -1611,6 +1615,47 @@ class AutoTraderSim:
             return cand_sl > cur_sl + 0.5 * point
         return cand_sl < cur_sl - 0.5 * point
 
+    def milestone_sl_price(self, dir_, entry_price, tp1_pts, ratio):
+        """MilestoneSLPrice() in SimpleAdvisor.mq5."""
+        point = self.spec["point"]
+        if entry_price <= 0.0 or tp1_pts <= 0 or point <= 0.0 or dir_ == 0:
+            return 0.0
+        off_pts = max(1.0, math.floor(ratio * float(tp1_pts) + 0.5 + 1e-9))
+        return self.norm_price(entry_price + dir_ * off_pts * point)
+
+    def clamp_profit_floor_sl(self, dir_, entry_price, want_sl):
+        """ClampProfitFloorSL() in SimpleAdvisor.mq5."""
+        point = self.spec["point"]
+        sl = self.clamp_sl_to_stops(dir_, want_sl)
+        if sl <= 0.0:
+            return 0.0
+        if dir_ * (sl - entry_price) < -0.5 * point:
+            return 0.0
+        return sl
+
+    def update_profit_protection_floor(self, tag, fav_pts):
+        """UpdateProfitProtectionFloor() in SimpleAdvisor.mq5."""
+        a = self.auto[tag]
+        point = self.spec["point"]
+        if a.entry_price <= 0.0 or point <= 0.0 or a.tp1_pts <= 0:
+            return False
+        if a.tp2_hit:
+            want_sl = self.norm_price(a.entry_price + a.dir * a.tp1_pts * point)
+        elif a.tp1_hit:
+            want_sl = self.milestone_sl_price(a.dir, a.entry_price, a.tp1_pts, 0.50)
+        elif fav_pts >= 0.50 * a.tp1_pts - 1e-6:
+            want_sl = self.milestone_sl_price(a.dir, a.entry_price, a.tp1_pts, 0.25)
+        else:
+            return False
+
+        floor_sl = self.clamp_profit_floor_sl(a.dir, a.entry_price, want_sl)
+        if floor_sl <= 0.0 or not self.is_sl_tighter(a.dir, floor_sl, a.sl_price):
+            return False
+        a.sl_price = floor_sl
+        a.sl_pts = int(round(abs(a.entry_price - floor_sl) / point))
+        a.trail_active = True
+        return True
+
     def trail_room_factor(self, tag):
         """TrailRoomFactor() in SimpleAdvisor.mq5."""
         return {"M5": 1.0, "M15": 1.25, "M30": 1.50}[tag]
@@ -1663,6 +1708,10 @@ class AutoTraderSim:
         sl_prog_pct = level_pct - a.trail_gap_pct
         cand_sl = self.norm_price(a.entry_price + a.dir * sl_prog_pct / 100.0
                                   * a.trail_ref_tp1_pts * point)
+        if a.tp1_pts > 0 and fav_pts >= 0.50 * a.tp1_pts - 1e-6:
+            floor_want = self.milestone_sl_price(a.dir, a.entry_price, a.tp1_pts, 0.25)
+            if self.is_sl_tighter(a.dir, floor_want, cand_sl):
+                cand_sl = floor_want
         cand_sl = self.clamp_sl_to_stops(a.dir, cand_sl)
         if cand_sl <= 0.0:
             return False
@@ -2122,18 +2171,22 @@ class AutoTraderSim:
                     a.reset(keep_signal_bar=True)
                     continue
 
-                # Pre-TP1 stepped trailstop (before the TP1 check, as in MQL)
+                # Pre-TP1 stepped trailstop (before the floor & TP1 checks, as in MQL)
                 self.update_pre_tp1_trail(t, fav_pts)
 
-                # TP1 hit -> Break-Even SL only if tighter than the trailed
-                # SL + 70% partial close + Score check
+                # Universal 3-step profit-protection SL floor (Trailstop On or Off)
+                self.update_profit_protection_floor(t, fav_pts)
+
+                # TP1 hit -> +50% of TP1 SL floor (only if tighter than the trailed
+                # SL) + 70% partial close + Score check
                 if not a.tp1_hit and a.tp1_pts > 0 and fav_pts >= a.tp1_pts - 1e-6:
                     a.tp1_hit = True
                     a.trail_active = True
-                    be_sl = self.clamp_sl_to_stops(a.dir, a.entry_price)
-                    if be_sl > 0.0 and self.is_sl_tighter(a.dir, be_sl, a.sl_price):
-                        a.sl_price = be_sl
-                        a.sl_pts = int(round(abs(a.entry_price - be_sl) / point))
+                    want_tp1_sl = self.milestone_sl_price(a.dir, a.entry_price, a.tp1_pts, 0.50)
+                    tp1_sl = self.clamp_profit_floor_sl(a.dir, a.entry_price, want_tp1_sl)
+                    if tp1_sl > 0.0 and self.is_sl_tighter(a.dir, tp1_sl, a.sl_price):
+                        a.sl_price = tp1_sl
+                        a.sl_pts = int(round(abs(a.entry_price - tp1_sl) / point))
 
                     close70 = calc_tp1_close_lot(a.cur_lot, self.spec)
                     if close70 > 0.0:
@@ -2151,7 +2204,7 @@ class AutoTraderSim:
                     a.tp2_hit = True
                     a.trail_active = True
                     tp1_p = a.entry_price + a.dir * a.tp1_pts * point
-                    lock_sl = self.clamp_sl_to_stops(a.dir, tp1_p)
+                    lock_sl = self.clamp_profit_floor_sl(a.dir, a.entry_price, tp1_p)
                     if lock_sl > 0.0 and self.is_sl_tighter(a.dir, lock_sl, a.sl_price):
                         a.sl_price = lock_sl
                         a.sl_pts = int(round(abs(a.entry_price - lock_sl) / point))
@@ -2199,6 +2252,7 @@ class AutoTraderSim:
             a.head = ""
             a.lbl = {}
             a.val = {}
+            a.clr = {}
             if not a.active:
                 continue
 
@@ -2236,10 +2290,14 @@ class AutoTraderSim:
                 sl_pts_now = int(round(abs(a.entry_price - a.sl_price) / point))
                 sl_usd = lot * sl_pts_now * pv
                 is_be = (sl_pts_now == 0 or a.trail_active)
+                sl_protected = (a.is_open
+                                and dir_ * (a.sl_price - a.entry_price) >= -0.5 * point)
                 a.val[(2, 1)] = "%.*f (%.2f %s)%s" % (
                     dg, a.sl_price, sl_usd, self.cur, " [BE]" if (sl_pts_now == 0 and is_be) else "")
+                a.clr[(2, 1)] = "green" if sl_protected else "red"
             else:
                 a.val[(2, 1)] = "-- (%s %.*f)" % (live_l, dg, live_p)
+                a.clr[(2, 1)] = "gray"
 
             next_tp_tag = "TP1" if not a.tp1_hit else ("TP2" if not a.tp2_hit else "TP3")
             next_tp_price = tp1_price if not a.tp1_hit else (tp2_price if not a.tp2_hit else tp3_price)
@@ -3028,13 +3086,28 @@ def main():
           % (a_tr2.trail_pct, a_tr2.trail_ref_tp1_pts))
     check(abs(a_tr2.trail_gap_pct - 55 * 55 / 100.0 * 1.25) < 1e-9,
           "M15 must widen the gap x1.25 (37.81%%); got %.2f" % a_tr2.trail_gap_pct)
-    # +48 pts = 55.8% of TP1: activation step 55 -> SL at 55 - 37.81 = +17.19%
+    # +43 pts = 50.0% of TP1: universal profit floor locks +25% (+22 pts = 4285.92)
+    # before Steady's 55% step activates
+    tr2.manage_auto_tick(bid=a_tr2.entry_price + 0.43, ask=a_tr2.entry_price + 0.45)
+    check(not a_tr2.trail_started and a_tr2.trail_active and abs(a_tr2.sl_price - 4285.92) < 1e-6,
+          "at 50%% of TP1 on Steady M15, the +25%% floor must lock SL at 4285.92 before 55%% trail; got %.2f"
+          % a_tr2.sl_price)
+    # +48 pts = 55.8% of TP1: activation step 55 (+17.19% = 4285.85) is looser than
+    # the +25% floor (4285.92), so trail activates without pulling SL back
     tr2.manage_auto_tick(bid=a_tr2.entry_price + 0.48, ask=a_tr2.entry_price + 0.50)
-    check(a_tr2.trail_started and abs(a_tr2.sl_price - 4285.85) < 1e-6,
-          "Steady M15 activation must place SL at +17.19%% (4285.85); got %.2f" % a_tr2.sl_price)
+    check(a_tr2.trail_started and abs(a_tr2.trail_applied_pct - 55.0) < 1e-9
+          and abs(a_tr2.sl_price - 4285.92) < 1e-6,
+          "Steady M15 activation at 55%% must keep the tighter +25%% floor (4285.92); got %.2f"
+          % a_tr2.sl_price)
     check(a_tr2.val[(3, 2)] == "55% Steady",
           "the card must show 'TS: 55%% Steady'; got %r" % a_tr2.val.get((3, 2)))
-    print("  ok  Rule 13 (Steady): 55% picked in a clear Steady trend, M15 gap widened x1.25")
+    # +56 pts = 65.1% of TP1 (step 65%): Steady trail reaches 65 - 37.81 = +27.19%
+    # (+23.38 pts -> 4285.93), overtaking the +25% floor and ratcheting upward
+    tr2.manage_auto_tick(bid=a_tr2.entry_price + 0.56, ask=a_tr2.entry_price + 0.58)
+    check(abs(a_tr2.trail_applied_pct - 65.0) < 1e-9 and abs(a_tr2.sl_price - 4285.93) < 1e-6,
+          "Steady M15 step 65%% must overtake +25%% floor to +27.19%% (4285.93); got %.2f"
+          % a_tr2.sl_price)
+    print("  ok  Rule 13 (Steady): +25% floor at 50%, 55% step keeps floor, 65% step overtakes (+27.19%)")
 
     # ------------------------------------------------------------------
     # 7. InpUseStopLoss = false: No initial SL placed; the pre-TP1
@@ -3075,6 +3148,110 @@ def main():
     check(sim_nosl.trailstop_label() == "Active" and sim_nosl.any_stoploss_on(),
           "After TP1 hits with InpUseStopLoss=false, header must show Trailstop : Active | Stoploss : On")
     print("  ok  InpUseStopLoss=false: no SL placed initially; the trail places it and TP1 keeps the trailed SL")
+
+    # ------------------------------------------------------------------
+    # 7b. Universal 3-Step Profit-Protection SL Ladder with Trailstop OFF
+    #     (50% TP1 -> +25% TP1, 100% TP1 -> +50% TP1, TP2 -> TP1)
+    # ------------------------------------------------------------------
+    for dir_sign in (+1, -1):
+        ms = AutoTraderSim(auto_trading=True, use_stop_loss=False, use_trail_stop=False)
+        ms.set_bar("M15", dir_sign, 3 * dir_sign, regime="Steady", bar_time=1000)
+        ms.update_plan()
+        ms.manage_auto_bar()
+        a_ms = ms.auto["M15"]
+        entry_ms = a_ms.entry_price
+        init_lot_ms = a_ms.cur_lot
+        check(a_ms.active and a_ms.is_open and a_ms.sl_price == 0.0 and a_ms.tp1_pts == 86,
+              "Trailstop=Off milestone test (%+d): M15 must open with SL=0.0 and tp1_pts=86" % dir_sign)
+        check(ms.trailstop_label() == "Off" and not ms.any_stoploss_on(),
+              "Trailstop=Off milestone test (%+d): header starts Trailstop Off | Stoploss Off" % dir_sign)
+
+        def tick_at_fav(fav_pts):
+            exit_p = ms.norm_price(entry_ms + dir_sign * fav_pts * 0.01)
+            if dir_sign > 0:
+                ms.manage_auto_tick(bid=exit_p, ask=ms.norm_price(exit_p + 0.02))
+            else:
+                ms.manage_auto_tick(bid=ms.norm_price(exit_p - 0.02), ask=exit_p)
+
+        # 42 pts (< 50% of 86 pts): SL stays 0.0
+        tick_at_fav(42)
+        check(a_ms.sl_price == 0.0 and not a_ms.tp1_hit,
+              "below 50%% of TP1 (%+d), SL must remain 0.0; got %.2f" % (dir_sign, a_ms.sl_price))
+
+        # 43 pts (50.0% of 86 pts): SL locks +25% of TP1 ahead of Entry (+22 pts), 100% lot kept
+        tick_at_fav(43)
+        want_25 = ms.norm_price(entry_ms + dir_sign * 0.22)
+        check(abs(a_ms.sl_price - want_25) < 1e-6 and a_ms.sl_pts == 22,
+              "at 50%% of TP1 (%+d), SL must lock +25%% (+22 pts = %.2f); got %.2f"
+              % (dir_sign, want_25, a_ms.sl_price))
+        check(not a_ms.tp1_hit and abs(a_ms.cur_lot - init_lot_ms) < 1e-9,
+              "at 50%% of TP1 (%+d), tp1_hit must stay False and 100%% lot remains" % dir_sign)
+        check(ms.trailstop_label() == "Off" and ms.any_stoploss_on()
+              and a_ms.clr.get((2, 1)) == "green",
+              "at +25%% lock (%+d), Trailstop stays Off, Stoploss becomes On, and SL cell turns green"
+              % dir_sign)
+
+        # 86 pts (100% of TP1): SL moves up to +50% of TP1 (+43 pts), 70% lot closes
+        tick_at_fav(86)
+        want_50 = ms.norm_price(entry_ms + dir_sign * 0.43)
+        want_after_70 = floor_lot_step(init_lot_ms - calc_tp1_close_lot(init_lot_ms, ms.spec), ms.spec)
+        check(a_ms.tp1_hit and not a_ms.tp2_hit
+              and abs(a_ms.sl_price - want_50) < 1e-6 and a_ms.sl_pts == 43,
+              "at 100%% of TP1 (%+d), SL must move to +50%% (+43 pts = %.2f); got %.2f"
+              % (dir_sign, want_50, a_ms.sl_price))
+        check(abs(a_ms.cur_lot - want_after_70) < 1e-9,
+              "at TP1 (%+d), 70%% partial close must leave %.2f lot; got %.2f"
+              % (dir_sign, want_after_70, a_ms.cur_lot))
+
+        # 115 pts (TP2 = 75% of 153-pt TP3): SL locks to TP1 (+86 pts), lot trims to 0.01
+        tick_at_fav(a_ms.tp2_pts)
+        want_100 = ms.norm_price(entry_ms + dir_sign * 0.86)
+        check(a_ms.tp2_hit and abs(a_ms.sl_price - want_100) < 1e-6 and a_ms.sl_pts == 86
+              and abs(a_ms.cur_lot - 0.01) < 1e-9,
+              "at TP2 (%+d), SL must lock to TP1 (%.2f) and lot trim to 0.01; got %.2f / %.2f"
+              % (dir_sign, want_100, a_ms.sl_price, a_ms.cur_lot))
+
+        # 153 pts (TP3 = 100%): full close, diary records protection without miscounting trail
+        tick_at_fav(a_ms.tp3_pts)
+        check(not a_ms.active, "at TP3 (%+d), position must close in full" % dir_sign)
+        ms_rec = ms.diary[0]
+        check(not ms_rec["use_trail_stop"] and not ms_rec["trail_armed"]
+              and ms_rec["protection_armed"]
+              and abs(ms_rec["best_lock_tp1_pct"] - 100.0) < 0.01
+              and ms_rec["tp1_hit"] and ms_rec["tp2_hit"] and ms_rec["tp3_hit"],
+              "diary with Trailstop=Off must keep trail_armed=False while recording protection_armed "
+              "and best_lock_tp1_pct=100%%; got %r" % ms_rec)
+
+    # Wide Stops Level guard & self-healing: if Stops Level is wider than 50% of TP1,
+    # ClampProfitFloorSL must refuse to place a loss-side SL behind Entry, clamp safely
+    # once in profit, and self-heal to the full +25% once live price clears Stops Level.
+    wide_spec = dict(SYMBOLS["XAUUSD-2d"], stops_level=50)   # 50-pt broker stops level
+    ms_wide = AutoTraderSim(spec=wide_spec, auto_trading=True,
+                            use_stop_loss=False, use_trail_stop=False)
+    ms_wide.set_bar("M15", 1, 3, regime="Steady", bar_time=1000)   # M15 tp1_pts=86, +25%=22 pts
+    ms_wide.update_plan()
+    ms_wide.manage_auto_bar()
+    a_w = ms_wide.auto["M15"]
+    entry_w = a_w.entry_price
+    # At +43 pts (50% of 86-pt TP1), bid - 50 pts = Entry - 7 pts (loss zone!): must NOT place!
+    ms_wide.manage_auto_tick(bid=ms_wide.norm_price(entry_w + 0.43),
+                             ask=ms_wide.norm_price(entry_w + 0.45))
+    check(a_w.sl_price == 0.0,
+          "wide Stops Level must never push a profit-protection floor behind Entry into a loss stop; got %.2f"
+          % a_w.sl_price)
+    # At +60 pts, bid - 50 pts = Entry + 10 pts (in profit, clamped below +22 pts): locks +10 pts
+    ms_wide.manage_auto_tick(bid=ms_wide.norm_price(entry_w + 0.60),
+                             ask=ms_wide.norm_price(entry_w + 0.62))
+    check(abs(a_w.sl_price - ms_wide.norm_price(entry_w + 0.10)) < 1e-6,
+          "when clamped in profit by Stops Level, floor locks available +10 pts; got %.2f"
+          % a_w.sl_price)
+    # At +72 pts (< 86-pt TP1), bid - 50 pts = Entry + 22 pts: self-heals to full +25% (+22 pts)!
+    ms_wide.manage_auto_tick(bid=ms_wide.norm_price(entry_w + 0.72),
+                             ask=ms_wide.norm_price(entry_w + 0.74))
+    check(abs(a_w.sl_price - ms_wide.norm_price(entry_w + 0.22)) < 1e-6,
+          "once live price clears wide Stops Level, the +25%% floor must self-heal to Entry+22 pts; got %.2f"
+          % a_w.sl_price)
+    print("  ok  Universal 3-step SL ladder (Trailstop=Off BUY/SELL + wide Stops Level guard + diary separation)")
 
     print("  ok  Rule 4, 7, 10, 11, 12: Candle updates, 2/3->3/3 upgrade, HOLD-in-profit close, and 2nd panel auto-close")
 

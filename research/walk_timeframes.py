@@ -27,7 +27,7 @@ def box(header_right, lines):
         return t.ljust(W)[:W]
 
     out = [" ┌" + "─" * W + "┐"]
-    head = "  SimpleEA"
+    head = "  SimpleEA2.0"
     out.append(" │" + inner(head + header_right.rjust(W - len(head) - 1) + " ") + "│")
     out.append(" ├" + "─" * W + "┤")
     for l in lines:
