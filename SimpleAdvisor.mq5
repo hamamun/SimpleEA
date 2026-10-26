@@ -44,24 +44,29 @@
 //|                LIMIT order.                                       |
 //|                                                                  |
 //|  4. REGIME     Rolling Hurst exponent (long-memory estimate).     |
-//|                Shown as Steady / Mixed / Choppy and used for HOW  |
-//|                a limit entry is priced - never for WHETHER the    |
-//|                row trades:                                        |
+//|                Shown as Steady / Mixed / Choppy.  The score still |
+//|                decides the would-be direction and order type; a   |
+//|                separate operator switch may veto NEW entries      |
+//|                while a row is Choppy:                             |
 //|                  Steady / Mixed : a limit waits half an ATR back  |
-//|                  Choppy         : a limit waits at the box band   |
-//|                A box that is unusable (too flat, price outside,   |
-//|                spread too wide) falls back to the pullback -      |
-//|                the score already said yes.                        |
+//|                  Choppy, allowed: a limit waits at the box band   |
+//|                                  or, with Range Mode off / a box  |
+//|                                  that is unusable, half an ATR    |
+//|                                  back                             |
+//|                  Choppy, Off    : no new market or limit order    |
+//|                A Choppy veto never closes a trade by itself: an   |
+//|                already-open trade keeps its normal management.    |
 //|                                                                  |
 //|  Score = vote1 + vote2 + vote3      (range -3 .. +3)              |
 //|      BUY  if score >= InpBuyScore     (+2 default)                |
 //|      SELL if score <= InpSellScore    (-2 default)                |
-//|      HOLD otherwise (and the plan block says WHY - dead market,   |
-//|                      or the score under the gate)                 |
-//|  ORDER TYPE, in every regime:                                     |
+//|      HOLD otherwise (the plan block says WHY - dead market,      |
+//|                      score under the gate, or Choppy Trade Off)   |
+//|  ORDER TYPE, once the Choppy permission allows the row:           |
 //|      3/3 (all three agree) -> MARKET order, taken now             |
 //|      2/3 (two agree)       -> LIMIT order, waiting for a price    |
 //|      under the gate        -> nothing                             |
+//|      Choppy + permission Off -> nothing, at 2/3 or 3/3            |
 //|                                                                  |
 //|  Kaufman's Efficiency Ratio acts as a dead-market gate: below     |
 //|  ER_DEAD   the market is not travelling anywhere, so any          |
@@ -106,8 +111,10 @@
 //|   - Strictly 1 active trade/order per timeframe (M5, M15, M30)    |
 //|     at a time, tracked by per-timeframe magic numbers.            |
 //|   - Market order at score 3/3; Pending Limit order at score 2/3 -  |
-//|     in EVERY regime (the regime only prices the limit: box band    |
-//|     on a Choppy row, half an ATR back otherwise).                  |
+//|     subject to InpAllowChoppyTrade.  Off vetoes every NEW order    |
+//|     on a Choppy row; On lets InpRangeMode choose the 2/3 entry    |
+//|     style (box band, or half an ATR back when Range Mode is off   |
+//|     or the box is unusable).                                      |
 //|   - M5 trades its own signal directly. M15/M30 are untied by      |
 //|     default; tie them with InpRequireM15M30SameTrend = true.      |
 //|   - Optional PC-local timer/pause: while OFF, no new orders are   |
@@ -152,7 +159,8 @@
 //|                   SL and TP1/TP2/TP3 to the new plan.             |
 //|        Score upgrades to 3/3 (same direction) -> deletes pending  |
 //|                   limit order and opens Market order immediately. |
-//|        Direction changes / HOLD / expiry -> cancels pending.      |
+//|        Direction changes / HOLD / Choppy veto / expiry -> cancels |
+//|                   pending.  The veto never closes an open trade.  |
 //|   - Second Panel ("Autotrading", right or bottom of Main Panel):  |
 //|        Controlled by InpAutoPanelPos (Bottom default, or Right).  |
 //|        Opens automatically when any market/pending order exists   |
@@ -161,6 +169,16 @@
 //|        | Stoploss On/Off | Symbol.                                |
 //|        Each card shows TP1/TP2/TP3/SL prices (with USD) and       |
 //|        the live gap to TP1 -> TP2 -> TP3 in points.               |
+//|   - Calibration-health diary: every order SimpleEA places leaves  |
+//|        one small record (score, regime, entry style, spread as a  |
+//|        share of TP1, furthest progress to TP1, TP1/TP2/TP3,       |
+//|        trailstop activation/lock/stop-exit/giveback and the final|
+//|        result in planned-risk units).  The header adds             |
+//|        today's S/W/L, each row gets one compact health label, and |
+//|        only a Poor lane adds one problem + first-fix line.  The   |
+//|        optional History panel (InpShowHealth, off by default)    |
+//|        opens the diary up per timeframe.  The diary never changes |
+//|        a setting by itself - it warns, and suggests what to test. |
 //|  -----------------------------------------------------------------|
 //|  HONEST NOTE ON EXPECTATION                                       |
 //|  -----------------------------------------------------------------|
@@ -172,8 +190,8 @@
 //|  information: it tells you when NOT to act.  See ReadMe.md.       |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
-#property version   "2.20"
-#property description "Multi-timeframe BUY/SELL/HOLD direction panel, trade plan and full-auto executor. M5 / M15 / M30 charts only."
+#property version   "2.22"
+#property description "Multi-timeframe BUY/SELL/HOLD direction panel, trade plan, full-auto executor and calibration-health diary. M5 / M15 / M30 charts only."
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -205,26 +223,35 @@ input int                 InpTrailPctTight  = 40;            // Trailstop % when
 input int                 InpTrailPctSteady = 55;            // Trailstop % in a Steady, clear trend (10-70)
 input long                InpMagicBase    = 202610;          // Base magic number (+0 M5, +1 M15, +2 M30)
 
-input group "=== Signal & range mode ==="
+input group "=== Signal, Choppy permission & range mode ==="
 input int      InpBuyScore    = 2;           // Score >= this  => BUY
 input int      InpSellScore   = -2;          // Score <= this  => SELL
 
-//  THE SCORE DECIDES WHETHER; THE REGIME ONLY DECIDES HOW.
-//  InpBuyScore / InpSellScore gate every order in every regime
-//  (ScoreAllowsTrade()), and the score also picks the order type:
-//  3/3 -> market, 2/3 -> limit.
-//  What the regime adds is where a LIMIT waits: on a Choppy row (H below
-//  the revert threshold - moves genuinely come back) the box band prices
-//  the limit (entry at the band, target = the midpoint, stop = band + 1
-//  ATR); on a Steady or Mixed row it waits half an ATR back from the
-//  market.  Every box number is a gate, not a guess; a box that fails one
-//  simply hands the limit back to the half-ATR pullback.
-//  Only the on/off switch is an input: "do I want chop traded at all" is
-//  a user preference.  The six numbers that define the box were inputs
-//  too until they stopped earning a decision - they are calibration, so
-//  they now live in THE RANGE PROFILE below, one value for all three
-//  timeframes, exactly like the trade profile.
-input bool     InpRangeMode    = true;       // Range mode: trade the box when choppy (default ON)
+//  TWO DIFFERENT CHOPPY QUESTIONS, TWO DIFFERENT SWITCHES.
+//  1) InpAllowChoppyTrade is PERMISSION: "may a row that currently reads
+//     Choppy open a new trade at all?"  False vetoes both a 2/3 limit and
+//     a 3/3 market order on that row and cancels a still-waiting pending
+//     when its row turns Choppy.  It never closes an already-open trade.
+//  2) InpRangeMode is ENTRY STYLE, consulted only after permission is
+//     given: on a Choppy 2/3, true lets a usable box price the limit;
+//     false (or an unusable box) uses the normal half-ATR pullback.
+//  InpBuyScore / InpSellScore still gate every order in every regime
+//  (ScoreAllowsTrade()), and the score still picks the order type:
+//  3/3 -> market, 2/3 -> limit.  The Main Panel's "Choppy Trade" value
+//  mirrors the PERMISSION switch, because that is what its words mean.
+input bool     InpAllowChoppyTrade = true;   // Allow Choppy trade (false = no NEW orders while a row is Choppy)
+//  What the regime adds, once permission is given, is where a LIMIT
+//  waits: on a Choppy row (H below the revert threshold - moves genuinely
+//  come back) Range Mode lets the box band price the limit (entry at the
+//  band, target = the midpoint, stop = band + 1 ATR); on a Steady or
+//  Mixed row it waits half an ATR back from the market.  Every box
+//  number is a gate, not a guess; a box that fails one simply hands the
+//  limit back to the half-ATR pullback.
+//  The six numbers that define the box were inputs too until they stopped
+//  earning a decision - they are calibration, so they now live in THE
+//  RANGE PROFILE below, one value for all three timeframes, exactly like
+//  the trade profile.
+input bool     InpRangeMode    = true;       // Range mode: box-band entry for an ALLOWED Choppy 2/3 (default ON)
 
 //  (No engine-settings group: the Precision Trend periods, the Hurst
 //  window and the efficiency-ratio numbers are STANDARD - they are the
@@ -256,6 +283,10 @@ input group "=== Panels & appearance ==="
 input int      InpPanelX      = 12;          // Panel X offset (px)
 input int      InpPanelY      = 24;          // Panel Y offset (px)
 input ENUM_AUTO_PANEL_POS InpAutoPanelPos = AUTO_POS_BOTTOM; // Right panel placement (Right or Bottom)
+//  The calibration diary below records whether the big History panel is
+//  shown or not.  This switch only opens that third panel; turning it
+//  on later therefore shows history that was already being collected.
+input bool     InpShowHealth   = false;    // Show History panel (diary always records)
 input int      InpFontSize    = 10;          // Font size
 input string   InpFont        = "Consolas";  // Font (monospaced aligns best)
 input color    InpBgColor     = C'48,48,48'; // Panel background
@@ -269,6 +300,7 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 //==================================================================
 #define OBJ_PREFIX  "SA_"
 #define AUTO_PREFIX "SA2_"
+#define HIST_PREFIX "SA3_"
 #define TF_COUNT    3
 #define TF_TEXT     "M5/M15/M30"
 #define TRAIL_STEP_PCT 5.0   // pre-TP1 trailstop: SL jumps this many % per step of progress
@@ -394,6 +426,23 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 #define AUTO_LBL_B  11     // label width in chars for Col B ("Distance: ")
 #define AUTO_LBL_C  5      // label width in chars for Col C ("Ask: " / "Bid: ")
 
+#define HIST_W_MIN  620    // minimum width for the optional History panel
+
+//  ---- THE CALIBRATION-HEALTH PROFILE (baked in, like the engine) ---
+//  Health is a judgement about evidence, not a user preference, so
+//  none of these is an input.  A lane is "Learning" until it owns 30
+//  fully closed diary trades; those 30 are then compared with the 30
+//  before them when they exist.  Subset verdicts (2/3 vs 3/3, box vs
+//  the rest) have their own floors so a handful of trades can never
+//  be promoted into a warning.  A result inside +/-0.05R is a scratch.
+#define DIARY_VERSION        1
+#define HEALTH_MIN_CLOSED    30
+#define HEALTH_RECENT_N      30
+#define HEALTH_BASE_N        30
+#define HEALTH_SCORE_MIN_EACH 10
+#define HEALTH_STYLE_MIN_EACH 15
+#define HEALTH_BE_EPS_R      0.05
+
 //  HISTORY DEPTH (no input - the engine sizes its own pull)
 //  BARS_BASE is the smallest pull and is enough for the default
 //  calibration.  BarsNeeded() raises it automatically whenever the
@@ -420,6 +469,8 @@ struct SRow
    double         tpAtr;      // take profit = this many ATR (per timeframe)
    // ---- the entry style and the reason, per row -----------------------
    int            mode;       // 0 plain limit/market entry, 2 the box prices the limit
+   bool           choppyBlocked;// score direction exists, but InpAllowChoppyTrade=false
+                                // on a Choppy row forbids a NEW entry (open trades stay managed)
    string         blockReason;// why this row is not trading ("" = quiet or no reason)
    double         rngTop;     // range box: upper band (valid while mode == 2)
    double         rngBot;     // range box: lower band (valid while mode == 2)
@@ -522,6 +573,7 @@ void ConfigureRow(int i, ENUM_TIMEFRAMES tf, string tag, string style,
    g_rows[i].hurst      = 0.5;
    g_rows[i].er         = 0.0;
    g_rows[i].mode       = 0;
+   g_rows[i].choppyBlocked = false;
    g_rows[i].blockReason = "";
    g_rows[i].rngTop     = 0.0;
    g_rows[i].rngBot     = 0.0;
@@ -620,6 +672,7 @@ int OnInit()
    //  and the notice one - whatever the font size.
    g_panelW = NoticeWidth();
 
+   DiaryInit();
    BuildPanel();
    InitAutoState();
 
@@ -644,6 +697,7 @@ int OnInit()
       EvaluateAll();
       UpdatePlan();
       ManageAutoBar();
+      DiaryReconcileOpenRecords();
       //  Cells BEFORE the panel: DrawSupportedPanel() ends with DrawAutoPanel(),
       //  and DrawAutoPanel() positions itself from g_panelW - which is only
       //  final once DrawPanel() has run.  So the cell text is formatted here
@@ -666,6 +720,7 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   DiaryFlushOpenSlots();
    DeletePanel();
 }
 
@@ -677,6 +732,7 @@ void OnTick()
    //  the EA for it.  On a wrong chart that call costs one comparison.
    CheckNewBars();
    CheckAutoTimerTransition();
+   CheckDiaryDayTransition();
 
    //  Real-time tick checks for TP1/TP2/TP3 partial closes, break-even SL,
    //  and live Ask/Bid/P&L updates on the 2nd Panel.
@@ -689,6 +745,7 @@ void OnTimer()
 {
    CheckNewBars();
    CheckAutoTimerTransition();
+   CheckDiaryDayTransition();
    if(ChartSupported() && g_panelOK)
       ManageAutoTick();
 }
@@ -1166,6 +1223,7 @@ void EvaluateAll()
          g_rows[r].direction    = 0;
          g_rows[r].trendDir     = 0;
          g_rows[r].mode         = 0;
+         g_rows[r].choppyBlocked = false;
          g_rows[r].blockReason  = "";
          g_rows[r].rngTop       = 0.0;
          g_rows[r].rngBot       = 0.0;
@@ -1193,6 +1251,7 @@ void EvaluateRow(int idx)
       g_rows[idx].direction    = 0;
       g_rows[idx].trendDir     = 0;
       g_rows[idx].mode         = 0;
+      g_rows[idx].choppyBlocked = false;
       g_rows[idx].blockReason  = "";
       g_rows[idx].rngTop       = 0.0;
       g_rows[idx].rngBot       = 0.0;
@@ -1209,8 +1268,9 @@ void EvaluateRow(int idx)
    int prevMode = g_rows[idx].mode;
 
    // ---- fresh state: nothing may leak from the previous bar --------
-   g_rows[idx].mode        = 0;
-   g_rows[idx].blockReason = "";
+   g_rows[idx].mode          = 0;
+   g_rows[idx].choppyBlocked = false;
+   g_rows[idx].blockReason   = "";
    g_rows[idx].rngTop      = 0.0;
    g_rows[idx].rngBot      = 0.0;
    g_rows[idx].lastClose   = c[last];
@@ -1243,12 +1303,17 @@ void EvaluateRow(int idx)
    int v3    = StructureVote(c, h, l, last, STRUCT_PERIOD, atrNow);
    int score = v1 + v2 + v3;
 
-   //  The regime is a LABEL and an ENTRY STYLE - never a permission.
+   //  The regime is a LABEL and an ENTRY STYLE.  The score publishes the
+   //  would-be direction exactly as InpBuyScore / InpSellScore say; the
+   //  operator's separate InpAllowChoppyTrade switch may then veto a
+   //  NEW entry on a Choppy row without erasing that direction, so a
+   //  trade already open keeps its normal score-based management.
    //     Steady (H > hTrend) : a limit entry waits half an ATR back
-   //     Choppy (H < hRevert): a limit entry waits at the far box band
+   //     Choppy (H < hRevert): an allowed limit waits at the box band,
+   //                           or half an ATR back when Range Mode is
+   //                           off / the box is unusable; permission
+   //                           Off places nothing at 2/3 or 3/3
    //     Mixed  (in between) : a limit entry waits half an ATR back
-   //  Whether the row trades at all is the SCORE's decision, in every
-   //  regime, exactly as InpBuyScore / InpSellScore say.
    double H    = HurstExponent(c, last, HURST_WINDOW);
    double ER   = EfficiencyRatio(c, last, ER_PERIOD);
    int    game = 0;                       // 0 mixed | 1 steady | 2 choppy
@@ -1270,14 +1335,25 @@ void EvaluateRow(int idx)
                                                 score, emDash, InpBuyScore, InpSellScore);
    }
 
-   // ---- the entry style: a Choppy 2/3 limit waits at the box band ----
-   //  mode 2 means "this limit's price comes from the box" - the only
-   //  thing the regime changes about the order.  A 3/3 order is a market
-   //  order everywhere (the box has no say in a market fill), and if the
-   //  box is not usable the limit simply falls back to the half-ATR
-   //  pullback.  Neither case blocks the trade: the score said yes.
+   // ---- the Choppy permission gate --------------------------------
+   //  Keep dir/score intact: the panel can show the would-be signal
+   //  greyed out, and an already-open same-direction trade must not be
+   //  mistaken for a HOLD/flip merely because NEW Choppy entries are
+   //  off.  UpdatePlanRow() publishes no executable plan for a flat or
+   //  pending lane while this flag is set, ManageAutoBar() cancels a
+   //  waiting pending, and PlacePlanOrder() checks it again.
+   bool choppyBlocked = (!InpAllowChoppyTrade && game == 2 && dir != 0);
+   if(choppyBlocked)
+      g_rows[idx].blockReason = "choppy " + emDash + " Choppy Trade is Off";
+
+   // ---- the entry style: an allowed Choppy 2/3 may use the box ----
+   //  mode 2 means "this limit's price comes from the box".  A 3/3 order
+   //  is a market order (the box has no say in a market fill), and if
+   //  the box is not usable an allowed limit falls back to the half-ATR
+   //  pullback.  A blocked row never enters box mode: there is no new
+   //  entry to price.
    int mode = 0;
-   if(dir != 0 && game == 2 && InpRangeMode && MathAbs(score) < 3)
+   if(dir != 0 && game == 2 && !choppyBlocked && InpRangeMode && MathAbs(score) < 3)
    {
       int    nb   = MathMax(5, RANGE_BARS);
       int    from = MathMax(0, n - nb);
@@ -1310,6 +1386,7 @@ void EvaluateRow(int idx)
    g_rows[idx].score     = score;
    g_rows[idx].direction = dir;
    g_rows[idx].trendDir  = v1;            // the TREND line: vote 1, not the trade
+   g_rows[idx].choppyBlocked = choppyBlocked;
    g_rows[idx].mode      = (dir != 0) ? mode : 0;
    g_rows[idx].hurst     = H;
    g_rows[idx].er        = ER;
@@ -1357,14 +1434,16 @@ void EvaluateRow(int idx)
 //     4. STOP   - stop loss   in points and in account currency
 //     5. UNTIL  - how long the reading is worth acting on
 //
-//  Entry type is decided by the score, not by the user, and the same in
-//  every regime:
+//  Entry type is decided by the score, once the operator's Choppy
+//  permission allows the row:
 //     score 3/3  -> all three components agree -> MARKET entry
 //     score 2/3  -> two of three agree        -> PENDING (wait for a better price)
-//  WHERE that pending waits is the only thing the regime changes: on a
-//  Choppy row it sits at the box band (target = half the box, band ->
-//  midpoint, stop = band + 1 ATR); anywhere else it sits half an ATR
-//  back from the market with the timeframe's ATR stop and target.
+//  WHERE an allowed pending waits is what the regime/Range Mode pair
+//  changes: on a Choppy row with Range Mode on and a usable box it sits
+//  at the box band (target = half the box, band -> midpoint, stop =
+//  band + 1 ATR); otherwise it sits half an ATR back from the market
+//  with the timeframe's ATR stop and target.  With Choppy permission
+//  off, a Choppy row has no executable plan at either score.
 //  (Measured behaviour of both is in research/HORIZON.md; the pending price
 //   is PEND_ATR (half an ATR) beyond the market, pushed out further only
 //   when the spread or the broker's stops level demands it.)
@@ -1554,6 +1633,28 @@ void UpdatePlanRow(int i)
       //  the classic "nothing to place".
       g_plans[i].note  = (g_rows[i].blockReason != "") ? g_rows[i].blockReason
                                                        : "nothing to place";
+      return;
+   }
+
+   //  Choppy Trade Off: publish no executable plan for a flat lane or a
+   //  lane whose order is still only a waiting pending.  The executor
+   //  will cancel that pending below.  The one exception is a position
+   //  ALREADY OPEN in this same direction: this switch is a new-entry
+   //  veto, not an exit rule, so its plan must stay alive for the same
+   //  closed-bar TP/SL management it had before the row turned Choppy.
+   //  PlacePlanOrder() still refuses outright while the flag is set, so
+   //  this management-only plan can never become a second/reverse order.
+   bool openSameDirForPlan = (g_auto[i].active && g_auto[i].isOpen &&
+                              g_auto[i].dir == g_rows[i].direction &&
+                              g_auto[i].entryPrice > 0.0);
+   if(g_rows[i].choppyBlocked && !openSameDirForPlan)
+   {
+      g_plans[i].state = 0;
+      g_plans[i].kind  = "HOLD";
+      string emDash = ShortToString((ushort)0x2014); // U+2014 em dash
+      g_plans[i].note  = (g_rows[i].blockReason != "")
+                         ? g_rows[i].blockReason
+                         : ("choppy " + emDash + " Choppy Trade is Off");
       return;
    }
 
@@ -1846,6 +1947,22 @@ struct SAutoState
    datetime fillBar;       // closed-bar timestamp when the position filled/opened
    datetime lastEvalBar;   // last closed bar on which SL/TP update was evaluated
    datetime lastSignalBar; // closed-bar timestamp on which a trade was opened
+   // ---- calibration-health diary link for this order idea -------------
+   long     diaryRecordId;    // SDiaryRecord.id (0 = untracked/pre-diary)
+   ulong    diaryPositionId;  // MT5 position identifier once filled
+   long     diaryPlacedDayKey;// PC-local YYYYMMDD at original placement
+   int      diaryPlanSlPts;   // planned stop distance: the 1R denominator
+   int      diaryRegime;      // 0 Mixed, 1 Steady, 2 Choppy at placement
+   int      diaryStyle;       // market / pullback / box / Choppy variant
+   datetime diaryPlacedAt;    // broker-server placement time
+   datetime diaryLocalPlaced; // PC-local placement time
+   double   diaryCostTp1Pct;  // entry spread as % of TP1 distance
+   double   diaryPeakTp1Pct;  // furthest favourable progress as % of TP1
+   double   diaryDealNet;     // deal-history net found so far
+   double   diaryDealVolume;  // original volume already closed in deals
+   ulong    diaryLastDeal;    // last deal time found (diagnostic only)
+   double   diaryLastExitPrice; // last closing-deal price found in history
+   long     diaryLastExitReason; // DEAL_REASON of that deal (-1 = unknown)
    // ---- formatted cells for the 2nd Panel (Autotrading) ---------------
    string   head;          // "M5  | OPEN SELL" / "M30 | BUY LIMIT"
    color    headClr;
@@ -1892,6 +2009,30 @@ void SaveAutoSlotState(int i)
       GlobalVariableSet(AutoGVKey(i, "score"), (double)g_auto[i].entryScore);
    if(g_auto[i].placedBar > 0)
       GlobalVariableSet(AutoGVKey(i, "placed"), (double)g_auto[i].placedBar);
+   if(g_auto[i].diaryRecordId > 0)
+   {
+      GlobalVariableSet(AutoGVKey(i, "drec"),   (double)g_auto[i].diaryRecordId);
+      GlobalVariableSet(AutoGVKey(i, "dday"),   (double)g_auto[i].diaryPlacedDayKey);
+      GlobalVariableSet(AutoGVKey(i, "dsl"),    (double)g_auto[i].diaryPlanSlPts);
+      GlobalVariableSet(AutoGVKey(i, "dreg"),   (double)g_auto[i].diaryRegime);
+      GlobalVariableSet(AutoGVKey(i, "dsty"),   (double)g_auto[i].diaryStyle);
+      GlobalVariableSet(AutoGVKey(i, "dat"),    (double)g_auto[i].diaryPlacedAt);
+      GlobalVariableSet(AutoGVKey(i, "dlocal"), (double)g_auto[i].diaryLocalPlaced);
+      GlobalVariableSet(AutoGVKey(i, "dcost"),  g_auto[i].diaryCostTp1Pct);
+      GlobalVariableSet(AutoGVKey(i, "dpeak"),  g_auto[i].diaryPeakTp1Pct);
+   }
+   else
+   {
+      GlobalVariableDel(AutoGVKey(i, "drec"));
+      GlobalVariableDel(AutoGVKey(i, "dday"));
+      GlobalVariableDel(AutoGVKey(i, "dsl"));
+      GlobalVariableDel(AutoGVKey(i, "dreg"));
+      GlobalVariableDel(AutoGVKey(i, "dsty"));
+      GlobalVariableDel(AutoGVKey(i, "dat"));
+      GlobalVariableDel(AutoGVKey(i, "dlocal"));
+      GlobalVariableDel(AutoGVKey(i, "dcost"));
+      GlobalVariableDel(AutoGVKey(i, "dpeak"));
+   }
    GlobalVariablesFlush();
 }
 
@@ -1902,6 +2043,15 @@ void ClearAutoSlotState(int i)
    GlobalVariableDel(AutoGVKey(i, "bot"));
    GlobalVariableDel(AutoGVKey(i, "score"));
    GlobalVariableDel(AutoGVKey(i, "placed"));
+   GlobalVariableDel(AutoGVKey(i, "drec"));
+   GlobalVariableDel(AutoGVKey(i, "dday"));
+   GlobalVariableDel(AutoGVKey(i, "dsl"));
+   GlobalVariableDel(AutoGVKey(i, "dreg"));
+   GlobalVariableDel(AutoGVKey(i, "dsty"));
+   GlobalVariableDel(AutoGVKey(i, "dat"));
+   GlobalVariableDel(AutoGVKey(i, "dlocal"));
+   GlobalVariableDel(AutoGVKey(i, "dcost"));
+   GlobalVariableDel(AutoGVKey(i, "dpeak"));
    GlobalVariablesFlush();
 }
 
@@ -1919,7 +2069,2207 @@ void RestoreAutoSlotState(int i)
       g_auto[i].entryScore = (int)MathRound(GlobalVariableGet(AutoGVKey(i, "score")));
    if(GlobalVariableCheck(AutoGVKey(i, "placed")))
       g_auto[i].placedBar = (datetime)GlobalVariableGet(AutoGVKey(i, "placed"));
+   if(GlobalVariableCheck(AutoGVKey(i, "drec")))
+      g_auto[i].diaryRecordId = (long)MathRound(GlobalVariableGet(AutoGVKey(i, "drec")));
+   if(GlobalVariableCheck(AutoGVKey(i, "dday")))
+      g_auto[i].diaryPlacedDayKey = (long)MathRound(GlobalVariableGet(AutoGVKey(i, "dday")));
+   if(GlobalVariableCheck(AutoGVKey(i, "dsl")))
+      g_auto[i].diaryPlanSlPts = (int)MathRound(GlobalVariableGet(AutoGVKey(i, "dsl")));
+   if(GlobalVariableCheck(AutoGVKey(i, "dreg")))
+      g_auto[i].diaryRegime = (int)MathRound(GlobalVariableGet(AutoGVKey(i, "dreg")));
+   if(GlobalVariableCheck(AutoGVKey(i, "dsty")))
+      g_auto[i].diaryStyle = (int)MathRound(GlobalVariableGet(AutoGVKey(i, "dsty")));
+   if(GlobalVariableCheck(AutoGVKey(i, "dat")))
+      g_auto[i].diaryPlacedAt = (datetime)GlobalVariableGet(AutoGVKey(i, "dat"));
+   if(GlobalVariableCheck(AutoGVKey(i, "dlocal")))
+      g_auto[i].diaryLocalPlaced = (datetime)GlobalVariableGet(AutoGVKey(i, "dlocal"));
+   if(GlobalVariableCheck(AutoGVKey(i, "dcost")))
+      g_auto[i].diaryCostTp1Pct = GlobalVariableGet(AutoGVKey(i, "dcost"));
+   if(GlobalVariableCheck(AutoGVKey(i, "dpeak")))
+      g_auto[i].diaryPeakTp1Pct = GlobalVariableGet(AutoGVKey(i, "dpeak"));
 }
+
+//==================================================================
+//  CALIBRATION-HEALTH DIARY
+//==================================================================
+//  The diary gives the fixed calibration a memory, not a second
+//  brain.  It records one small row for each original order idea
+//  that SimpleEA actually acted on, then derives Day totals and
+//  per-timeframe health warnings from those rows.  It never changes
+//  a target, a stop, a score rule, a risk setting or a switch.
+//
+//  One row means one original idea:
+//     - a pending that is merely repriced stays the same row;
+//     - a 2/3 pending upgraded to a 3/3 market order stays one row;
+//     - TP1/TP2 partial exits stay inside the original row;
+//     - S is written only after the broker accepted an order.
+//
+//  The file is per account + symbol + magic base.  Recording runs
+//  whether InpShowHealth shows the History panel or not, so turning
+//  that panel on later does not start the evidence from zero.  A
+//  position that already existed before this diary first ran has no
+//  row and is deliberately left untracked rather than reconstructed
+//  from guesses.
+//+------------------------------------------------------------------+
+struct SDiaryRecord
+{
+   long     id;
+   int      tf;              // 0 M5, 1 M15, 2 M30
+   int      dir;             // +1 buy, -1 sell
+   int      score;           // signed score frozen at placement / upgrade
+   int      regime;          // 0 Mixed, 1 Steady, 2 Choppy
+   int      style;           // 0 market, 1 pullback, 2 box, 3 Choppy pullback, 4 Choppy market
+   int      status;          // 0 open/waiting, 1 closed, 2 expired/cancelled unfilled
+   int      outcome;         // 0 none, 1 win, 2 loss, 3 break-even/scratch
+   long     placedDay;       // PC-local YYYYMMDD when the idea was placed
+   long     closedDay;       // PC-local YYYYMMDD when it closed/expired
+   datetime placedAt;        // broker-server placement time
+   datetime closedAt;        // broker-server close/expiry time
+   datetime localPlaced;     // PC-local placement time
+   datetime localClosed;     // PC-local close/expiry time
+   ulong    orderTicket;     // pending order ticket, or market order ticket
+   ulong    positionId;      // MT5 position identifier once filled
+   double   lot;             // original lot, before partial exits
+   double   entryPrice;      // actual/planned entry carried by the slot
+   int      planSlPts;       // planned stop distance that defines 1R
+   int      tp1Pts;
+   int      tp2Pts;
+   int      tp3Pts;
+   double   costTp1Pct;      // entry spread as % of the TP1 distance
+   double   peakTp1Pct;      // furthest favourable progress as % of TP1
+   double   resultR;         // final net result in planned-risk units
+   bool     filled;
+   bool     tp1Hit;
+   bool     tp2Hit;
+   bool     tp3Hit;
+   double   riskPct;         // base InpRiskPct in force at placement
+   bool     useRisk;
+   bool     useMinLot;
+   bool     useStopLoss;
+   bool     useTrailStop;
+   bool     allowChoppy;
+   bool     rangeMode;
+   double   pointValue;      // account-currency value of 1 point x 1 lot at placement
+   string   exitReason;      // compact token, never contains ';'
+   bool     provisional;     // closed before the final deal reached history
+   int      trailPct;        // activation % chosen at fill (0 = off/unknown)
+   bool     trailSteady;     // true when the Steady trail % was chosen
+   bool     trailKnown;      // live filled slot was observed by the diary
+   bool     trailArmed;      // pre-TP1 stepped trailstop applied at least once
+   bool     protectionArmed; // BE / TP lock / trail protection became active
+   double   trailLockTp1Pct; // best pre-TP1 trailed SL as % of TP1 (-1 = none)
+   double   bestLockTp1Pct;  // best broker SL as % of TP1 (-9999 = none seen)
+   double   finalTp1Pct;     // final exit progress as % of TP1 (-9999 = unknown)
+   bool     stopExit;        // final closing deal was triggered by broker SL
+   bool     stopKnown;       // final closing-deal reason was found in history
+};
+
+struct SDiaryTotals
+{
+   int    signals;
+   int    wins;
+   int    losses;
+   int    be;
+   int    openCount;
+   int    waitCount;
+   int    expired;
+   double netR;
+};
+
+struct SDiaryClosed
+{
+   int    scoreAbs;
+   int    regime;
+   int    style;
+   int    outcome;
+   double peakTp1Pct;
+   double costTp1Pct;
+   double resultR;
+   bool   tp1Hit;
+   bool   tp2Hit;
+   bool   tp3Hit;
+   bool   useTrailStop;
+   bool   trailKnown;
+   bool   trailArmed;
+   bool   protectionArmed;
+   double trailLockTp1Pct;
+   double bestLockTp1Pct;
+   double finalTp1Pct;
+   bool   stopExit;
+   bool   stopKnown;
+};
+
+struct SDiarySegment
+{
+   int    n;
+   int    wins;
+   int    losses;
+   int    be;
+   int    tp1;
+   int    tp2;
+   int    tp3;
+   int    nearCount;       // reached 70%..99% of TP1 without taking it
+   int    costN;
+   double netR;
+   double tp1Rate;
+   double medianPeak;
+   double medianCost;
+   int    trailEligible;   // closed, trailstop on, and trail state observed
+   int    trailArmed;
+   int    trailLockN;
+   int    trailStopKnown;
+   int    trailStopExits;
+   int    trailGivebackN;
+   double trailArmRate;
+   double medianTrailLock;
+   double medianTrailGiveback;
+};
+
+struct SHealthLane
+{
+   int    signals;
+   int    wins;
+   int    losses;
+   int    be;
+   int    openCount;
+   int    waitCount;
+   int    expired;
+   int    closedCount;
+   double netR;
+
+   int    score2Signals;
+   int    score2Closed;
+   int    score2Wins;
+   int    score2Losses;
+   int    score2Tp1;
+   int    score3Signals;
+   int    score3Closed;
+   int    score3Wins;
+   int    score3Losses;
+   int    score3Tp1;
+
+   SDiaryClosed recent[HEALTH_RECENT_N + HEALTH_BASE_N];
+   int    recentCount;
+   int    recN;
+   int    recWins;
+   int    recLosses;
+   int    recBe;
+   int    recTp1;
+   int    recTp2;
+   int    recTp3;
+   int    recCostN;
+   double recNetR;
+   double recTp1Rate;
+   double recMedianPeak;
+   double recMedianCost;
+   int    baseN;
+   double baseTp1Rate;
+   double baseMedianCost;
+   int    recTrailEligible;
+   int    recTrailArmed;
+   int    recTrailLockN;
+   int    recTrailStopKnown;
+   int    recTrailStopExits;
+   int    recTrailGivebackN;
+   double recTrailArmRate;
+   double recTrailMedianLock;
+   double recTrailMedianGiveback;
+
+   int    status;          // -1 Learning, 0 OK, 1 Watch, 2 Poor
+   int    primaryIssue;    // 0 none, 1 follow-near, 2 follow-weak, 3 cost, 4 score, 5 box, 6 choppy
+   int    issueCount;
+   int    followLevel;     // 0 ok, 1 watch, 2 poor
+   int    costLevel;
+   int    scoreLevel;
+   int    styleLevel;
+   string label;
+   string action;
+   string note;
+};
+
+struct SDiaryUpgrade
+{
+   bool     active;
+   long     recordId;
+   long     placedDay;
+   datetime placedAt;
+   datetime localPlaced;
+   int      regime;
+};
+
+SDiaryRecord  g_diary[];
+SDiaryTotals  g_dayTotals;
+SDiaryTotals  g_allTotals;
+SHealthLane   g_health[TF_COUNT];
+SDiaryUpgrade g_diaryUpgrade[TF_COUNT];
+
+bool     g_diaryReady          = false;
+bool     g_diaryWarned         = false;
+bool     g_diaryLoadFailed     = false;   // existing file unreadable: never overwrite it blind
+bool     g_diarySuppress[TF_COUNT];
+string   g_diaryFile           = "";
+int      g_diaryCommonFlag     = 0;
+long     g_diaryNextId         = 1;
+datetime g_diaryStarted        = 0;
+long     g_diaryStartedDay     = 0;
+long     g_healthTodayKey      = 0;
+
+//+------------------------------------------------------------------+
+datetime DiaryNowLocal()
+{
+   datetime t = TimeLocal();
+   if(t <= 0) t = TimeCurrent();
+   return(t);
+}
+
+//+------------------------------------------------------------------+
+long DiaryDayKey(datetime t)
+{
+   if(t <= 0) return(0);
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+   return((long)dt.year * 10000 + (long)dt.mon * 100 + (long)dt.day);
+}
+
+//+------------------------------------------------------------------+
+//  Convert a broker-server event time to the PC-local clock by the
+//  offset in force now.  Used only when a broker-side close is found
+//  in deal history after the EA was away; live closes use TimeLocal()
+//  at the moment they happen.
+//+------------------------------------------------------------------+
+datetime DiaryLocalFromServer(datetime serverTime)
+{
+   if(serverTime <= 0) return(DiaryNowLocal());
+   long delta = (long)serverTime - (long)TimeCurrent();
+   return((datetime)((long)DiaryNowLocal() + delta));
+}
+
+//+------------------------------------------------------------------+
+string DiaryFileName()
+{
+   string safe = "";
+   int len = StringLen(_Symbol);
+   for(int k = 0; k < len; k++)
+   {
+      ushort ch = StringGetCharacter(_Symbol, k);
+      bool ok = ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                 (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '_');
+      safe += ok ? CharToString(ch) : "_";
+   }
+   if(safe == "") safe = "SYMBOL";
+   return(StringFormat("SimpleEA_Diary_%I64d_%s_%I64d.csv",
+                       AccountInfoInteger(ACCOUNT_LOGIN), safe, InpMagicBase));
+}
+
+//+------------------------------------------------------------------+
+int DiaryRecordIndexById(long id)
+{
+   if(id <= 0) return(-1);
+   int n = ArraySize(g_diary);
+   for(int k = 0; k < n; k++)
+      if(g_diary[k].id == id)
+         return(k);
+   return(-1);
+}
+
+//+------------------------------------------------------------------+
+string DiaryRecordLine(SDiaryRecord &r)
+{
+   string s = IntegerToString(DIARY_VERSION) + ";";
+   s += IntegerToString(r.id) + ";";
+   s += IntegerToString(r.tf) + ";";
+   s += IntegerToString(r.dir) + ";";
+   s += IntegerToString(r.score) + ";";
+   s += IntegerToString(r.regime) + ";";
+   s += IntegerToString(r.style) + ";";
+   s += IntegerToString(r.status) + ";";
+   s += IntegerToString(r.outcome) + ";";
+   s += IntegerToString(r.placedDay) + ";";
+   s += IntegerToString(r.closedDay) + ";";
+   s += IntegerToString((long)r.placedAt) + ";";
+   s += IntegerToString((long)r.closedAt) + ";";
+   s += IntegerToString((long)r.localPlaced) + ";";
+   s += IntegerToString((long)r.localClosed) + ";";
+   s += IntegerToString((long)r.orderTicket) + ";";
+   s += IntegerToString((long)r.positionId) + ";";
+   s += DoubleToString(r.lot, 8) + ";";
+   s += DoubleToString(r.entryPrice, 8) + ";";
+   s += IntegerToString(r.planSlPts) + ";";
+   s += IntegerToString(r.tp1Pts) + ";";
+   s += IntegerToString(r.tp2Pts) + ";";
+   s += IntegerToString(r.tp3Pts) + ";";
+   s += DoubleToString(r.costTp1Pct, 4) + ";";
+   s += DoubleToString(r.peakTp1Pct, 4) + ";";
+   s += DoubleToString(r.resultR, 6) + ";";
+   s += IntegerToString(r.filled ? 1 : 0) + ";";
+   s += IntegerToString(r.tp1Hit ? 1 : 0) + ";";
+   s += IntegerToString(r.tp2Hit ? 1 : 0) + ";";
+   s += IntegerToString(r.tp3Hit ? 1 : 0) + ";";
+   s += DoubleToString(r.riskPct, 6) + ";";
+   s += IntegerToString(r.useRisk ? 1 : 0) + ";";
+   s += IntegerToString(r.useMinLot ? 1 : 0) + ";";
+   s += IntegerToString(r.useStopLoss ? 1 : 0) + ";";
+   s += IntegerToString(r.useTrailStop ? 1 : 0) + ";";
+   s += IntegerToString(r.allowChoppy ? 1 : 0) + ";";
+   s += IntegerToString(r.rangeMode ? 1 : 0) + ";";
+   s += r.exitReason + ";";
+   s += IntegerToString(r.provisional ? 1 : 0) + ";";
+   s += DoubleToString(r.pointValue, 10) + ";";
+   s += IntegerToString(r.trailPct) + ";";
+   s += IntegerToString(r.trailSteady ? 1 : 0) + ";";
+   s += IntegerToString(r.trailKnown ? 1 : 0) + ";";
+   s += IntegerToString(r.trailArmed ? 1 : 0) + ";";
+   s += IntegerToString(r.protectionArmed ? 1 : 0) + ";";
+   s += DoubleToString(r.trailLockTp1Pct, 4) + ";";
+   s += DoubleToString(r.bestLockTp1Pct, 4) + ";";
+   s += DoubleToString(r.finalTp1Pct, 4) + ";";
+   s += IntegerToString(r.stopExit ? 1 : 0) + ";";
+   s += IntegerToString(r.stopKnown ? 1 : 0);
+   return(s);
+}
+
+//+------------------------------------------------------------------+
+bool DiaryParseRecordLine(string line, SDiaryRecord &r)
+{
+   string p[];
+   int n = StringSplit(line, ';', p);
+   if(n < 40) return(false);
+   if(StringToInteger(p[0]) != DIARY_VERSION) return(false);
+
+   r.id            = StringToInteger(p[1]);
+   r.tf            = (int)StringToInteger(p[2]);
+   r.dir           = (int)StringToInteger(p[3]);
+   r.score         = (int)StringToInteger(p[4]);
+   r.regime        = (int)StringToInteger(p[5]);
+   r.style         = (int)StringToInteger(p[6]);
+   r.status        = (int)StringToInteger(p[7]);
+   r.outcome       = (int)StringToInteger(p[8]);
+   r.placedDay     = StringToInteger(p[9]);
+   r.closedDay     = StringToInteger(p[10]);
+   r.placedAt      = (datetime)StringToInteger(p[11]);
+   r.closedAt      = (datetime)StringToInteger(p[12]);
+   r.localPlaced   = (datetime)StringToInteger(p[13]);
+   r.localClosed   = (datetime)StringToInteger(p[14]);
+   r.orderTicket   = (ulong)StringToInteger(p[15]);
+   r.positionId    = (ulong)StringToInteger(p[16]);
+   r.lot           = StringToDouble(p[17]);
+   r.entryPrice    = StringToDouble(p[18]);
+   r.planSlPts     = (int)StringToInteger(p[19]);
+   r.tp1Pts        = (int)StringToInteger(p[20]);
+   r.tp2Pts        = (int)StringToInteger(p[21]);
+   r.tp3Pts        = (int)StringToInteger(p[22]);
+   r.costTp1Pct    = StringToDouble(p[23]);
+   r.peakTp1Pct    = StringToDouble(p[24]);
+   r.resultR       = StringToDouble(p[25]);
+   r.filled        = (StringToInteger(p[26]) != 0);
+   r.tp1Hit        = (StringToInteger(p[27]) != 0);
+   r.tp2Hit        = (StringToInteger(p[28]) != 0);
+   r.tp3Hit        = (StringToInteger(p[29]) != 0);
+   r.riskPct       = StringToDouble(p[30]);
+   r.useRisk       = (StringToInteger(p[31]) != 0);
+   r.useMinLot     = (StringToInteger(p[32]) != 0);
+   r.useStopLoss   = (StringToInteger(p[33]) != 0);
+   r.useTrailStop  = (StringToInteger(p[34]) != 0);
+   r.allowChoppy   = (StringToInteger(p[35]) != 0);
+   r.rangeMode     = (StringToInteger(p[36]) != 0);
+   r.exitReason    = p[37];
+   r.provisional   = (StringToInteger(p[38]) != 0);
+   r.pointValue    = StringToDouble(p[39]);
+
+   //  Rows written before trailstop performance was recorded end at
+   //  p[39].  They load with the trail state unknown, never invented.
+   r.trailPct        = 0;
+   r.trailSteady     = false;
+   r.trailKnown      = false;
+   r.trailArmed      = false;
+   r.protectionArmed = false;
+   r.trailLockTp1Pct = -1.0;
+   r.bestLockTp1Pct  = -9999.0;
+   r.finalTp1Pct     = -9999.0;
+   r.stopExit        = false;
+   r.stopKnown       = false;
+   if(n > 40) r.trailPct        = (int)StringToInteger(p[40]);
+   if(n > 41) r.trailSteady     = (StringToInteger(p[41]) != 0);
+   if(n > 42) r.trailKnown      = (StringToInteger(p[42]) != 0);
+   if(n > 43) r.trailArmed      = (StringToInteger(p[43]) != 0);
+   if(n > 44) r.protectionArmed = (StringToInteger(p[44]) != 0);
+   if(n > 45) r.trailLockTp1Pct = StringToDouble(p[45]);
+   if(n > 46) r.bestLockTp1Pct  = StringToDouble(p[46]);
+   if(n > 47) r.finalTp1Pct     = StringToDouble(p[47]);
+   if(n > 48) r.stopExit        = (StringToInteger(p[48]) != 0);
+   if(n > 49) r.stopKnown       = (StringToInteger(p[49]) != 0);
+   return(r.id > 0 && r.tf >= 0 && r.tf < TF_COUNT);
+}
+
+//+------------------------------------------------------------------+
+//  Rewrite through a temporary file, then move it over the diary, so
+//  a terminal stopped halfway through a save leaves either the old
+//  diary or the new one - never half a line of each.
+//+------------------------------------------------------------------+
+bool DiarySave()
+{
+   if(g_diaryFile == "" || g_diaryLoadFailed) return(false);
+   string tmp = g_diaryFile + ".tmp";
+   int h = FileOpen(tmp, FILE_WRITE | FILE_TXT | FILE_ANSI | g_diaryCommonFlag);
+   if(h == INVALID_HANDLE)
+   {
+      if(!g_diaryWarned)
+      {
+         g_diaryWarned = true;
+         PrintFormat("SimpleEA: calibration diary could not be written (%s, error %d). "
+                     "Trading is unaffected; health history is being kept in memory only.",
+                     g_diaryFile, GetLastError());
+      }
+      return(false);
+   }
+
+   string meta = "#;" + IntegerToString(DIARY_VERSION) + ";" +
+                 IntegerToString((long)g_diaryStarted) + ";" +
+                 IntegerToString(g_diaryStartedDay) + ";" + _Symbol;
+   bool writeOk = (FileWriteString(h, meta + "\r\n") > 0);
+   int n = ArraySize(g_diary);
+   for(int k = 0; k < n && writeOk; k++)
+      writeOk = (FileWriteString(h, DiaryRecordLine(g_diary[k]) + "\r\n") > 0);
+   int writeErr = writeOk ? 0 : GetLastError();
+   FileClose(h);
+   if(!writeOk)
+   {
+      FileDelete(tmp, g_diaryCommonFlag);
+      if(!g_diaryWarned)
+      {
+         g_diaryWarned = true;
+         PrintFormat("SimpleEA: calibration diary write was incomplete (%s, error %d); "
+                     "the previous diary file was left untouched.",
+                     g_diaryFile, writeErr);
+      }
+      return(false);
+   }
+
+   //  FILE_REWRITE replaces the destination as part of the move; do
+   //  not delete the only good diary first and open a crash window in
+   //  which neither the old file nor the new one has its real name.
+   if(!FileMove(tmp, g_diaryCommonFlag, g_diaryFile,
+                FILE_REWRITE | g_diaryCommonFlag))
+   {
+      if(!g_diaryWarned)
+      {
+         g_diaryWarned = true;
+         PrintFormat("SimpleEA: calibration diary save could not be completed (%s, error %d).",
+                     g_diaryFile, GetLastError());
+      }
+      return(false);
+   }
+   return(true);
+}
+
+//+------------------------------------------------------------------+
+void DiaryResetTotals(SDiaryTotals &t)
+{
+   t.signals   = 0;
+   t.wins      = 0;
+   t.losses    = 0;
+   t.be        = 0;
+   t.openCount = 0;
+   t.waitCount = 0;
+   t.expired   = 0;
+   t.netR      = 0.0;
+}
+
+//+------------------------------------------------------------------+
+void DiaryResetLane(int i)
+{
+   g_health[i].signals       = 0;
+   g_health[i].wins          = 0;
+   g_health[i].losses        = 0;
+   g_health[i].be            = 0;
+   g_health[i].openCount     = 0;
+   g_health[i].waitCount     = 0;
+   g_health[i].expired       = 0;
+   g_health[i].closedCount   = 0;
+   g_health[i].netR          = 0.0;
+   g_health[i].score2Signals = 0;
+   g_health[i].score2Closed  = 0;
+   g_health[i].score2Wins    = 0;
+   g_health[i].score2Losses  = 0;
+   g_health[i].score2Tp1     = 0;
+   g_health[i].score3Signals = 0;
+   g_health[i].score3Closed  = 0;
+   g_health[i].score3Wins    = 0;
+   g_health[i].score3Losses  = 0;
+   g_health[i].score3Tp1     = 0;
+   g_health[i].recentCount   = 0;
+   g_health[i].recN          = 0;
+   g_health[i].recWins       = 0;
+   g_health[i].recLosses     = 0;
+   g_health[i].recBe         = 0;
+   g_health[i].recTp1        = 0;
+   g_health[i].recTp2        = 0;
+   g_health[i].recTp3        = 0;
+   g_health[i].recCostN      = 0;
+   g_health[i].recNetR       = 0.0;
+   g_health[i].recTp1Rate    = -1.0;
+   g_health[i].recMedianPeak = -1.0;
+   g_health[i].recMedianCost = -1.0;
+   g_health[i].baseN         = 0;
+   g_health[i].baseTp1Rate   = -1.0;
+   g_health[i].baseMedianCost = -1.0;
+   g_health[i].recTrailEligible = 0;
+   g_health[i].recTrailArmed = 0;
+   g_health[i].recTrailLockN = 0;
+   g_health[i].recTrailStopKnown = 0;
+   g_health[i].recTrailStopExits = 0;
+   g_health[i].recTrailGivebackN = 0;
+   g_health[i].recTrailArmRate = -1.0;
+   g_health[i].recTrailMedianLock = -1.0;
+   g_health[i].recTrailMedianGiveback = -1.0;
+   g_health[i].status        = -1;
+   g_health[i].primaryIssue  = 0;
+   g_health[i].issueCount    = 0;
+   g_health[i].followLevel   = 0;
+   g_health[i].costLevel     = 0;
+   g_health[i].scoreLevel    = 0;
+   g_health[i].styleLevel    = 0;
+   g_health[i].label         = "Health: Learning";
+   g_health[i].action        = "Keep collecting; health starts at 30 closed trades.";
+   g_health[i].note          = "";
+}
+
+//+------------------------------------------------------------------+
+void DiaryComputeSegment(int lane, int start, int count, SDiarySegment &seg)
+{
+   seg.n         = 0;
+   seg.wins      = 0;
+   seg.losses    = 0;
+   seg.be        = 0;
+   seg.tp1       = 0;
+   seg.tp2       = 0;
+   seg.tp3       = 0;
+   seg.nearCount = 0;
+   seg.costN     = 0;
+   seg.netR      = 0.0;
+   seg.tp1Rate   = -1.0;
+   seg.medianPeak = -1.0;
+   seg.medianCost = -1.0;
+   seg.trailEligible = 0;
+   seg.trailArmed = 0;
+   seg.trailLockN = 0;
+   seg.trailStopKnown = 0;
+   seg.trailStopExits = 0;
+   seg.trailGivebackN = 0;
+   seg.trailArmRate = -1.0;
+   seg.medianTrailLock = -1.0;
+   seg.medianTrailGiveback = -1.0;
+   if(count <= 0 || start < 0 || start >= g_health[lane].recentCount)
+      return;
+   if(start + count > g_health[lane].recentCount)
+      count = g_health[lane].recentCount - start;
+
+   double peaks[];
+   double costs[];
+   double trailLocks[];
+   double trailGivebacks[];
+   ArrayResize(peaks, count);
+   ArrayResize(costs, count);
+   ArrayResize(trailLocks, count);
+   ArrayResize(trailGivebacks, count);
+   int peakN = 0;
+   int costN = 0;
+   int trailLockN = 0;
+   int trailGivebackN = 0;
+
+   for(int k = 0; k < count; k++)
+   {
+      SDiaryClosed c = g_health[lane].recent[start + k];
+      seg.n++;
+      if(c.outcome == 1) seg.wins++;
+      else if(c.outcome == 2) seg.losses++;
+      else if(c.outcome == 3) seg.be++;
+      if(c.tp1Hit) seg.tp1++;
+      if(c.tp2Hit) seg.tp2++;
+      if(c.tp3Hit) seg.tp3++;
+      if(!c.tp1Hit && c.peakTp1Pct >= 70.0 && c.peakTp1Pct < 100.0)
+         seg.nearCount++;
+      seg.netR += c.resultR;
+      peaks[peakN++] = MathMax(0.0, c.peakTp1Pct);
+      if(c.costTp1Pct > 0.0)
+         costs[costN++] = c.costTp1Pct;
+
+      //  Trailstop performance is descriptive evidence, not a fifth
+      //  health verdict.  Its denominator is only the closed trades
+      //  placed with the trailstop on whose live trail state the
+      //  diary actually observed; old rows stay out instead of
+      //  silently pretending the trail never armed.
+      if(c.useTrailStop && c.trailKnown)
+      {
+         seg.trailEligible++;
+         if(c.trailArmed)
+         {
+            seg.trailArmed++;
+            if(c.trailLockTp1Pct >= 0.0)
+               trailLocks[trailLockN++] = c.trailLockTp1Pct;
+            if(c.stopKnown)
+            {
+               seg.trailStopKnown++;
+               if(c.stopExit)
+                  seg.trailStopExits++;
+            }
+            if(c.finalTp1Pct > -9000.0)
+               trailGivebacks[trailGivebackN++] =
+                  MathMax(0.0, c.peakTp1Pct - c.finalTp1Pct);
+         }
+      }
+   }
+
+   seg.costN = costN;
+   seg.trailLockN = trailLockN;
+   seg.trailGivebackN = trailGivebackN;
+   if(seg.trailEligible > 0)
+      seg.trailArmRate = (double)seg.trailArmed / (double)seg.trailEligible;
+   if(seg.n > 0)
+      seg.tp1Rate = (double)seg.tp1 / (double)seg.n;
+   if(peakN > 0)
+   {
+      ArrayResize(peaks, peakN);
+      ArraySort(peaks);
+      seg.medianPeak = (peakN % 2 == 1)
+                       ? peaks[peakN / 2]
+                       : 0.5 * (peaks[peakN / 2 - 1] + peaks[peakN / 2]);
+   }
+   if(costN > 0)
+   {
+      ArrayResize(costs, costN);
+      ArraySort(costs);
+      seg.medianCost = (costN % 2 == 1)
+                       ? costs[costN / 2]
+                       : 0.5 * (costs[costN / 2 - 1] + costs[costN / 2]);
+   }
+   if(trailLockN > 0)
+   {
+      ArrayResize(trailLocks, trailLockN);
+      ArraySort(trailLocks);
+      seg.medianTrailLock = (trailLockN % 2 == 1)
+                            ? trailLocks[trailLockN / 2]
+                            : 0.5 * (trailLocks[trailLockN / 2 - 1] +
+                                     trailLocks[trailLockN / 2]);
+   }
+   if(trailGivebackN > 0)
+   {
+      ArrayResize(trailGivebacks, trailGivebackN);
+      ArraySort(trailGivebacks);
+      seg.medianTrailGiveback = (trailGivebackN % 2 == 1)
+                                ? trailGivebacks[trailGivebackN / 2]
+                                : 0.5 * (trailGivebacks[trailGivebackN / 2 - 1] +
+                                         trailGivebacks[trailGivebackN / 2]);
+   }
+}
+
+//+------------------------------------------------------------------+
+//  A subset (box trades, or all Choppy trades) against everything
+//  else in the same recent window.  Fifteen closed trades on each
+//  side is the floor: below that the split is anecdote, not evidence.
+//+------------------------------------------------------------------+
+int DiarySubsetLevel(int subN, int subTp1, double subR,
+                     int otherN, int otherTp1, double otherR)
+{
+   if(subN < HEALTH_STYLE_MIN_EACH || otherN < HEALTH_STYLE_MIN_EACH)
+      return(0);
+   double subRate   = (double)subTp1 / (double)subN;
+   double otherRate = (double)otherTp1 / (double)otherN;
+   double subAvg    = subR / (double)subN;
+   double otherAvg  = otherR / (double)otherN;
+   double rateDiff  = subRate - otherRate;
+   double avgDiff   = subAvg - otherAvg;
+   if(rateDiff <= -0.20 && avgDiff <= -0.20 && subAvg <= 0.0)
+      return(2);
+   if(rateDiff <= -0.12 || avgDiff <= -0.15)
+      return(1);
+   return(0);
+}
+
+//+------------------------------------------------------------------+
+//  A Poor subset verdict must also show in both chronological halves
+//  of the recent window (with at least five trades on each side of
+//  the split in each half).  Otherwise it stays Watch.
+//+------------------------------------------------------------------+
+bool DiarySubsetPersists(int lane, bool boxSplit)
+{
+   int splitAt = g_health[lane].recentCount / 2;
+   for(int half = 0; half < 2; half++)
+   {
+      int start = (half == 0) ? 0 : splitAt;
+      int stop  = (half == 0) ? splitAt : g_health[lane].recentCount;
+      int subN = 0, subTp1 = 0, otherN = 0, otherTp1 = 0;
+      double subR = 0.0, otherR = 0.0;
+      for(int k = start; k < stop; k++)
+      {
+         SDiaryClosed c = g_health[lane].recent[k];
+         bool isSub = boxSplit ? (c.style == 2) : (c.regime == 2);
+         if(isSub)
+         {
+            subN++; subR += c.resultR; if(c.tp1Hit) subTp1++;
+         }
+         else
+         {
+            otherN++; otherR += c.resultR; if(c.tp1Hit) otherTp1++;
+         }
+      }
+      if(subN < 5 || otherN < 5)
+         return(false);
+      double rateDiff = (double)subTp1 / (double)subN -
+                        (double)otherTp1 / (double)otherN;
+      double avgDiff  = subR / (double)subN - otherR / (double)otherN;
+      if(rateDiff > 0.0 && avgDiff > 0.0)
+         return(false);
+   }
+   return(true);
+}
+
+//+------------------------------------------------------------------+
+//  THE THREE HEALTH QUESTIONS, per timeframe lane.
+//
+//  Follow-through: are trades still reaching TP1, and how far do they
+//  typically get?  Cost: what share of TP1 does the spread now eat?
+//  Score: does 3/3 still beat 2/3?  A fourth, narrower split asks
+//  whether the weakness is specifically the box, or Choppy entries
+//  in general, because those two have different first fixes.
+//
+//  Thirty closed trades is the floor before any lane is judged.  A
+//  Poor verdict also has to persist: the bad pattern must appear in
+//  BOTH 15-trade halves of the recent 30, not merely in one noisy
+//  run.  Where an earlier 30 exists, the recent block is also
+//  compared with it, so a slow decay is visible even when lifetime
+//  totals still look respectable.
+//+------------------------------------------------------------------+
+void DiaryComputeLaneHealth(int i)
+{
+   SHealthLane lane = g_health[i];
+   lane.status       = -1;
+   lane.primaryIssue = 0;
+   lane.issueCount   = 0;
+   lane.followLevel  = 0;
+   lane.costLevel    = 0;
+   lane.scoreLevel   = 0;
+   lane.styleLevel   = 0;
+   lane.label        = "Health: Learning";
+   lane.action       = "Keep collecting; health starts at 30 closed trades.";
+   lane.note         = "";
+
+   int recN    = (int)MathMin(HEALTH_RECENT_N, lane.recentCount);
+   int recStart = lane.recentCount - recN;
+   int baseN   = (int)MathMin(HEALTH_BASE_N, recStart);
+   int baseStart = recStart - baseN;
+
+   SDiarySegment rec, base;
+   DiaryComputeSegment(i, recStart, recN, rec);
+   DiaryComputeSegment(i, baseStart, baseN, base);
+   lane.recN          = rec.n;
+   lane.recWins       = rec.wins;
+   lane.recLosses     = rec.losses;
+   lane.recBe         = rec.be;
+   lane.recTp1        = rec.tp1;
+   lane.recTp2        = rec.tp2;
+   lane.recTp3        = rec.tp3;
+   lane.recCostN      = rec.costN;
+   lane.recNetR       = rec.netR;
+   lane.recTp1Rate    = rec.tp1Rate;
+   lane.recMedianPeak = rec.medianPeak;
+   lane.recMedianCost = rec.medianCost;
+   lane.baseN         = base.n;
+   lane.baseTp1Rate   = base.tp1Rate;
+   lane.baseMedianCost = base.medianCost;
+   lane.recTrailEligible = rec.trailEligible;
+   lane.recTrailArmed = rec.trailArmed;
+   lane.recTrailLockN = rec.trailLockN;
+   lane.recTrailStopKnown = rec.trailStopKnown;
+   lane.recTrailStopExits = rec.trailStopExits;
+   lane.recTrailGivebackN = rec.trailGivebackN;
+   lane.recTrailArmRate = rec.trailArmRate;
+   lane.recTrailMedianLock = rec.medianTrailLock;
+   lane.recTrailMedianGiveback = rec.medianTrailGiveback;
+
+   if(lane.closedCount < HEALTH_MIN_CLOSED || rec.n < HEALTH_MIN_CLOSED)
+   {
+      g_health[i] = lane;
+      return;
+   }
+
+   SDiarySegment halfOld, halfNew;
+   DiaryComputeSegment(i, recStart, rec.n / 2, halfOld);
+   DiaryComputeSegment(i, recStart + rec.n / 2, rec.n - rec.n / 2, halfNew);
+
+   // ---- follow-through ---------------------------------------------
+   double followDrop = (base.n >= 15 && base.tp1Rate >= 0.0 && rec.tp1Rate >= 0.0)
+                       ? (base.tp1Rate - rec.tp1Rate) : 0.0;
+   bool halfOldWeak = (halfOld.tp1Rate >= 0.0 &&
+                       (halfOld.tp1Rate < 0.45 || halfOld.medianPeak < 65.0));
+   bool halfNewWeak = (halfNew.tp1Rate >= 0.0 &&
+                       (halfNew.tp1Rate < 0.45 || halfNew.medianPeak < 65.0));
+   bool followPoorCandidate = (rec.tp1Rate < 0.30 || rec.medianPeak < 45.0 ||
+                               (followDrop >= 0.25 && rec.tp1Rate < 0.45));
+   if(followPoorCandidate && halfOldWeak && halfNewWeak)
+      lane.followLevel = 2;
+   else if(rec.tp1Rate < 0.45 || rec.medianPeak < 65.0 || followDrop >= 0.15)
+      lane.followLevel = 1;
+
+   int followIssue = (rec.medianPeak >= 50.0 ||
+                      (rec.n > 0 && (double)rec.nearCount / (double)rec.n >= 0.35))
+                     ? 1 : 2;   // near TP1 then reverse, versus barely moves
+
+   // ---- cost ---------------------------------------------------------
+   if(rec.costN >= 20 && rec.medianCost >= 0.0)
+   {
+      double costRise = (base.costN >= 15 && base.medianCost >= 0.0)
+                        ? (rec.medianCost - base.medianCost) : 0.0;
+      bool costPoorCandidate = (rec.medianCost >= 12.0 ||
+                                (costRise >= 7.0 && rec.medianCost >= 10.0));
+      bool halvesDear = (halfOld.medianCost >= 10.0 && halfNew.medianCost >= 10.0);
+      if(costPoorCandidate && halvesDear)
+         lane.costLevel = 2;
+      else if(rec.medianCost > 8.0 || costRise >= 4.0)
+         lane.costLevel = 1;
+   }
+
+   // ---- score: recent evidence, not lifetime habit -------------------
+   int    s2N = 0, s3N = 0, s2Tp1 = 0, s3Tp1 = 0;
+   double s2R = 0.0, s3R = 0.0;
+   int    o2N = 0, o3N = 0, o2Tp1 = 0, o3Tp1 = 0;
+   double o2R = 0.0, o3R = 0.0;
+   int    n2N = 0, n3N = 0, n2Tp1 = 0, n3Tp1 = 0;
+   double n2R = 0.0, n3R = 0.0;
+   int splitAt = lane.recentCount / 2;
+   for(int k = 0; k < lane.recentCount; k++)
+   {
+      SDiaryClosed c = lane.recent[k];
+      bool newer = (k >= splitAt);
+      if(c.scoreAbs >= 3)
+      {
+         s3N++; s3R += c.resultR; if(c.tp1Hit) s3Tp1++;
+         if(newer) { n3N++; n3R += c.resultR; if(c.tp1Hit) n3Tp1++; }
+         else      { o3N++; o3R += c.resultR; if(c.tp1Hit) o3Tp1++; }
+      }
+      else
+      {
+         s2N++; s2R += c.resultR; if(c.tp1Hit) s2Tp1++;
+         if(newer) { n2N++; n2R += c.resultR; if(c.tp1Hit) n2Tp1++; }
+         else      { o2N++; o2R += c.resultR; if(c.tp1Hit) o2Tp1++; }
+      }
+   }
+   if(s2N >= HEALTH_SCORE_MIN_EACH && s3N >= HEALTH_SCORE_MIN_EACH)
+   {
+      double rateDiff = (double)s3Tp1 / (double)s3N - (double)s2Tp1 / (double)s2N;
+      double avgDiff  = s3R / (double)s3N - s2R / (double)s2N;
+      bool scorePoorCandidate = (rateDiff <= -0.20 && avgDiff <= -0.20);
+      bool halvesKnown = (o2N >= 5 && o3N >= 5 && n2N >= 5 && n3N >= 5);
+      bool halvesNotBetter = false;
+      if(halvesKnown)
+      {
+         double oldRateDiff = (double)o3Tp1 / (double)o3N - (double)o2Tp1 / (double)o2N;
+         double oldAvgDiff  = o3R / (double)o3N - o2R / (double)o2N;
+         double newRateDiff = (double)n3Tp1 / (double)n3N - (double)n2Tp1 / (double)n2N;
+         double newAvgDiff  = n3R / (double)n3N - n2R / (double)n2N;
+         halvesNotBetter = ((oldRateDiff <= 0.0 || oldAvgDiff <= 0.0) &&
+                            (newRateDiff <= 0.0 || newAvgDiff <= 0.0));
+      }
+      if(scorePoorCandidate && halvesKnown && halvesNotBetter)
+         lane.scoreLevel = 2;
+      else if(rateDiff <= -0.10 || avgDiff <= -0.15)
+         lane.scoreLevel = 1;
+   }
+
+   // ---- entry style / regime split -----------------------------------
+   int    boxN = 0, boxTp1 = 0, nonBoxN = 0, nonBoxTp1 = 0;
+   double boxR = 0.0, nonBoxR = 0.0;
+   int    chopN = 0, chopTp1 = 0, nonChopN = 0, nonChopTp1 = 0;
+   double chopR = 0.0, nonChopR = 0.0;
+   for(int k = 0; k < lane.recentCount; k++)
+   {
+      SDiaryClosed c = lane.recent[k];
+      if(c.style == 2)
+      {
+         boxN++; boxR += c.resultR; if(c.tp1Hit) boxTp1++;
+      }
+      else
+      {
+         nonBoxN++; nonBoxR += c.resultR; if(c.tp1Hit) nonBoxTp1++;
+      }
+      if(c.regime == 2)
+      {
+         chopN++; chopR += c.resultR; if(c.tp1Hit) chopTp1++;
+      }
+      else
+      {
+         nonChopN++; nonChopR += c.resultR; if(c.tp1Hit) nonChopTp1++;
+      }
+   }
+   int boxLevel  = DiarySubsetLevel(boxN, boxTp1, boxR,
+                                    nonBoxN, nonBoxTp1, nonBoxR);
+   int chopLevel = DiarySubsetLevel(chopN, chopTp1, chopR,
+                                    nonChopN, nonChopTp1, nonChopR);
+   if(boxLevel == 2 && !DiarySubsetPersists(i, true))
+      boxLevel = 1;
+   if(chopLevel == 2 && !DiarySubsetPersists(i, false))
+      chopLevel = 1;
+   int styleIssue = 0;
+   lane.styleLevel = (int)MathMax(boxLevel, chopLevel);
+   if(boxLevel > 0 && boxLevel >= chopLevel)
+      styleIssue = 5;
+   else if(chopLevel > 0)
+      styleIssue = 6;
+
+   if(lane.followLevel > 0) lane.issueCount++;
+   if(lane.costLevel > 0)   lane.issueCount++;
+   if(lane.scoreLevel > 0)  lane.issueCount++;
+   if(lane.styleLevel > 0)  lane.issueCount++;
+
+   int worst = lane.followLevel;
+   worst = (int)MathMax(worst, lane.costLevel);
+   worst = (int)MathMax(worst, lane.scoreLevel);
+   worst = (int)MathMax(worst, lane.styleLevel);
+   lane.status = worst;
+
+   if(worst == 0)
+   {
+      lane.label  = "Health: OK";
+      lane.action = "No change suggested.";
+      g_health[i] = lane;
+      return;
+   }
+
+   //  One label and one first fix, safest and most specific first:
+   //  cost before style, style before general follow-through, then score.
+   if(lane.costLevel == worst)
+      lane.primaryIssue = 3;
+   else if(lane.styleLevel == worst)
+      lane.primaryIssue = styleIssue;
+   else if(lane.followLevel == worst)
+      lane.primaryIssue = followIssue;
+   else
+      lane.primaryIssue = 4;
+
+   string issueName = "Health";
+   if(lane.primaryIssue == 1 || lane.primaryIssue == 2) issueName = "TP1";
+   else if(lane.primaryIssue == 3) issueName = "Cost";
+   else if(lane.primaryIssue == 4) issueName = "Score";
+   else if(lane.primaryIssue == 5) issueName = "Box";
+   else if(lane.primaryIssue == 6) issueName = "Chop";
+
+   lane.label = issueName + ": " + (worst == 2 ? "Poor" : "Watch") +
+                (lane.issueCount > 1 ? "+" : "");
+
+   if(worst == 1)
+   {
+      if(lane.primaryIssue == 3)
+         lane.action = "No change yet; watch spread as a share of TP1.";
+      else if(lane.primaryIssue == 5)
+         lane.action = "No change yet; keep watching the box trades.";
+      else if(lane.primaryIssue == 6)
+         lane.action = "No change yet; keep watching the Choppy trades.";
+      else if(lane.primaryIssue == 4)
+         lane.action = "No change yet; keep watching 3/3 against 2/3.";
+      else
+         lane.action = "No change yet; keep watching progress to TP1.";
+      g_health[i] = lane;
+      return;
+   }
+
+   string tag = g_rows[i].tag;
+   if(lane.primaryIssue == 3)
+   {
+      lane.action = "Use minimum lot or avoid expensive hours first.";
+      lane.note = StringFormat("Health %s: Spread is %.0f%% of TP1. %s",
+                               tag, MathMax(0.0, rec.medianCost), lane.action);
+   }
+   else if(lane.primaryIssue == 1)
+   {
+      lane.action = "Test a nearer TP1 first; do not change live yet.";
+      lane.note = StringFormat("Health %s: Trades reach %.0f%% of TP1 then reverse. %s",
+                               tag, MathMax(0.0, rec.medianPeak), lane.action);
+   }
+   else if(lane.primaryIssue == 2)
+   {
+      lane.action = "Lower risk; consider 3/3-only while reviewing.";
+      lane.note = StringFormat("Health %s: Trades only reach %.0f%% of TP1. %s",
+                               tag, MathMax(0.0, rec.medianPeak), lane.action);
+   }
+   else if(lane.primaryIssue == 4)
+   {
+      lane.action = "Keep risk low and review this lane first.";
+      lane.note = StringFormat("Health %s: 3/3 is not beating 2/3. %s",
+                               tag, lane.action);
+   }
+   else if(lane.primaryIssue == 5)
+   {
+      lane.action = "Test Range Mode Off first (it is a global switch).";
+      lane.note = StringFormat("Health %s: Box trades are the weak part. %s",
+                               tag, lane.action);
+   }
+   else if(lane.primaryIssue == 6)
+   {
+      lane.action = "Consider Choppy Trade Off first (it is a global switch).";
+      lane.note = StringFormat("Health %s: Choppy trades are the weak part. %s",
+                               tag, lane.action);
+   }
+   g_health[i] = lane;
+}
+
+//+------------------------------------------------------------------+
+//  Rebuild Day / All totals and every lane from the diary rows.  The
+//  Day clock is the PC/VPS local day, matching the autotrading timer.
+//+------------------------------------------------------------------+
+void DiaryRefreshSummaries()
+{
+   DiaryResetTotals(g_dayTotals);
+   DiaryResetTotals(g_allTotals);
+   for(int i = 0; i < TF_COUNT; i++)
+      DiaryResetLane(i);
+
+   long today = DiaryDayKey(DiaryNowLocal());
+   g_healthTodayKey = today;
+   int total = ArraySize(g_diary);
+
+   for(int k = 0; k < total; k++)
+   {
+      SDiaryRecord r = g_diary[k];
+      if(r.tf < 0 || r.tf >= TF_COUNT) continue;
+
+      g_health[r.tf].signals++;
+      g_allTotals.signals++;
+      if(r.placedDay == today)
+         g_dayTotals.signals++;
+
+      if(MathAbs(r.score) >= 3) g_health[r.tf].score3Signals++;
+      else                      g_health[r.tf].score2Signals++;
+
+      if(r.status == 0)
+      {
+         if(r.filled) { g_health[r.tf].openCount++; g_allTotals.openCount++; }
+         else         { g_health[r.tf].waitCount++; g_allTotals.waitCount++; }
+      }
+      else if(r.status == 2)
+      {
+         g_health[r.tf].expired++;
+         g_allTotals.expired++;
+         if(r.closedDay == today)
+            g_dayTotals.expired++;
+      }
+      else if(r.status == 1)
+      {
+         g_health[r.tf].closedCount++;
+         g_health[r.tf].netR += r.resultR;
+         g_allTotals.netR += r.resultR;
+         if(r.closedDay == today)
+            g_dayTotals.netR += r.resultR;
+
+         if(r.outcome == 1)
+         {
+            g_health[r.tf].wins++; g_allTotals.wins++;
+            if(r.closedDay == today) g_dayTotals.wins++;
+         }
+         else if(r.outcome == 2)
+         {
+            g_health[r.tf].losses++; g_allTotals.losses++;
+            if(r.closedDay == today) g_dayTotals.losses++;
+         }
+         else if(r.outcome == 3)
+         {
+            g_health[r.tf].be++; g_allTotals.be++;
+            if(r.closedDay == today) g_dayTotals.be++;
+         }
+
+         if(MathAbs(r.score) >= 3)
+         {
+            g_health[r.tf].score3Closed++;
+            if(r.outcome == 1) g_health[r.tf].score3Wins++;
+            else if(r.outcome == 2) g_health[r.tf].score3Losses++;
+            if(r.tp1Hit) g_health[r.tf].score3Tp1++;
+         }
+         else
+         {
+            g_health[r.tf].score2Closed++;
+            if(r.outcome == 1) g_health[r.tf].score2Wins++;
+            else if(r.outcome == 2) g_health[r.tf].score2Losses++;
+            if(r.tp1Hit) g_health[r.tf].score2Tp1++;
+         }
+      }
+   }
+
+   //  The health window is the newest 60 CLOSED trades in close-time
+   //  order: the last 30 are judged, the 30 before them are the
+   //  baseline they are compared with.
+   bool picked[];
+   ArrayResize(picked, total);
+   for(int k = 0; k < total; k++)
+      picked[k] = false;
+
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      int want = (int)MathMin(HEALTH_RECENT_N + HEALTH_BASE_N,
+                              g_health[i].closedCount);
+      SDiaryClosed desc[HEALTH_RECENT_N + HEALTH_BASE_N];
+      int got = 0;
+      for(int pos = 0; pos < want; pos++)
+      {
+         int best = -1;
+         long bestTime = -1;
+         long bestId = -1;
+         for(int k = 0; k < total; k++)
+         {
+            if(picked[k]) continue;
+            SDiaryRecord r = g_diary[k];
+            if(r.tf != i || r.status != 1) continue;
+            long when = (long)r.closedAt;
+            if(when > bestTime || (when == bestTime && r.id > bestId))
+            {
+               best = k;
+               bestTime = when;
+               bestId = r.id;
+            }
+         }
+         if(best < 0) break;
+         picked[best] = true;
+         desc[got].scoreAbs    = (int)MathAbs(g_diary[best].score);
+         desc[got].regime      = g_diary[best].regime;
+         desc[got].style       = g_diary[best].style;
+         desc[got].outcome     = g_diary[best].outcome;
+         desc[got].peakTp1Pct  = g_diary[best].peakTp1Pct;
+         desc[got].costTp1Pct  = g_diary[best].costTp1Pct;
+         desc[got].resultR     = g_diary[best].resultR;
+         desc[got].tp1Hit      = g_diary[best].tp1Hit;
+         desc[got].tp2Hit      = g_diary[best].tp2Hit;
+         desc[got].tp3Hit      = g_diary[best].tp3Hit;
+         desc[got].useTrailStop = g_diary[best].useTrailStop;
+         desc[got].trailKnown  = g_diary[best].trailKnown;
+         desc[got].trailArmed  = g_diary[best].trailArmed;
+         desc[got].protectionArmed = g_diary[best].protectionArmed;
+         desc[got].trailLockTp1Pct = g_diary[best].trailLockTp1Pct;
+         desc[got].bestLockTp1Pct = g_diary[best].bestLockTp1Pct;
+         desc[got].finalTp1Pct = g_diary[best].finalTp1Pct;
+         desc[got].stopExit    = g_diary[best].stopExit;
+         desc[got].stopKnown   = g_diary[best].stopKnown;
+         got++;
+      }
+      g_health[i].recentCount = got;
+      for(int k = 0; k < got; k++)
+         g_health[i].recent[k] = desc[got - 1 - k];
+      DiaryComputeLaneHealth(i);
+   }
+}
+
+//+------------------------------------------------------------------+
+void DiaryAfterChange()
+{
+   DiarySave();
+   DiaryRefreshSummaries();
+}
+
+//+------------------------------------------------------------------+
+string HealthLabelText(int i)
+{
+   if(i < 0 || i >= TF_COUNT) return("Health: Learning");
+   return(g_health[i].label);
+}
+
+//+------------------------------------------------------------------+
+color HealthLabelColor(int i)
+{
+   if(i < 0 || i >= TF_COUNT) return(clrGray);
+   if(g_health[i].status == 2) return(InpSellColor);
+   if(g_health[i].status == 1) return(clrOrange);
+   if(g_health[i].status == 0) return(InpBuyColor);
+   return(clrGray);
+}
+
+//+------------------------------------------------------------------+
+//  Exactly one temporary line, and only for a Poor lane.  The chart
+//  timeframe's own warning wins; otherwise the first Poor lane is
+//  shown and any others are counted rather than stacked.
+//+------------------------------------------------------------------+
+string HealthNoteText()
+{
+   int poorCount = 0;
+   int firstPoor = -1;
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      if(g_health[i].status == 2)
+      {
+         poorCount++;
+         if(firstPoor < 0) firstPoor = i;
+      }
+   }
+   if(firstPoor < 0) return("");
+
+   int chosen = firstPoor;
+   int chartRow = RowForChartTF();
+   if(chartRow >= 0 && chartRow < TF_COUNT && g_health[chartRow].status == 2)
+      chosen = chartRow;
+
+   string note = g_health[chosen].note;
+   if(poorCount > 1)
+      note += StringFormat(" (+%d more)", poorCount - 1);
+   return(note);
+}
+
+//+------------------------------------------------------------------+
+int DiaryRegimeCode(int i)
+{
+   if(g_rows[i].hurst > g_rows[i].hTrend)  return(1);
+   if(g_rows[i].hurst < g_rows[i].hRevert) return(2);
+   return(0);
+}
+
+//+------------------------------------------------------------------+
+double DiaryCostPct(double spreadPrice, int tp1Pts)
+{
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0 || tp1Pts <= 0 || spreadPrice < 0.0)
+      return(0.0);
+   return((spreadPrice / point) / (double)tp1Pts * 100.0);
+}
+
+//+------------------------------------------------------------------+
+bool DiaryDealsForPosition(ulong positionId, double &net, double &outVol,
+                           ulong &entryOrder, datetime &lastDealTime,
+                           double &lastExitPrice, long &lastExitReason)
+{
+   net = 0.0;
+   outVol = 0.0;
+   entryOrder = 0;
+   lastDealTime = 0;
+   lastExitPrice = 0.0;
+   lastExitReason = -1;
+   if(positionId == 0 || !HistorySelectByPosition(positionId))
+      return(false);
+
+   datetime lastExitTime = 0;
+   int total = HistoryDealsTotal();
+   for(int d = 0; d < total; d++)
+   {
+      ulong deal = HistoryDealGetTicket(d);
+      if(deal == 0) continue;
+      net += HistoryDealGetDouble(deal, DEAL_PROFIT);
+      net += HistoryDealGetDouble(deal, DEAL_SWAP);
+      net += HistoryDealGetDouble(deal, DEAL_COMMISSION);
+
+      datetime when = (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
+      long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
+      if(entry == DEAL_ENTRY_IN)
+         entryOrder = (ulong)HistoryDealGetInteger(deal, DEAL_ORDER);
+      if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_INOUT)
+      {
+         outVol += HistoryDealGetDouble(deal, DEAL_VOLUME);
+         if(when >= lastExitTime)
+         {
+            lastExitTime = when;
+            lastExitPrice = HistoryDealGetDouble(deal, DEAL_PRICE);
+            lastExitReason = HistoryDealGetInteger(deal, DEAL_REASON);
+         }
+      }
+
+      if(when > lastDealTime)
+         lastDealTime = when;
+   }
+   return(total > 0);
+}
+
+//+------------------------------------------------------------------+
+bool DiaryRefreshSlotDeals(int i)
+{
+   ulong pos = (g_auto[i].diaryPositionId > 0)
+               ? g_auto[i].diaryPositionId : g_auto[i].ticket;
+   double net = 0.0, outVol = 0.0;
+   ulong entryOrder = 0;
+   datetime lastDeal = 0;
+   double lastExitPrice = 0.0;
+   long lastExitReason = -1;
+   bool found = DiaryDealsForPosition(pos, net, outVol, entryOrder, lastDeal,
+                                      lastExitPrice, lastExitReason);
+   if(found)
+   {
+      g_auto[i].diaryDealNet    = net;
+      g_auto[i].diaryDealVolume = outVol;
+      g_auto[i].diaryLastDeal   = (ulong)lastDeal;
+      g_auto[i].diaryLastExitPrice = lastExitPrice;
+      g_auto[i].diaryLastExitReason = lastExitReason;
+   }
+   return(found);
+}
+
+//+------------------------------------------------------------------+
+void DiaryApplyClosedResult(int idx, double netMoney, bool provisional,
+                            datetime closeServer, datetime closeLocal,
+                            string reason, double lastExitPrice,
+                            long lastExitReason)
+{
+   if(idx < 0 || idx >= ArraySize(g_diary)) return;
+   double pv = (g_diary[idx].pointValue > 0.0) ? g_diary[idx].pointValue
+                                               : PointValuePerLot();
+   double denom = pv * MathMax(0.0, g_diary[idx].lot) * (double)MathMax(0, g_diary[idx].planSlPts);
+   g_diary[idx].resultR = (denom > 0.0) ? (netMoney / denom) : 0.0;
+   if(denom > 0.0)
+      g_diary[idx].outcome = (MathAbs(g_diary[idx].resultR) <= HEALTH_BE_EPS_R) ? 3
+                  : ((g_diary[idx].resultR > 0.0) ? 1 : 2);
+   else
+      g_diary[idx].outcome = (MathAbs(netMoney) <= 0.005) ? 3
+                  : ((netMoney > 0.0) ? 1 : 2);
+   //  The final exit price/reason are facts only once the closing
+   //  deal is complete in history.  A provisional row leaves them
+   //  unknown until DiaryReconcileProvisionalRecords() corrects it,
+   //  rather than mistaking a TP1 partial for the final exit.
+   if(!provisional)
+   {
+      if(lastExitPrice > 0.0 && g_diary[idx].entryPrice > 0.0 &&
+         g_diary[idx].tp1Pts > 0 && g_diary[idx].dir != 0)
+      {
+         double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+         if(point > 0.0)
+         {
+            double finalPct = (double)g_diary[idx].dir *
+                              (lastExitPrice - g_diary[idx].entryPrice) /
+                              point / (double)g_diary[idx].tp1Pts * 100.0;
+            g_diary[idx].finalTp1Pct = MathMax(-1000.0,
+                                               MathMin(1000.0, finalPct));
+         }
+      }
+      if(lastExitReason >= 0)
+      {
+         g_diary[idx].stopKnown = true;
+         g_diary[idx].stopExit = (lastExitReason == DEAL_REASON_SL);
+      }
+   }
+   g_diary[idx].status      = 1;
+   g_diary[idx].filled      = true;
+   g_diary[idx].closedAt    = (closeServer > 0) ? closeServer : TimeCurrent();
+   g_diary[idx].localClosed = (closeLocal > 0) ? closeLocal
+                                    : DiaryLocalFromServer(g_diary[idx].closedAt);
+   g_diary[idx].closedDay   = DiaryDayKey(g_diary[idx].localClosed);
+   g_diary[idx].exitReason  = reason;
+   g_diary[idx].provisional = provisional;
+}
+
+//+------------------------------------------------------------------+
+//  Find the still-open diary row that belongs to a live slot: by the
+//  saved row id, by position identifier, by the original order, and
+//  finally - only when it is unambiguous - as the one open row for
+//  this timeframe and direction.  No match means the trade predates
+//  the diary; it stays untracked.
+//+------------------------------------------------------------------+
+int DiaryFindOpenRecordForSlot(int i)
+{
+   int byId = DiaryRecordIndexById(g_auto[i].diaryRecordId);
+   if(byId >= 0 && g_diary[byId].status == 0 && g_diary[byId].tf == i)
+      return(byId);
+
+   ulong entryOrder = 0;
+   if(g_auto[i].isOpen)
+   {
+      double net = 0.0, outVol = 0.0;
+      datetime lastDeal = 0;
+      double lastExitPrice = 0.0;
+      long lastExitReason = -1;
+      ulong pos = (g_auto[i].diaryPositionId > 0)
+                  ? g_auto[i].diaryPositionId : g_auto[i].ticket;
+      DiaryDealsForPosition(pos, net, outVol, entryOrder, lastDeal,
+                            lastExitPrice, lastExitReason);
+   }
+
+   int n = ArraySize(g_diary);
+   for(int k = 0; k < n; k++)
+   {
+      SDiaryRecord r = g_diary[k];
+      if(r.tf != i || r.status != 0) continue;
+      if(g_auto[i].diaryPositionId > 0 && r.positionId == g_auto[i].diaryPositionId)
+         return(k);
+      if(entryOrder > 0 && r.orderTicket == entryOrder)
+         return(k);
+      if(!g_auto[i].isOpen && g_auto[i].ticket > 0 && r.orderTicket == g_auto[i].ticket)
+         return(k);
+   }
+
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0) point = 0.00001;
+   int candidate = -1;
+   int candidates = 0;
+   for(int k = 0; k < n; k++)
+   {
+      SDiaryRecord r = g_diary[k];
+      if(r.tf != i || r.status != 0 || r.dir != g_auto[i].dir) continue;
+      if(g_auto[i].isOpen && !r.filled) continue;
+      if(MathAbs(r.entryPrice - g_auto[i].entryPrice) > 2.5 * point) continue;
+      if(MathAbs(r.lot - MathMax(g_auto[i].initLot, g_auto[i].curLot)) > 1e-8) continue;
+      candidate = k;
+      candidates++;
+   }
+   return(candidates == 1 ? candidate : -1);
+}
+
+//+------------------------------------------------------------------+
+bool DiarySyncSlotRecord(int i, bool saveNow)
+{
+   if(!g_diaryReady || !g_auto[i].active)
+      return(false);
+   int idx = DiaryRecordIndexById(g_auto[i].diaryRecordId);
+   if(idx < 0 || g_diary[idx].status != 0)
+      return(false);
+
+   bool changed = false;
+   if(g_auto[i].isOpen && !g_diary[idx].filled) { g_diary[idx].filled = true; changed = true; }
+   if(g_auto[i].isOpen && g_auto[i].diaryPositionId > 0 &&
+      g_diary[idx].positionId != g_auto[i].diaryPositionId)
+   {
+      g_diary[idx].positionId = g_auto[i].diaryPositionId;
+      changed = true;
+   }
+   if(!g_auto[i].isOpen && g_auto[i].ticket > 0 && g_diary[idx].orderTicket != g_auto[i].ticket)
+   {
+      g_diary[idx].orderTicket = g_auto[i].ticket;
+      changed = true;
+   }
+   if(MathAbs(g_diary[idx].entryPrice - g_auto[i].entryPrice) > 1e-12)
+   {
+      g_diary[idx].entryPrice = g_auto[i].entryPrice;
+      changed = true;
+   }
+   if(!g_diary[idx].filled && g_auto[i].diaryPlanSlPts > 0 &&
+      g_diary[idx].planSlPts != g_auto[i].diaryPlanSlPts)
+   {
+      g_diary[idx].planSlPts = g_auto[i].diaryPlanSlPts;
+      changed = true;
+   }
+   if(g_auto[i].tp1Pts > 0 && g_diary[idx].tp1Pts != g_auto[i].tp1Pts)
+   {
+      g_diary[idx].tp1Pts = g_auto[i].tp1Pts;
+      changed = true;
+   }
+   if(g_auto[i].tp2Pts > 0 && g_diary[idx].tp2Pts != g_auto[i].tp2Pts)
+   {
+      g_diary[idx].tp2Pts = g_auto[i].tp2Pts;
+      changed = true;
+   }
+   if(g_auto[i].tp3Pts > 0 && g_diary[idx].tp3Pts != g_auto[i].tp3Pts)
+   {
+      g_diary[idx].tp3Pts = g_auto[i].tp3Pts;
+      changed = true;
+   }
+   if(g_auto[i].diaryCostTp1Pct > 0.0 &&
+      MathAbs(g_diary[idx].costTp1Pct - g_auto[i].diaryCostTp1Pct) > 0.001)
+   {
+      g_diary[idx].costTp1Pct = g_auto[i].diaryCostTp1Pct;
+      changed = true;
+   }
+   if(g_auto[i].diaryPeakTp1Pct > g_diary[idx].peakTp1Pct + 0.001)
+   {
+      g_diary[idx].peakTp1Pct = g_auto[i].diaryPeakTp1Pct;
+      changed = true;
+   }
+
+   if(g_auto[i].isOpen)
+   {
+      if(!g_diary[idx].trailKnown)
+      {
+         g_diary[idx].trailKnown = true;
+         changed = true;
+      }
+      if(g_auto[i].trailPct > 0 && g_diary[idx].trailPct != g_auto[i].trailPct)
+      {
+         g_diary[idx].trailPct = g_auto[i].trailPct;
+         changed = true;
+      }
+      if(g_auto[i].trailPct > 0 &&
+         g_diary[idx].trailSteady != g_auto[i].trailSteady)
+      {
+         g_diary[idx].trailSteady = g_auto[i].trailSteady;
+         changed = true;
+      }
+      //  Diary "Armed" means a pre-TP1 trail step was actually
+      //  applied.  Requiring the applied level, not trailStarted
+      //  alone, keeps a restart that merely finds the universal
+      //  break-even SL from being misread as a trail activation.
+      bool trailApplied = (g_auto[i].trailStarted && g_auto[i].trailPct > 0 &&
+                           g_auto[i].trailAppliedPct + 1e-9 >=
+                           (double)g_auto[i].trailPct);
+      if(trailApplied && !g_diary[idx].trailArmed)
+      {
+         g_diary[idx].trailArmed = true;
+         changed = true;
+      }
+      if(g_auto[i].trailActive && !g_diary[idx].protectionArmed)
+      {
+         g_diary[idx].protectionArmed = true;
+         changed = true;
+      }
+      if(trailApplied && g_auto[i].trailAppliedPct > 0.0)
+      {
+         double trailLock = MathMax(0.0, g_auto[i].trailAppliedPct -
+                                         g_auto[i].trailGapPct);
+         if(trailLock > g_diary[idx].trailLockTp1Pct + 0.001)
+         {
+            g_diary[idx].trailLockTp1Pct = trailLock;
+            changed = true;
+         }
+      }
+      double diaryPoint = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      if(g_auto[i].slPrice > 0.0 && diaryPoint > 0.0 &&
+         g_diary[idx].tp1Pts > 0 && g_diary[idx].entryPrice > 0.0 &&
+         g_diary[idx].dir != 0)
+      {
+         double bestLock = (double)g_diary[idx].dir *
+                           (g_auto[i].slPrice - g_diary[idx].entryPrice) /
+                           diaryPoint / (double)g_diary[idx].tp1Pts * 100.0;
+         if(bestLock > g_diary[idx].bestLockTp1Pct + 0.001)
+         {
+            g_diary[idx].bestLockTp1Pct = bestLock;
+            changed = true;
+         }
+      }
+   }
+
+   bool hit1 = (g_auto[i].tp1Hit || g_diary[idx].peakTp1Pct >= 100.0 - 1e-9);
+   bool hit2 = g_auto[i].tp2Hit;
+   bool hit3 = false;
+   if(g_diary[idx].tp1Pts > 0 && g_diary[idx].tp2Pts > 0 &&
+      g_diary[idx].peakTp1Pct >= (double)g_diary[idx].tp2Pts / (double)g_diary[idx].tp1Pts * 100.0 - 1e-9)
+      hit2 = true;
+   if(g_diary[idx].tp1Pts > 0 && g_diary[idx].tp3Pts > 0 &&
+      g_diary[idx].peakTp1Pct >= (double)g_diary[idx].tp3Pts / (double)g_diary[idx].tp1Pts * 100.0 - 1e-9)
+      hit3 = true;
+   if(hit1 && !g_diary[idx].tp1Hit) { g_diary[idx].tp1Hit = true; changed = true; }
+   if(hit2 && !g_diary[idx].tp2Hit) { g_diary[idx].tp2Hit = true; changed = true; }
+   if(hit3 && !g_diary[idx].tp3Hit) { g_diary[idx].tp3Hit = true; changed = true; }
+
+   if(saveNow && changed)
+      DiarySave();
+   return(changed);
+}
+
+//+------------------------------------------------------------------+
+void DiaryAttachSlotRecord(int i)
+{
+   if(!g_diaryReady || !g_auto[i].active)
+      return;
+   int idx = DiaryFindOpenRecordForSlot(i);
+   if(idx < 0)
+   {
+      g_auto[i].diaryRecordId = 0;
+      return;
+   }
+
+   SDiaryRecord r = g_diary[idx];
+   bool wasFilled = r.filled;
+   g_auto[i].diaryRecordId    = r.id;
+   g_auto[i].diaryPlacedDayKey = r.placedDay;
+   g_auto[i].diaryPlanSlPts   = r.planSlPts;
+   g_auto[i].diaryRegime      = r.regime;
+   g_auto[i].diaryStyle       = r.style;
+   g_auto[i].diaryPlacedAt    = r.placedAt;
+   g_auto[i].diaryLocalPlaced = r.localPlaced;
+   g_auto[i].diaryCostTp1Pct  = r.costTp1Pct;
+   g_auto[i].diaryPeakTp1Pct  = r.peakTp1Pct;
+   if(r.positionId > 0 && g_auto[i].diaryPositionId == 0)
+      g_auto[i].diaryPositionId = r.positionId;
+
+   //  The entry spread that matters is the one at the fill, so a
+   //  pending records it when it becomes a position.
+   if(g_auto[i].isOpen && !wasFilled)
+   {
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      int tp1 = (g_auto[i].tp1Pts > 0) ? g_auto[i].tp1Pts : r.tp1Pts;
+      if(bid > 0.0 && ask >= bid)
+         g_auto[i].diaryCostTp1Pct = DiaryCostPct(ask - bid, tp1);
+   }
+
+   DiarySyncSlotRecord(i, false);
+   SaveAutoSlotState(i);
+   DiaryAfterChange();
+}
+
+//+------------------------------------------------------------------+
+void DiaryUpdateOpenSlot(int i, double favPts, bool saveNow)
+{
+   if(!g_diaryReady || !g_auto[i].active || !g_auto[i].isOpen)
+      return;
+   if(g_auto[i].tp1Pts > 0)
+   {
+      double pct = favPts / (double)g_auto[i].tp1Pts * 100.0;
+      if(pct < 0.0) pct = 0.0;
+      if(pct > 300.0) pct = 300.0;
+      if(pct > g_auto[i].diaryPeakTp1Pct)
+         g_auto[i].diaryPeakTp1Pct = pct;
+   }
+   DiarySyncSlotRecord(i, saveNow);
+}
+
+//+------------------------------------------------------------------+
+bool DiaryPositionStillOpen(ulong positionId)
+{
+   if(positionId == 0) return(false);
+   int total = PositionsTotal();
+   for(int p = 0; p < total; p++)
+   {
+      ulong ticket = PositionGetTicket(p);
+      if(ticket == 0) continue;
+      if((ulong)PositionGetInteger(POSITION_IDENTIFIER) == positionId)
+         return(true);
+   }
+   return(false);
+}
+
+//+------------------------------------------------------------------+
+//  The one place an open slot becomes diary history.  ResetAutoSlot()
+//  calls this before it wipes the slot, so every terminal path -
+//  TP3, broker SL/TP, signal close, manual close noticed by sync, or
+//  a pending cancelled for any reason - lands in exactly one row.
+//+------------------------------------------------------------------+
+void DiaryFinalizeSlot(int i)
+{
+   if(!g_diaryReady || g_diarySuppress[i] || !g_auto[i].active)
+      return;
+
+   int idx = DiaryRecordIndexById(g_auto[i].diaryRecordId);
+   if(idx < 0)
+   {
+      idx = DiaryFindOpenRecordForSlot(i);
+      if(idx >= 0)
+         g_auto[i].diaryRecordId = g_diary[idx].id;
+   }
+   if(idx < 0 || g_diary[idx].status != 0)
+      return;   // a pre-diary trade: deliberately untracked
+
+   DiarySyncSlotRecord(i, false);
+
+   if(!g_auto[i].isOpen)
+   {
+      //  A waiting slot can disappear from the terminal because its
+      //  pending filled AND the resulting position closed while ticks
+      //  were interrupted.  Ask order history which story is true
+      //  before calling it Expired: a position identifier means the
+      //  idea really traded.  If that position is somehow still live
+      //  (a partial-fill race), leave the row open for the next sync
+      //  to re-attach rather than finalising a live trade.
+      ulong brokerPos = g_diary[idx].positionId;
+      if(brokerPos == 0 && g_diary[idx].orderTicket > 0 &&
+         HistoryOrderSelect(g_diary[idx].orderTicket))
+         brokerPos = (ulong)HistoryOrderGetInteger(g_diary[idx].orderTicket,
+                                                   ORDER_POSITION_ID);
+      if(brokerPos > 0)
+      {
+         g_diary[idx].positionId = brokerPos;
+         g_diary[idx].filled     = true;
+         if(DiaryPositionStillOpen(brokerPos))
+         {
+            DiaryAfterChange();
+            return;
+         }
+
+         double histNet = 0.0, histOutVol = 0.0;
+         ulong entryOrder = 0;
+         datetime lastDeal = 0;
+         double lastExitPrice = 0.0;
+         long lastExitReason = -1;
+         bool dealsFound = DiaryDealsForPosition(brokerPos, histNet,
+                                                 histOutVol, entryOrder,
+                                                 lastDeal, lastExitPrice,
+                                                 lastExitReason);
+         bool complete = (dealsFound &&
+                          histOutVol >= g_diary[idx].lot - 1e-8);
+         DiaryApplyClosedResult(idx, histNet, !complete, lastDeal,
+                                (lastDeal > 0)
+                                   ? DiaryLocalFromServer(lastDeal)
+                                   : DiaryNowLocal(),
+                                "broker-history", lastExitPrice,
+                                lastExitReason);
+         DiaryAfterChange();
+         return;
+      }
+
+      g_diary[idx].status      = 2;
+      g_diary[idx].outcome     = 0;
+      g_diary[idx].resultR     = 0.0;
+      g_diary[idx].closedAt    = TimeCurrent();
+      g_diary[idx].localClosed = DiaryNowLocal();
+      g_diary[idx].closedDay   = DiaryDayKey(g_diary[idx].localClosed);
+      g_diary[idx].exitReason  = "pending-cancelled";
+      g_diary[idx].provisional = false;
+      DiaryAfterChange();
+      return;
+   }
+
+   bool dealsFound = DiaryRefreshSlotDeals(i);
+   double originalLot = (g_diary[idx].lot > 0.0) ? g_diary[idx].lot
+                                      : MathMax(g_auto[i].initLot, g_auto[i].curLot);
+   bool complete = (dealsFound &&
+                    g_auto[i].diaryDealVolume >= originalLot - 1e-8);
+   double net = g_auto[i].diaryDealNet;
+   if(!complete)
+      net += g_auto[i].profitUSD;   // estimate until the deal reaches history
+
+   string reason = g_diary[idx].tp3Hit ? "tp3" : "closed";
+   DiaryApplyClosedResult(idx, net, !complete, TimeCurrent(),
+                          DiaryNowLocal(), reason,
+                          g_auto[i].diaryLastExitPrice,
+                          g_auto[i].diaryLastExitReason);
+   DiaryAfterChange();
+}
+
+//+------------------------------------------------------------------+
+//  A close can be finalised a tick before its deal is visible in
+//  history.  Such rows are marked provisional and corrected here on
+//  a later sync, so a TP1 partial banked in the same tick as the
+//  final close is never lost from the result.
+//+------------------------------------------------------------------+
+void DiaryReconcileProvisionalRecords()
+{
+   if(!g_diaryReady) return;
+   bool changed = false;
+   int n = ArraySize(g_diary);
+   for(int k = 0; k < n; k++)
+   {
+      if(g_diary[k].status != 1 || !g_diary[k].provisional) continue;
+
+      ulong pos = g_diary[k].positionId;
+      if(pos == 0 && g_diary[k].orderTicket > 0 && HistoryOrderSelect(g_diary[k].orderTicket))
+         pos = (ulong)HistoryOrderGetInteger(g_diary[k].orderTicket, ORDER_POSITION_ID);
+      if(pos == 0) continue;
+
+      double net = 0.0, outVol = 0.0;
+      ulong entryOrder = 0;
+      datetime lastDeal = 0;
+      double lastExitPrice = 0.0;
+      long lastExitReason = -1;
+      if(!DiaryDealsForPosition(pos, net, outVol, entryOrder, lastDeal,
+                                lastExitPrice, lastExitReason))
+         continue;
+      if(outVol < g_diary[k].lot - 1e-8)
+         continue;
+
+      g_diary[k].positionId = pos;
+      DiaryApplyClosedResult(k, net, false, lastDeal,
+                             DiaryLocalFromServer(lastDeal),
+                             g_diary[k].tp3Hit ? "tp3" : "closed",
+                             lastExitPrice, lastExitReason);
+      changed = true;
+   }
+   if(changed)
+      DiaryAfterChange();
+}
+
+//+------------------------------------------------------------------+
+//  Broker-side endings while the EA was away: an SL/TP close or a
+//  pending that expired at the broker.  Open rows with no live slot
+//  are checked against deal/order history and closed from facts.
+//+------------------------------------------------------------------+
+void DiaryReconcileOpenRecords()
+{
+   if(!g_diaryReady) return;
+   bool changed = false;
+   int n = ArraySize(g_diary);
+
+   for(int k = 0; k < n; k++)
+   {
+      if(g_diary[k].status != 0) continue;
+
+      bool live = false;
+      for(int i = 0; i < TF_COUNT; i++)
+         if(g_auto[i].active && g_auto[i].diaryRecordId == g_diary[k].id)
+            live = true;
+      if(live) continue;
+
+      ulong pos = g_diary[k].positionId;
+      if(pos == 0 && g_diary[k].orderTicket > 0 && HistoryOrderSelect(g_diary[k].orderTicket))
+         pos = (ulong)HistoryOrderGetInteger(g_diary[k].orderTicket, ORDER_POSITION_ID);
+
+      if(pos > 0)
+      {
+         double net = 0.0, outVol = 0.0;
+         ulong entryOrder = 0;
+         datetime lastDeal = 0;
+         double lastExitPrice = 0.0;
+         long lastExitReason = -1;
+         if(DiaryDealsForPosition(pos, net, outVol, entryOrder, lastDeal,
+                                  lastExitPrice, lastExitReason) &&
+            outVol >= g_diary[k].lot - 1e-8)
+         {
+            g_diary[k].positionId = pos;
+            DiaryApplyClosedResult(k, net, false, lastDeal,
+                                   DiaryLocalFromServer(lastDeal),
+                                   "broker-history", lastExitPrice,
+                                   lastExitReason);
+            changed = true;
+            continue;
+         }
+      }
+
+      if(!g_diary[k].filled && g_diary[k].orderTicket > 0 && HistoryOrderSelect(g_diary[k].orderTicket))
+      {
+         long state = HistoryOrderGetInteger(g_diary[k].orderTicket, ORDER_STATE);
+         if(state == ORDER_STATE_CANCELED || state == ORDER_STATE_EXPIRED ||
+            state == ORDER_STATE_REJECTED)
+         {
+            datetime done = (datetime)HistoryOrderGetInteger(g_diary[k].orderTicket,
+                                                             ORDER_TIME_DONE);
+            g_diary[k].status      = 2;
+            g_diary[k].outcome     = 0;
+            g_diary[k].resultR     = 0.0;
+            g_diary[k].closedAt    = (done > 0) ? done : TimeCurrent();
+            g_diary[k].localClosed = DiaryLocalFromServer(g_diary[k].closedAt);
+            g_diary[k].closedDay   = DiaryDayKey(g_diary[k].localClosed);
+            g_diary[k].exitReason  = "pending-ended";
+            g_diary[k].provisional = false;
+            changed = true;
+         }
+      }
+   }
+
+   if(changed)
+      DiaryAfterChange();
+}
+
+//+------------------------------------------------------------------+
+//  S is born here, after the broker accepted the order - never from
+//  a plan that was only drawn on the panel.
+//+------------------------------------------------------------------+
+void DiaryBeginPlacement(int i, bool market, int planSlPts, double spreadPrice)
+{
+   if(!g_diaryReady || !g_auto[i].active)
+      return;
+
+   datetime localNow = DiaryNowLocal();
+   int regime = DiaryRegimeCode(i);
+   int style = 0;
+   if(market)
+      style = (regime == 2) ? 4 : 0;
+   else if(g_rows[i].mode == 2)
+      style = 2;
+   else
+      style = (regime == 2) ? 3 : 1;
+
+   g_auto[i].diaryPlacedAt     = TimeCurrent();
+   g_auto[i].diaryLocalPlaced  = localNow;
+   g_auto[i].diaryPlacedDayKey = DiaryDayKey(localNow);
+   g_auto[i].diaryPlanSlPts    = planSlPts;
+   g_auto[i].diaryRegime       = regime;
+   g_auto[i].diaryStyle        = style;
+   g_auto[i].diaryCostTp1Pct   = DiaryCostPct(spreadPrice, g_auto[i].tp1Pts);
+   g_auto[i].diaryPeakTp1Pct   = 0.0;
+   g_auto[i].diaryDealNet      = 0.0;
+   g_auto[i].diaryDealVolume   = 0.0;
+   g_auto[i].diaryLastDeal     = 0;
+   g_auto[i].diaryLastExitPrice = 0.0;
+   g_auto[i].diaryLastExitReason = -1;
+
+   SDiaryRecord r;
+   r.id            = g_diaryNextId++;
+   r.tf            = i;
+   r.dir           = g_auto[i].dir;
+   r.score         = g_auto[i].entryScore;
+   r.regime        = regime;
+   r.style         = style;
+   r.status        = 0;
+   r.outcome       = 0;
+   r.placedDay     = g_auto[i].diaryPlacedDayKey;
+   r.closedDay     = 0;
+   r.placedAt      = g_auto[i].diaryPlacedAt;
+   r.closedAt      = 0;
+   r.localPlaced   = localNow;
+   r.localClosed   = 0;
+   r.orderTicket   = g_auto[i].ticket;
+   r.positionId    = 0;
+   r.lot           = g_auto[i].initLot;
+   r.entryPrice    = g_auto[i].entryPrice;
+   r.planSlPts     = planSlPts;
+   r.tp1Pts        = g_auto[i].tp1Pts;
+   r.tp2Pts        = g_auto[i].tp2Pts;
+   r.tp3Pts        = g_auto[i].tp3Pts;
+   r.costTp1Pct    = g_auto[i].diaryCostTp1Pct;
+   r.peakTp1Pct    = 0.0;
+   r.resultR       = 0.0;
+   r.filled        = market;
+   r.tp1Hit        = false;
+   r.tp2Hit        = false;
+   r.tp3Hit        = false;
+   r.riskPct       = InpRiskPct;
+   r.useRisk       = InpUseRisk;
+   r.useMinLot     = InpUseMinLot;
+   r.useStopLoss   = InpUseStopLoss;
+   r.useTrailStop  = InpUseTrailStop;
+   r.allowChoppy   = InpAllowChoppyTrade;
+   r.rangeMode     = InpRangeMode;
+   r.pointValue    = PointValuePerLot();
+   r.exitReason    = "";
+   r.provisional   = false;
+   r.trailPct      = market ? g_auto[i].trailPct : 0;
+   r.trailSteady   = market && g_auto[i].trailSteady;
+   r.trailKnown    = market;
+   r.trailArmed    = market && g_auto[i].trailStarted;
+   r.protectionArmed = market && g_auto[i].trailActive;
+   r.trailLockTp1Pct = -1.0;
+   r.bestLockTp1Pct  = -9999.0;
+   r.finalTp1Pct     = -9999.0;
+   r.stopExit        = false;
+   r.stopKnown       = false;
+
+   int n = ArraySize(g_diary);
+   ArrayResize(g_diary, n + 1);
+   g_diary[n] = r;
+   g_auto[i].diaryRecordId = r.id;
+   SaveAutoSlotState(i);
+   DiaryAfterChange();
+}
+
+//+------------------------------------------------------------------+
+//  A pending upgraded to market is the same signal acted on, so it
+//  must remain one S.  The old row is held while the slot resets,
+//  then merged with the market placement (or expired if that market
+//  order could not be sent).
+//+------------------------------------------------------------------+
+void DiaryBeginUpgrade(int i)
+{
+   g_diarySuppress[i] = true;
+   g_diaryUpgrade[i].active      = true;
+   g_diaryUpgrade[i].recordId    = g_auto[i].diaryRecordId;
+   g_diaryUpgrade[i].placedDay   = g_auto[i].diaryPlacedDayKey;
+   g_diaryUpgrade[i].placedAt    = g_auto[i].diaryPlacedAt;
+   g_diaryUpgrade[i].localPlaced = g_auto[i].diaryLocalPlaced;
+   g_diaryUpgrade[i].regime      = g_auto[i].diaryRegime;
+
+   int idx = DiaryRecordIndexById(g_auto[i].diaryRecordId);
+   if(idx >= 0)
+   {
+      g_diaryUpgrade[i].placedDay   = g_diary[idx].placedDay;
+      g_diaryUpgrade[i].placedAt    = g_diary[idx].placedAt;
+      g_diaryUpgrade[i].localPlaced = g_diary[idx].localPlaced;
+      g_diaryUpgrade[i].regime      = g_diary[idx].regime;
+   }
+}
+
+//+------------------------------------------------------------------+
+void DiaryCancelUpgrade(int i)
+{
+   g_diarySuppress[i] = false;
+   g_diaryUpgrade[i].active = false;
+}
+
+//+------------------------------------------------------------------+
+void DiaryFinishUpgrade(int i, bool placed)
+{
+   SDiaryUpgrade up = g_diaryUpgrade[i];
+   g_diarySuppress[i] = false;
+   g_diaryUpgrade[i].active = false;
+   if(!g_diaryReady || !up.active)
+      return;
+
+   int oldIdx = DiaryRecordIndexById(up.recordId);
+   if(placed && g_auto[i].active)
+   {
+      int newIdx = DiaryRecordIndexById(g_auto[i].diaryRecordId);
+      if(oldIdx >= 0 && newIdx >= 0 && oldIdx != newIdx)
+      {
+         SDiaryRecord merged = g_diary[newIdx];
+         merged.id          = g_diary[oldIdx].id;
+         merged.placedDay   = g_diary[oldIdx].placedDay;
+         merged.placedAt    = g_diary[oldIdx].placedAt;
+         merged.localPlaced = g_diary[oldIdx].localPlaced;
+         merged.regime      = g_diary[oldIdx].regime;
+         g_diary[oldIdx] = merged;
+
+         int n = ArraySize(g_diary);
+         for(int k = newIdx; k < n - 1; k++)
+            g_diary[k] = g_diary[k + 1];
+         ArrayResize(g_diary, n - 1);
+
+         g_auto[i].diaryRecordId     = merged.id;
+         g_auto[i].diaryPlacedDayKey = merged.placedDay;
+         g_auto[i].diaryPlacedAt     = merged.placedAt;
+         g_auto[i].diaryLocalPlaced  = merged.localPlaced;
+         g_auto[i].diaryRegime       = merged.regime;
+         SaveAutoSlotState(i);
+      }
+      else if(newIdx >= 0 && up.placedDay > 0)
+      {
+         g_diary[newIdx].placedDay   = up.placedDay;
+         g_diary[newIdx].placedAt    = up.placedAt;
+         g_diary[newIdx].localPlaced = up.localPlaced;
+         g_diary[newIdx].regime      = up.regime;
+         g_auto[i].diaryPlacedDayKey = up.placedDay;
+         g_auto[i].diaryPlacedAt     = up.placedAt;
+         g_auto[i].diaryLocalPlaced  = up.localPlaced;
+         g_auto[i].diaryRegime       = up.regime;
+         SaveAutoSlotState(i);
+      }
+      DiaryAfterChange();
+      return;
+   }
+
+   if(oldIdx >= 0 && g_diary[oldIdx].status == 0)
+   {
+      g_diary[oldIdx].status      = 2;
+      g_diary[oldIdx].closedAt    = TimeCurrent();
+      g_diary[oldIdx].localClosed = DiaryNowLocal();
+      g_diary[oldIdx].closedDay   = DiaryDayKey(g_diary[oldIdx].localClosed);
+      g_diary[oldIdx].exitReason  = "upgrade-failed";
+      DiaryAfterChange();
+   }
+}
+
+//+------------------------------------------------------------------+
+void DiaryFlushOpenSlots()
+{
+   if(!g_diaryReady) return;
+   for(int i = 0; i < TF_COUNT; i++)
+      if(g_auto[i].active)
+         DiarySyncSlotRecord(i, false);
+   DiarySave();
+}
+
+//+------------------------------------------------------------------+
+void DiaryInit()
+{
+   g_diaryFile = DiaryFileName();
+   g_diaryCommonFlag = MQLInfoInteger(MQL_TESTER) ? 0 : FILE_COMMON;
+   ArrayResize(g_diary, 0);
+   g_diaryLoadFailed = false;
+   g_diaryNextId = 1;
+   g_diaryStarted = 0;
+   g_diaryStartedDay = 0;
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      g_diarySuppress[i] = false;
+      g_diaryUpgrade[i].active = false;
+      g_diaryUpgrade[i].recordId = 0;
+      g_diaryUpgrade[i].placedDay = 0;
+      g_diaryUpgrade[i].placedAt = 0;
+      g_diaryUpgrade[i].localPlaced = 0;
+      g_diaryUpgrade[i].regime = 0;
+   }
+
+   bool needSave = false;
+   if(FileIsExist(g_diaryFile, g_diaryCommonFlag))
+   {
+      int h = FileOpen(g_diaryFile,
+                       FILE_READ | FILE_TXT | FILE_ANSI | g_diaryCommonFlag);
+      if(h != INVALID_HANDLE)
+      {
+         while(!FileIsEnding(h))
+         {
+            string line = FileReadString(h);
+            StringTrimLeft(line);
+            StringTrimRight(line);
+            if(line == "") continue;
+            if(StringGetCharacter(line, 0) == '#')
+            {
+               string p[];
+               int pc = StringSplit(line, ';', p);
+               if(pc >= 4)
+               {
+                  g_diaryStarted = (datetime)StringToInteger(p[2]);
+                  g_diaryStartedDay = StringToInteger(p[3]);
+               }
+               if(pc >= 2 && StringToInteger(p[1]) != DIARY_VERSION)
+                  g_diaryLoadFailed = true;   // preserve a file this build cannot read
+               continue;
+            }
+            SDiaryRecord r;
+            if(!DiaryParseRecordLine(line, r))
+               continue;
+            int n = ArraySize(g_diary);
+            ArrayResize(g_diary, n + 1);
+            g_diary[n] = r;
+            if(r.id >= g_diaryNextId)
+               g_diaryNextId = r.id + 1;
+         }
+         FileClose(h);
+      }
+      else
+      {
+         //  The file exists but cannot be read.  Keeping this run's
+         //  diary in memory is inconvenient; replacing a possibly
+         //  years-long history with an empty file would be far worse.
+         g_diaryLoadFailed = true;
+         g_diaryWarned = true;
+         PrintFormat("SimpleEA: calibration diary %s exists but could not be read "
+                     "(error %d). It will NOT be overwritten; close anything holding "
+                     "it open and restart the EA. Trading is unaffected.",
+                     g_diaryFile, GetLastError());
+      }
+   }
+   else
+      needSave = true;
+
+   if(g_diaryStarted <= 0)
+   {
+      datetime earliest = 0;
+      int n = ArraySize(g_diary);
+      for(int k = 0; k < n; k++)
+      {
+         datetime t = g_diary[k].localPlaced;
+         if(t > 0 && (earliest == 0 || t < earliest))
+            earliest = t;
+      }
+      g_diaryStarted = (earliest > 0) ? earliest : DiaryNowLocal();
+      needSave = true;
+   }
+   g_diaryStartedDay = DiaryDayKey(g_diaryStarted);
+
+   g_diaryReady = true;
+   DiaryRefreshSummaries();
+   DiaryReconcileProvisionalRecords();
+   if(needSave)
+      DiarySave();
+
+   if(g_diaryLoadFailed)
+      PrintFormat("SimpleEA: calibration diary for %s is being kept in memory only "
+                  "because the existing file could not be safely read (%s).",
+                  _Symbol, g_diaryFile);
+   else
+      PrintFormat("SimpleEA: calibration diary for %s ready - %d record(s) since %s (%s).",
+                  _Symbol, ArraySize(g_diary),
+                  TimeToString(g_diaryStarted, TIME_DATE), g_diaryFile);
+}
+
+//+------------------------------------------------------------------+
+void CheckDiaryDayTransition()
+{
+   if(!g_diaryReady) return;
+   long today = DiaryDayKey(DiaryNowLocal());
+   if(today == 0 || today == g_healthTodayKey) return;
+   DiaryReconcileOpenRecords();
+   DiaryRefreshSummaries();
+   if(ChartSupported() && !MarketClosed())
+   {
+      DrawPanel();
+      ChartRedraw(0);
+   }
+}
+
+//+------------------------------------------------------------------+
+string DiaryDayHeaderText()
+{
+   return(StringFormat("| Day: S %d W %d L %d",
+                       g_dayTotals.signals, g_dayTotals.wins,
+                       g_dayTotals.losses));
+}
+
+//+------------------------------------------------------------------+
+string DiaryPctText(int num, int den)
+{
+   if(den <= 0) return("--");
+   return(StringFormat("%d%%", (int)MathRound((double)num / (double)den * 100.0)));
+}
+
+//+------------------------------------------------------------------+
+string DiaryRatePctText(double rate)
+{
+   if(rate < 0.0) return("--");
+   return(StringFormat("%d%%", (int)MathRound(rate * 100.0)));
+}
+
+//+------------------------------------------------------------------+
+string DiaryRText(double r)
+{
+   return(StringFormat("%+.1fR", r));
+}
+
+//+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
 string AutoStatusTag(int i)
@@ -1978,6 +4328,11 @@ void ClearAutoCells(int i)
 //+------------------------------------------------------------------+
 void ResetAutoSlot(int i, bool keepSignalBar)
 {
+   //  Diary first, while the slot still knows what it was.  This is
+   //  the single exit every terminal path shares; a pending-to-market
+   //  upgrade and an OnInit slot clear are the explicitly suppressed
+   //  exceptions, because neither one ends the original order idea.
+   DiaryFinalizeSlot(i);
    ClearAutoSlotState(i);
    datetime sigBar = keepSignalBar ? g_auto[i].lastSignalBar : 0;
    g_auto[i].active        = false;
@@ -2014,14 +4369,37 @@ void ResetAutoSlot(int i, bool keepSignalBar)
    g_auto[i].fillBar       = 0;
    g_auto[i].lastEvalBar   = 0;
    g_auto[i].lastSignalBar = sigBar;
+   g_auto[i].diaryRecordId    = 0;
+   g_auto[i].diaryPositionId  = 0;
+   g_auto[i].diaryPlacedDayKey = 0;
+   g_auto[i].diaryPlanSlPts   = 0;
+   g_auto[i].diaryRegime      = 0;
+   g_auto[i].diaryStyle       = 0;
+   g_auto[i].diaryPlacedAt    = 0;
+   g_auto[i].diaryLocalPlaced = 0;
+   g_auto[i].diaryCostTp1Pct  = 0.0;
+   g_auto[i].diaryPeakTp1Pct  = 0.0;
+   g_auto[i].diaryDealNet     = 0.0;
+   g_auto[i].diaryDealVolume  = 0.0;
+   g_auto[i].diaryLastDeal    = 0;
+   g_auto[i].diaryLastExitPrice = 0.0;
+   g_auto[i].diaryLastExitReason = -1;
    ClearAutoCells(i);
 }
 
 //+------------------------------------------------------------------+
 void InitAutoState()
 {
+   //  Initialisation is not a trade ending.  On a parameter-change
+   //  reinit the in-memory slots can still describe live broker
+   //  orders; suppress diary finalisation while they are cleared so
+   //  SyncAutoState() can re-attach those same trades to their rows.
    for(int i = 0; i < TF_COUNT; i++)
+   {
+      g_diarySuppress[i] = true;
       ResetAutoSlot(i, false);
+      g_diarySuppress[i] = false;
+   }
    g_autoShown = false;
 }
 
@@ -3091,6 +5469,7 @@ bool TradeDeleteOrder(ulong ordTicket)
 //+------------------------------------------------------------------+
 void SyncAutoState()
 {
+   DiaryReconcileProvisionalRecords();
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    if(point <= 0.0) point = 0.00001;
 
@@ -3116,6 +5495,7 @@ void SyncAutoState()
          g_auto[i].active     = true;
          g_auto[i].isOpen     = true;
          g_auto[i].ticket     = tk;
+         g_auto[i].diaryPositionId = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
          g_auto[i].dir        = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
          g_auto[i].curLot     = PositionGetDouble(POSITION_VOLUME);
          g_auto[i].entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
@@ -3213,6 +5593,7 @@ void SyncAutoState()
             }
             if(g_auto[i].lastSignalBar == 0)
                g_auto[i].lastSignalBar = g_rows[i].lastBar;
+            DiaryAttachSlotRecord(i);
          }
          break;
       }
@@ -3261,6 +5642,7 @@ void SyncAutoState()
             g_auto[i].tp3Pts        = recTp3;
             g_auto[i].placedBar     = g_rows[i].lastBar;
             g_auto[i].lastSignalBar = g_rows[i].lastBar;
+            DiaryAttachSlotRecord(i);
          }
          break;
       }
@@ -3278,6 +5660,12 @@ bool PlacePlanOrder(int i)
    if(!CanPlaceAutoOrders()) return(false);
    if(g_plans[i].state != 2 || g_plans[i].dir == 0) return(false);
    if(!TrendMatchForTF(i)) return(false);
+   //  THE CHOPPY PERMISSION GATE, second key.  UpdatePlanRow() may keep
+   //  a state-2 plan alive solely to manage a position that was already
+   //  open when its row turned Choppy; that plan must never be sent as
+   //  a new order.  Choppy Trade Off means no market and no limit order
+   //  leaves the terminal from this row, whatever a caller requests.
+   if(g_rows[i].choppyBlocked) return(false);
    //  THE SCORE GATE, second key on the same door.  EvaluateRow() already
    //  refuses to publish a row whose score does not support its
    //  direction, so this can only fire if that were ever bypassed - but
@@ -3337,6 +5725,7 @@ bool PlacePlanOrder(int i)
       g_auto[i].lastSignalBar = g_rows[i].lastBar;
       InitTrailState(i);          // market fill: freeze the trailstop % now
       SaveAutoSlotState(i);
+      DiaryBeginPlacement(i, true, slPts, ask - bid);
       return(true);
    }
    else
@@ -3386,6 +5775,7 @@ bool PlacePlanOrder(int i)
       g_auto[i].lastEvalBar   = g_rows[i].lastBar;
       g_auto[i].lastSignalBar = g_rows[i].lastBar;
       SaveAutoSlotState(i);
+      DiaryBeginPlacement(i, false, slPts, ask - bid);
       return(true);
    }
 }
@@ -3395,7 +5785,8 @@ bool PlacePlanOrder(int i)
 //    - Manages open positions on signal/score changes and updates
 //      TP1/TP2/TP3 + tightens SL when a new candle closes.
 //    - Manages waiting pending limit orders (updates Entry/SL/TP,
-//      upgrades 2/3 -> 3/3 to Market, or cancels on flip/HOLD/expiry).
+//      upgrades 2/3 -> 3/3 to Market, or cancels on flip/HOLD, a
+//      Choppy-permission veto, or expiry).
 //    - Opens new Market/Limit orders for flat timeframes with a valid
 //      plan (independent rows; M15 & M30 tied only if that input is on).
 //+------------------------------------------------------------------+
@@ -3423,6 +5814,7 @@ void ManageAutoBar()
          double exitP = (dir > 0) ? bid : ask;
          double favPts = (dir > 0) ? (exitP - g_auto[i].entryPrice) / point
                                    : (g_auto[i].entryPrice - exitP) / point;
+         DiaryUpdateOpenSlot(i, favPts, true);
 
          // Track peak score strength in the trade's direction
          if(g_rows[i].ok && g_rows[i].direction == dir &&
@@ -3604,6 +5996,21 @@ void ManageAutoBar()
       {
          int  dir     = g_auto[i].dir;
 
+         // Choppy Trade OFF: if this row has turned Choppy, its waiting
+         // order is still an unfilled NEW entry.  Cancel it on this
+         // closed-bar pass instead of refreshing or upgrading it.  An
+         // already-open position is handled in CASE A and is untouched
+         // by this veto.
+         if(g_rows[i].choppyBlocked)
+         {
+            if(TradeDeleteOrder(g_auto[i].ticket))
+            {
+               g_auto[i].lastSignalBar = g_rows[i].lastBar;
+               ResetAutoSlot(i, true);
+            }
+            continue;
+         }
+
          // Timer/pause OFF: a waiting order is an unfilled entry, so
          // cancel it rather than refresh it (it could otherwise fill
          // while new placements are supposed to be paused).
@@ -3662,11 +6069,15 @@ void ManageAutoBar()
          //    delete the pending limit order and open the Market order immediately
          if(g_plans[i].market)
          {
+            DiaryBeginUpgrade(i);
             if(TradeDeleteOrder(g_auto[i].ticket))
             {
                ResetAutoSlot(i, false);
-               PlacePlanOrder(i);
+               bool upgraded = PlacePlanOrder(i);
+               DiaryFinishUpgrade(i, upgraded);
             }
+            else
+               DiaryCancelUpgrade(i);
             continue;
          }
 
@@ -3697,13 +6108,16 @@ void ManageAutoBar()
          {
             g_auto[i].lastEvalBar = g_rows[i].lastBar;
          }
+         g_auto[i].diaryPlanSlPts = g_plans[i].slPts;
+         DiarySyncSlotRecord(i, true);
          continue;
       }
 
       // ---- CASE C: Flat on this timeframe -> check new placement ----
       if(!g_auto[i].active)
       {
-         if(timerAllowsPlacement && g_rows[i].ok && g_rows[i].direction != 0 && g_plans[i].state == 2 &&
+         if(timerAllowsPlacement && g_rows[i].ok && !g_rows[i].choppyBlocked &&
+            g_rows[i].direction != 0 && g_plans[i].state == 2 &&
             TrendMatchForTF(i) && !HasTradedOnBar(i, g_rows[i].lastBar))
          {
             PlacePlanOrder(i);
@@ -3757,6 +6171,7 @@ void ManageAutoTick()
          double exitP  = (dir > 0) ? bid : ask;
          double favPts = (dir > 0) ? (exitP - g_auto[i].entryPrice) / point
                                    : (g_auto[i].entryPrice - exitP) / point;
+         DiaryUpdateOpenSlot(i, favPts, false);
 
          // ---- TP3 hit: close order in full --------------------------
          if(g_auto[i].tp3Pts > 0 && favPts >= (double)g_auto[i].tp3Pts - 1e-6)
@@ -4423,16 +6838,27 @@ void DrawSupportedPanel()
    int    autoSlot   = (int)MathMax(6, StringLen(autoText));
    int    resumeSlot = (resumeText == "") ? 0 : (StringLen(resumeText) + 2);
 
+   //  The Day diary counts live in the remaining header space after
+   //  Autotrading/Resume and before the symbol.  Their slot is part of
+   //  this same measurement, so they use blank space when it exists
+   //  and widen the header only when it does not - never collide.
+   string dayText    = DiaryDayHeaderText();
+   int    daySlot    = StringLen(dayText) + 2;
+   string healthNote = HealthNoteText();
+
    int    titleHeadW = pad + titleW + em
-                       + (16 + autoSlot + resumeSlot + 2 + StringLen(symRight)) * em + pad;
+                       + (16 + autoSlot + resumeSlot + daySlot + 2 + StringLen(symRight)) * em + pad;
    int    statusHeadW = pad + STATUS_LINE_C * em + pad;
    int    headW     = (int)MathMax(titleHeadW, statusHeadW);
    int    wantW     = (int)MathMax(NoticeWidth(), headW);
    wantW            = (int)MathMax(wantW, PlanWidthNeed());
+   if(healthNote != "")
+      wantW = (int)MathMax(wantW, pad + StringLen(healthNote) * em + pad);
    int    mainHeadH = MainHeaderHeight();
    g_panelW         = wantW;
    g_panelH         = mainHeadH + TF_COUNT * 2 * rowH + 8
-                      + PLAN_SEP_H + TotalPlanLines() * rowH;
+                      + PLAN_SEP_H + TotalPlanLines() * rowH
+                      + ((healthNote != "") ? (rowH + 4) : 0);
    MakeRect("bg",  x, y, g_panelW, g_panelH, InpBgColor, clrDimGray);
    MakeRect("sep", x + 4, y + mainHeadH - 6, g_panelW - 8, 1, clrDimGray, clrDimGray);
 
@@ -4454,6 +6880,8 @@ void DrawSupportedPanel()
                 clrOrange, InpFontSize, false);
    else
       DeleteObject("resumeVal");
+   MakeLabel("dayVal", autoValX + (autoSlot + resumeSlot + 2) * em, y + 8,
+             dayText, clrSilver, InpFontSize, false);
    MakeLabel("sym", x + g_panelW - pad, y + 8, symRight,
              InpTitleColor, InpFontSize, true);
 
@@ -4475,9 +6903,11 @@ void DrawSupportedPanel()
    int choppyCapX = timerCapX + 26 * em;  // 7 + 18-char timer reserve + 1 space
    MakeLabel("choppyCap", choppyCapX, statusY, "| Choppy Trade: ",
              clrSilver, InpFontSize, false);
+   //  This value is the PERMISSION (InpAllowChoppyTrade), not the box
+   //  entry style (InpRangeMode): Off must mean no new Choppy order.
    MakeLabel("choppyVal", choppyCapX + 16 * em, statusY,
-             InpRangeMode ? "On" : "Off",
-             InpRangeMode ? InpBuyColor : clrGray, InpFontSize, false);
+             InpAllowChoppyTrade ? "On" : "Off",
+             InpAllowChoppyTrade ? InpBuyColor : clrGray, InpFontSize, false);
 
    int linkCapX = timerCapX + 46 * em;    // choppy value (3) + 1 space further on
    MakeLabel("linkCap", linkCapX, statusY, "| M15/M30 Same Trend: ",
@@ -4510,6 +6940,11 @@ void DrawSupportedPanel()
                 clrWhite, InpFontSize, false);
       MakeLabel("style" + sfx, x + styleX, ry, g_rows[i].style,
                 clrGray, InpFontSize, false);
+      //  One compact diary verdict in the blank left half of the
+      //  Signal line.  PlanColumns() reserves this strip, so the
+      //  label can never run under "Signal:".
+      MakeLabel("health" + sfx, x + pad, ry + rowH, HealthLabelText(i),
+                HealthLabelColor(i), InpFontSize, false);
 
       MakeLabel("trendCap" + sfx,  x + cA, ry, "Trend:",
                 clrGray, InpFontSize, false);
@@ -4533,7 +6968,10 @@ void DrawSupportedPanel()
          //  greyed out - the gate now has a word and a colour instead of
          //  a silent HOLD.  A quiet row keeps its normal HOLD.
          int  sigDir = g_rows[i].direction;
-         bool greyed = false;
+         //  A Choppy-vetoed row keeps its would-be BUY/SELL word (that is
+         //  useful information, and an open trade still needs the same
+         //  direction for management), but grey says no NEW order may use it.
+         bool greyed = g_rows[i].choppyBlocked;
          if(sigDir == 0)
          {
             if(g_rows[i].score >= InpBuyScore)       { sigDir = 1;  greyed = true; }
@@ -4565,8 +7003,22 @@ void DrawSupportedPanel()
    //  would only hide the working.
    DrawPlanBlock(x, y);
 
+   // ---- one temporary bottom line, only while a lane is Poor --------
+   if(healthNote != "")
+   {
+      int healthNoteY = y + mainHeadH + 2 + TF_COUNT * 2 * rowH
+                        + PLAN_SEP_H + TotalPlanLines() * rowH + 2;
+      MakeLabel("healthNote", x + pad, healthNoteY, healthNote,
+                InpSellColor, InpFontSize, false);
+   }
+   else
+      DeleteObject("healthNote");
+
    // ---- the 2nd panel (Autotrading): right of the Main Panel ---------
    DrawAutoPanel();
+
+   // ---- the optional 3rd panel (History), opposite Autotrading ------
+   DrawHistoryPanel();
 
    // ---- retire the notice-only panel, if it was the last one shown ----
    DeleteObject("notice");
@@ -4604,7 +7056,10 @@ void PlanColumns(int &cA, int &vA, int &cB, int &vB, int &cC, int &vC)
       kindW = (int)MathMax(kindW, w);
    }
 
-   cA = (int)MathMax(ColX(PLAN_COL_A), 10 + 5 * em + kindW * em + em);
+   //  Column A also clears the compact health label on each Signal
+   //  line ("Health: Learning" + one space = 17 characters from pad).
+   cA = (int)MathMax(MathMax(ColX(PLAN_COL_A), 10 + 5 * em + kindW * em + em),
+                     10 + 17 * em);
    vA = cA + em * PLAN_LBL_C;
 
    //  Seed with the widest GROUP-1 values in this column ("Going down" is
@@ -4663,6 +7118,9 @@ int PlanWidthNeed()
    //  ("Choppy" / "+3 / 3" are the last cells of the two line 2s).
    need = (int)MathMax(need, vA + 5 * em + 10);      // "SELL" / "HOLD" / "Waiting"
    need = (int)MathMax(need, vB + 6 * em + 10);      // "Choppy" / "+3 / 3"
+   string healthNote = HealthNoteText();
+   if(healthNote != "")
+      need = (int)MathMax(need, 10 + StringLen(healthNote) * em + 10);
 
    for(int i = 0; i < TF_COUNT; i++)
    {
@@ -5053,6 +7511,215 @@ void DrawAutoPanel()
    g_autoShown = true;
 }
 
+//==================================================================
+//  THIRD PANEL : HISTORY (OPTIONAL, InpShowHealth)
+//==================================================================
+//  The diary records whether this panel is shown or not.  The panel
+//  is the diary opened up: Day and lifetime totals first, then one
+//  block per timeframe with its lifetime record, its 2/3-versus-3/3
+//  split, the health and trailstop performance of its newest closed
+//  trades, and the first fix that health suggests.  It sits opposite
+//  the Autotrading panel:
+//  Autotrading Right -> History below the Main Panel; Autotrading
+//  Bottom -> History on the right.
+//+------------------------------------------------------------------+
+int  g_histW     = 0;
+int  g_histH     = 0;
+bool g_histShown = false;
+
+//+------------------------------------------------------------------+
+void MakeHistLabel(string name, int x, int y, string text, color clr,
+                   int size, bool rightAnchor)
+{
+   string full = HIST_PREFIX + name;
+   if(ObjectFind(0, full) < 0)
+      ObjectCreate(0, full, OBJ_LABEL, 0, 0, 0);
+
+   if(size < 6) size = 6;
+   ObjectSetInteger(0, full, OBJPROP_CORNER,     CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, full, OBJPROP_XDISTANCE,  x);
+   ObjectSetInteger(0, full, OBJPROP_YDISTANCE,  y);
+   ObjectSetInteger(0, full, OBJPROP_COLOR,      clr);
+   ObjectSetInteger(0, full, OBJPROP_FONTSIZE,   size);
+   ObjectSetString (0, full, OBJPROP_FONT,       InpFont);
+   ObjectSetInteger(0, full, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, full, OBJPROP_HIDDEN,     true);
+   ObjectSetInteger(0, full, OBJPROP_BACK,       false);
+   ObjectSetInteger(0, full, OBJPROP_ANCHOR,
+                    rightAnchor ? ANCHOR_RIGHT_UPPER : ANCHOR_LEFT_UPPER);
+   ObjectSetString (0, full, OBJPROP_TEXT,       text);
+}
+
+//+------------------------------------------------------------------+
+void MakeHistRect(string name, int x, int y, int w, int hh, color bg, color border)
+{
+   string full = HIST_PREFIX + name;
+   if(ObjectFind(0, full) < 0)
+      ObjectCreate(0, full, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+
+   ObjectSetInteger(0, full, OBJPROP_CORNER,      CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, full, OBJPROP_XDISTANCE,   x);
+   ObjectSetInteger(0, full, OBJPROP_YDISTANCE,   y);
+   ObjectSetInteger(0, full, OBJPROP_XSIZE,       w);
+   ObjectSetInteger(0, full, OBJPROP_YSIZE,       hh);
+   ObjectSetInteger(0, full, OBJPROP_BGCOLOR,     bg);
+   ObjectSetInteger(0, full, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, full, OBJPROP_COLOR,       border);
+   ObjectSetInteger(0, full, OBJPROP_WIDTH,       1);
+   ObjectSetInteger(0, full, OBJPROP_BACK,        false);
+   ObjectSetInteger(0, full, OBJPROP_SELECTABLE,  false);
+   ObjectSetInteger(0, full, OBJPROP_HIDDEN,      true);
+}
+
+//+------------------------------------------------------------------+
+void DeleteHistoryPanel()
+{
+   ObjectsDeleteAll(0, HIST_PREFIX);
+   g_histShown = false;
+   g_histW = 0;
+   g_histH = 0;
+}
+
+//+------------------------------------------------------------------+
+void DrawHistoryPanel()
+{
+   if(!InpShowHealth || !ChartSupported() || !g_diaryReady)
+   {
+      if(g_histShown)
+         DeleteHistoryPanel();
+      return;
+   }
+
+   string lines[21];
+   color  colors[21];
+
+   lines[0] = StringFormat("Day: S %d  W %d  L %d  BE %d  Exp %d",
+                           g_dayTotals.signals, g_dayTotals.wins,
+                           g_dayTotals.losses, g_dayTotals.be,
+                           g_dayTotals.expired);
+   colors[0] = InpTitleColor;
+
+   lines[1] = StringFormat("All: S %d  W %d  L %d  BE %d  Open %d  Wait %d  Exp %d  Net %s",
+                           g_allTotals.signals, g_allTotals.wins,
+                           g_allTotals.losses, g_allTotals.be,
+                           g_allTotals.openCount, g_allTotals.waitCount,
+                           g_allTotals.expired, DiaryRText(g_allTotals.netR));
+   colors[1] = clrSilver;
+
+   for(int i = 0; i < TF_COUNT; i++)
+   {
+      SHealthLane lane = g_health[i];
+      int base = 2 + i * 6;
+
+      string status = lane.label;
+      if(StringFind(status, "Health:") != 0)
+         status = "Health: " + status;
+      if(lane.status < 0)
+         status += StringFormat(" (%d/%d closed)", lane.closedCount,
+                                HEALTH_MIN_CLOSED);
+      lines[base] = g_rows[i].tag + "  " + status;
+      colors[base] = HealthLabelColor(i);
+
+      int laneClosed = lane.wins + lane.losses + lane.be;
+      lines[base + 1] = StringFormat(
+         "  All: S %d W %d L %d BE %d Open %d Wait %d Exp %d | Win %s | Net %s",
+         lane.signals, lane.wins, lane.losses, lane.be,
+         lane.openCount, lane.waitCount, lane.expired,
+         DiaryPctText(lane.wins, laneClosed), DiaryRText(lane.netR));
+      colors[base + 1] = clrSilver;
+
+      lines[base + 2] = StringFormat(
+         "  Score 2/3: W %d L %d TP1 %s (%d closed) | 3/3: W %d L %d TP1 %s (%d closed)",
+         lane.score2Wins, lane.score2Losses,
+         DiaryPctText(lane.score2Tp1, lane.score2Closed), lane.score2Closed,
+         lane.score3Wins, lane.score3Losses,
+         DiaryPctText(lane.score3Tp1, lane.score3Closed), lane.score3Closed);
+      colors[base + 2] = clrSilver;
+
+      string peakTxt = (lane.recMedianPeak < 0.0)
+                       ? "--"
+                       : StringFormat("%.0f%%", lane.recMedianPeak);
+      string costTxt = (lane.recMedianCost < 0.0)
+                       ? "--"
+                       : StringFormat("%.0f%%", lane.recMedianCost);
+      lines[base + 3] = StringFormat(
+         "  Last %d: W %d L %d BE %d | TP1 %s Peak %s Cost %s | Net %s",
+         lane.recN, lane.recWins, lane.recLosses, lane.recBe,
+         DiaryRatePctText(lane.recTp1Rate), peakTxt, costTxt,
+         DiaryRText(lane.recNetR));
+      colors[base + 3] = InpTitleColor;
+
+      string trailLockTxt = (lane.recTrailMedianLock < 0.0)
+                            ? "--"
+                            : StringFormat("%.0f%%", lane.recTrailMedianLock);
+      string trailGivebackTxt = (lane.recTrailMedianGiveback < 0.0)
+                                ? "--"
+                                : StringFormat("%.0f%%",
+                                               lane.recTrailMedianGiveback);
+      string trailStopTxt = (lane.recTrailStopKnown > 0)
+                            ? IntegerToString(lane.recTrailStopExits)
+                            : "--";
+      lines[base + 4] = StringFormat(
+         "  Trail %d: Armed %s | Lock %s | Stop exits %s | Giveback %s",
+         lane.recN, DiaryRatePctText(lane.recTrailArmRate), trailLockTxt,
+         trailStopTxt, trailGivebackTxt);
+      colors[base + 4] = clrSilver;
+
+      lines[base + 5] = "  First step: " + lane.action;
+      colors[base + 5] = HealthLabelColor(i);
+   }
+
+   lines[20] = "Diary suggests first steps; it never changes settings.";
+   colors[20] = clrGray;
+
+   int em = CharW(InpFontSize);
+   int rowH = g_rowH;
+   int pad = 10;
+   string sinceText = "|  " + _Symbol + "  |  Since " +
+                      TimeToString(g_diaryStarted, TIME_DATE);
+   int widthNeed = pad + 7 * CharW(InpFontSize + 1) + em +
+                   StringLen(sinceText) * em + pad;
+   for(int l = 0; l < 21; l++)
+      widthNeed = (int)MathMax(widthNeed, pad + StringLen(lines[l]) * em + pad);
+   widthNeed = (int)MathMax(widthNeed, HIST_W_MIN);
+
+   int x3 = (InpAutoPanelPos == AUTO_POS_RIGHT)
+            ? InpPanelX
+            : (InpPanelX + g_panelW + AUTO_GAP_X);
+   int y3 = (InpAutoPanelPos == AUTO_POS_RIGHT)
+            ? (InpPanelY + g_panelH + AUTO_GAP_Y)
+            : InpPanelY;
+
+   g_histW = widthNeed;
+   g_histH = HEAD_H + 21 * rowH + 2 * 4 + 8;
+   MakeHistRect("bg", x3, y3, g_histW, g_histH, InpBgColor, clrDimGray);
+   MakeHistRect("sep", x3 + 4, y3 + HEAD_H - 6, g_histW - 8, 1,
+                clrDimGray, clrDimGray);
+   MakeHistLabel("title", x3 + pad, y3 + 7, "History",
+                 InpTitleColor, InpFontSize + 1, false);
+   MakeHistLabel("since", x3 + g_histW - pad, y3 + 8, sinceText,
+                 InpTitleColor, InpFontSize, true);
+
+   int curY = y3 + HEAD_H + 2;
+   for(int l = 0; l < 21; l++)
+   {
+      //  A hairline before the second and third timeframe blocks.
+      if(l == 8 || l == 14)
+      {
+         MakeHistRect("laneSep" + IntegerToString(l), x3 + 4, curY + 1,
+                      g_histW - 8, 1, clrDimGray, clrDimGray);
+         curY += 4;
+      }
+      MakeHistLabel("line" + IntegerToString(l), x3 + pad, curY,
+                    lines[l], colors[l], InpFontSize, false);
+      curY += rowH;
+   }
+
+   g_histShown = true;
+}
+
+//+------------------------------------------------------------------+
+
 //+------------------------------------------------------------------+
 //  THE NOTICE PANEL - an unsupported chart timeframe, or a market that
 //  is not trading.
@@ -5095,6 +7762,8 @@ void DrawNoticePanel(const string noticeTxt)
    DeleteObject("autoCap");
    DeleteObject("autoVal");
    DeleteObject("resumeVal");
+   DeleteObject("dayVal");
+   DeleteObject("healthNote");
    DeleteObject("timerCap");
    DeleteObject("timerVal");
    DeleteObject("choppyCap");
@@ -5103,6 +7772,7 @@ void DrawNoticePanel(const string noticeTxt)
    DeleteObject("linkVal");
    DeletePlanObjects();
    DeleteAutoPanel();
+   DeleteHistoryPanel();
 
    MakeLabel("title", x + pad, y + 7, "SimpleEA",
              InpTitleColor, InpFontSize + 1, false);
@@ -5122,6 +7792,7 @@ void DrawNoticePanel(const string noticeTxt)
       string sfx = "_" + IntegerToString(i);
       DeleteObject("tf"        + sfx);
       DeleteObject("style"     + sfx);
+      DeleteObject("health"    + sfx);
       DeleteObject("trendCap"  + sfx);
       DeleteObject("regimeCap" + sfx);
       DeleteObject("signalCap" + sfx);
@@ -5141,7 +7812,9 @@ void DeletePanel()
 {
    ObjectsDeleteAll(0, OBJ_PREFIX);
    ObjectsDeleteAll(0, AUTO_PREFIX);
+   ObjectsDeleteAll(0, HIST_PREFIX);
    g_autoShown = false;
+   g_histShown = false;
    ChartRedraw(0);
 }
 //+------------------------------------------------------------------+

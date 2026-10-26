@@ -64,11 +64,37 @@ line and verifies every rule:
           the moment placement is allowed again - the input itself is
           never rewritten (MQL5 inputs are read-only).
 
+  Rule 17 Calibration-health diary: one record per original order
+          idea actually placed (a repriced pending and a 2/3->3/3
+          upgrade remain one S; TP1/TP2 partials remain one trade).
+          S counts placed market/pending orders by PC-local placement
+          day; W/L/BE/Expired count by final close/expiry day.  The
+          diary records with InpShowHealth off, persists across a
+          restart, keeps lifetime and recent-30 lane health separate,
+          requires 30 closed trades plus two-half persistence for a
+          Poor verdict, and only suggests a first fix.  Header line 1
+          reserves the Day S/W/L slot after Autotrading/Resume; each
+          row has one compact health label; only Poor adds a note.
+          The diary also records observed trail activation, the best
+          pre-TP1 trailed lock, whether the final deal was a broker
+          stop exit, and peak-to-final giveback; those facts add one
+          descriptive History line but never become a health verdict.
+          The optional History panel sits opposite Autotrading.
+
+  Rule 16 Choppy permission is separate from Range Mode:
+          InpAllowChoppyTrade=false vetoes every NEW order on a row
+          currently reading Choppy (2/3 limit and 3/3 market alike),
+          cancels a waiting pending when its row turns Choppy, and
+          leaves an already-open trade under normal management.  With
+          permission on, InpRangeMode only chooses box-band versus
+          half-ATR pullback pricing for an allowed Choppy 2/3.
+
   Part 2 (the regime now DECIDES instead of abstaining):
-          Steady rows trade the trend game exactly as above; Choppy rows
-          place a RANGE FADE - a limit at the opposite band of the box,
-          target = half the box (midpoint), stop = band + RANGE_SL_ATR
-          ATR, kind "range fade"; Mixed / dead / gated chop rows place
+          Steady rows trade the trend game exactly as above; allowed
+          Choppy rows with Range Mode on place a RANGE FADE - a limit at
+          the opposite band of the box, target = half the box
+          (midpoint), stop = band + RANGE_SL_ATR ATR, kind "range fade";
+          permission-off Choppy rows and Mixed / dead / gated rows place
           nothing and the plan block says why.  A closed bar outside
           the trade's box kills it (cancel pending / close open), range
           fades are exempt from the score watcher, and blocked rows show
@@ -125,7 +151,8 @@ def parse_clock_minutes(value):
     return hour * 60 + minute
 
 
-def header_line1_geometry(word, resume, font=FONT, dpi=DPI, symbol="XAUUSD.s", tf="M15"):
+def header_line1_geometry(word, resume, font=FONT, dpi=DPI, symbol="XAUUSD.s", tf="M15",
+                          day_text="| Day: S 0 W 0 L 0"):
     """DrawSupportedPanel()'s line-1 geometry, mirrored exactly.
 
     Returns (panel_w, rightmost_pixel_of_line_1, left_pixel_of_symbol) so the
@@ -138,12 +165,14 @@ def header_line1_geometry(word, resume, font=FONT, dpi=DPI, symbol="XAUUSD.s", t
     sym = "|  %s  |  %s" % (symbol, tf)
     auto_slot = max(6, len(word))
     resume_slot = 0 if not resume else len(resume) + 2
-    title_head_w = 10 + title_w + em + (16 + auto_slot + resume_slot + 2 + len(sym)) * em + 10
+    day_slot = len(day_text) + 2
+    title_head_w = 10 + title_w + em + (16 + auto_slot + resume_slot + day_slot + 2 + len(sym)) * em + 10
     status_head_w = 10 + STATUS_LINE_C * em + 10
     panel_w = max(title_head_w, status_head_w, PLAN_W_MIN)
     right = 10 + title_w + em + 16 * em + auto_slot * em
     if resume:
         right += 2 * em + len(resume) * em
+    right += 2 * em + len(day_text) * em
     sym_left = panel_w - 10 - len(sym) * em
     return panel_w, right, sym_left, em
 
@@ -198,11 +227,196 @@ def calc_tp2_close_lot(cur_lot, spec):
     return close_lot
 
 
+DIARY_VERSION = 1
+HEALTH_MIN_CLOSED = 30
+HEALTH_RECENT_N = 30
+HEALTH_BASE_N = 30
+HEALTH_SCORE_MIN_EACH = 10
+HEALTH_STYLE_MIN_EACH = 15
+HEALTH_BE_EPS_R = 0.05
+HIST_W_MIN = 620
+
+
+def diary_median(values):
+    vals = sorted(values)
+    if not vals:
+        return -1.0
+    mid = len(vals) // 2
+    if len(vals) % 2:
+        return float(vals[mid])
+    return 0.5 * (float(vals[mid - 1]) + float(vals[mid]))
+
+
+def diary_record_line(rec):
+    """SDiaryRecord's 50-field diary row in SimpleAdvisor.mq5."""
+    fields = [
+        DIARY_VERSION, rec["id"], TAGS.index(rec["tf"]), rec["dir"],
+        rec["score"], rec["regime"], rec["style"], rec["status"],
+        rec["outcome"], rec["placed_day"], rec["closed_day"],
+        rec["placed_at"], rec["closed_at"], rec["local_placed"],
+        rec["local_closed"], rec["order_ticket"], rec["position_id"],
+        "%.8f" % rec["lot"], "%.8f" % rec["entry_price"],
+        rec["plan_sl_pts"], rec["tp1_pts"], rec["tp2_pts"], rec["tp3_pts"],
+        "%.4f" % rec["cost_tp1_pct"], "%.4f" % rec["peak_tp1_pct"],
+        "%.6f" % rec["result_r"], int(rec["filled"]), int(rec["tp1_hit"]),
+        int(rec["tp2_hit"]), int(rec["tp3_hit"]), "%.6f" % rec["risk_pct"],
+        int(rec["use_risk"]), int(rec["use_min_lot"]),
+        int(rec["use_stop_loss"]), int(rec["use_trail_stop"]),
+        int(rec["allow_choppy"]), int(rec["range_mode"]), rec["exit_reason"],
+        int(rec["provisional"]), "%.10f" % rec["point_value"],
+        rec["trail_pct"], int(rec["trail_steady"]), int(rec["trail_known"]),
+        int(rec["trail_armed"]), int(rec["protection_armed"]),
+        "%.4f" % rec["trail_lock_tp1_pct"],
+        "%.4f" % rec["best_lock_tp1_pct"], "%.4f" % rec["final_tp1_pct"],
+        int(rec["stop_exit"]), int(rec["stop_known"]),
+    ]
+    return ";".join(str(x) for x in fields)
+
+
+def diary_parse_record_line(line):
+    """DiaryParseRecordLine() in SimpleAdvisor.mq5."""
+    p = line.strip().split(";")
+    if len(p) < 40 or int(p[0]) != DIARY_VERSION:
+        return None
+    tf = int(p[2])
+    if tf < 0 or tf >= TF_COUNT:
+        return None
+    rec = dict(
+        id=int(p[1]), tf=TAGS[tf], dir=int(p[3]), score=int(p[4]),
+        regime=int(p[5]), style=int(p[6]), status=int(p[7]),
+        outcome=int(p[8]), placed_day=int(p[9]), closed_day=int(p[10]),
+        placed_at=int(p[11]), closed_at=int(p[12]),
+        local_placed=int(p[13]), local_closed=int(p[14]),
+        order_ticket=int(p[15]), position_id=int(p[16]),
+        lot=float(p[17]), entry_price=float(p[18]),
+        plan_sl_pts=int(p[19]), tp1_pts=int(p[20]), tp2_pts=int(p[21]),
+        tp3_pts=int(p[22]), cost_tp1_pct=float(p[23]),
+        peak_tp1_pct=float(p[24]), result_r=float(p[25]),
+        filled=bool(int(p[26])), tp1_hit=bool(int(p[27])),
+        tp2_hit=bool(int(p[28])), tp3_hit=bool(int(p[29])),
+        risk_pct=float(p[30]), use_risk=bool(int(p[31])),
+        use_min_lot=bool(int(p[32])), use_stop_loss=bool(int(p[33])),
+        use_trail_stop=bool(int(p[34])), allow_choppy=bool(int(p[35])),
+        range_mode=bool(int(p[36])), exit_reason=p[37],
+        provisional=bool(int(p[38])), point_value=float(p[39]),
+        trail_pct=0, trail_steady=False, trail_known=False,
+        trail_armed=False, protection_armed=False,
+        trail_lock_tp1_pct=-1.0, best_lock_tp1_pct=-9999.0,
+        final_tp1_pct=-9999.0, stop_exit=False, stop_known=False,
+    )
+    # Rows written before trailstop performance was recorded end at
+    # p[39]; they keep the unknown defaults above.
+    if len(p) > 40: rec["trail_pct"] = int(p[40])
+    if len(p) > 41: rec["trail_steady"] = bool(int(p[41]))
+    if len(p) > 42: rec["trail_known"] = bool(int(p[42]))
+    if len(p) > 43: rec["trail_armed"] = bool(int(p[43]))
+    if len(p) > 44: rec["protection_armed"] = bool(int(p[44]))
+    if len(p) > 45: rec["trail_lock_tp1_pct"] = float(p[45])
+    if len(p) > 46: rec["best_lock_tp1_pct"] = float(p[46])
+    if len(p) > 47: rec["final_tp1_pct"] = float(p[47])
+    if len(p) > 48: rec["stop_exit"] = bool(int(p[48]))
+    if len(p) > 49: rec["stop_known"] = bool(int(p[49]))
+    return rec
+
+
+def diary_segment(records):
+    """DiaryComputeSegment() in SimpleAdvisor.mq5."""
+    seg = dict(n=len(records), wins=0, losses=0, be=0, tp1=0, tp2=0,
+               tp3=0, near=0, cost_n=0, net_r=0.0, tp1_rate=-1.0,
+               median_peak=-1.0, median_cost=-1.0,
+               trail_eligible=0, trail_armed=0, trail_lock_n=0,
+               trail_stop_known=0, trail_stop_exits=0,
+               trail_giveback_n=0, trail_arm_rate=-1.0,
+               median_trail_lock=-1.0, median_trail_giveback=-1.0)
+    peaks = []
+    costs = []
+    trail_locks = []
+    trail_givebacks = []
+    for rec in records:
+        if rec["outcome"] == 1:
+            seg["wins"] += 1
+        elif rec["outcome"] == 2:
+            seg["losses"] += 1
+        elif rec["outcome"] == 3:
+            seg["be"] += 1
+        seg["tp1"] += bool(rec["tp1_hit"])
+        seg["tp2"] += bool(rec["tp2_hit"])
+        seg["tp3"] += bool(rec["tp3_hit"])
+        if not rec["tp1_hit"] and 70.0 <= rec["peak_tp1_pct"] < 100.0:
+            seg["near"] += 1
+        seg["net_r"] += rec["result_r"]
+        peaks.append(max(0.0, rec["peak_tp1_pct"]))
+        if rec["cost_tp1_pct"] > 0.0:
+            costs.append(rec["cost_tp1_pct"])
+        if rec.get("use_trail_stop", False) and rec.get("trail_known", False):
+            seg["trail_eligible"] += 1
+            if rec.get("trail_armed", False):
+                seg["trail_armed"] += 1
+                if rec.get("trail_lock_tp1_pct", -1.0) >= 0.0:
+                    trail_locks.append(rec["trail_lock_tp1_pct"])
+                if rec.get("stop_known", False):
+                    seg["trail_stop_known"] += 1
+                    seg["trail_stop_exits"] += bool(rec.get("stop_exit", False))
+                if rec.get("final_tp1_pct", -9999.0) > -9000.0:
+                    trail_givebacks.append(max(
+                        0.0, rec["peak_tp1_pct"] - rec["final_tp1_pct"]))
+    seg["cost_n"] = len(costs)
+    seg["trail_lock_n"] = len(trail_locks)
+    seg["trail_giveback_n"] = len(trail_givebacks)
+    if seg["trail_eligible"]:
+        seg["trail_arm_rate"] = seg["trail_armed"] / seg["trail_eligible"]
+    seg["median_trail_lock"] = diary_median(trail_locks)
+    seg["median_trail_giveback"] = diary_median(trail_givebacks)
+    if seg["n"]:
+        seg["tp1_rate"] = seg["tp1"] / seg["n"]
+    seg["median_peak"] = diary_median(peaks)
+    seg["median_cost"] = diary_median(costs)
+    return seg
+
+
+def diary_subset_level(sub_n, sub_tp1, sub_r, other_n, other_tp1, other_r):
+    """DiarySubsetLevel() in SimpleAdvisor.mq5."""
+    if sub_n < HEALTH_STYLE_MIN_EACH or other_n < HEALTH_STYLE_MIN_EACH:
+        return 0
+    rate_diff = sub_tp1 / sub_n - other_tp1 / other_n
+    avg_diff = sub_r / sub_n - other_r / other_n
+    if rate_diff <= -0.20 and avg_diff <= -0.20 and sub_r / sub_n <= 0.0:
+        return 2
+    if rate_diff <= -0.12 or avg_diff <= -0.15:
+        return 1
+    return 0
+
+
+def diary_subset_persists(records, box_split):
+    """DiarySubsetPersists() in SimpleAdvisor.mq5."""
+    split_at = len(records) // 2
+    halves = (records[:split_at], records[split_at:])
+    for half in halves:
+        sub = [r for r in half
+               if (r["style"] == 2 if box_split else r["regime"] == 2)]
+        other = [r for r in half if r not in sub]
+        # Identity, not dict equality, decides membership when two rows
+        # happen to carry identical test values.
+        sub_ids = {id(r) for r in sub}
+        other = [r for r in half if id(r) not in sub_ids]
+        if len(sub) < 5 or len(other) < 5:
+            return False
+        rate_diff = (sum(r["tp1_hit"] for r in sub) / len(sub)
+                     - sum(r["tp1_hit"] for r in other) / len(other))
+        avg_diff = (sum(r["result_r"] for r in sub) / len(sub)
+                    - sum(r["result_r"] for r in other) / len(other))
+        if rate_diff > 0.0 and avg_diff > 0.0:
+            return False
+    return True
+
 class AutoSlot:
     def __init__(self):
         self.reset(keep_signal_bar=False)
 
     def reset(self, keep_signal_bar=True):
+        owner = getattr(self, "owner", None)
+        if owner is not None and getattr(self, "active", False):
+            owner.diary_finalize_slot(self.tag)
         sig_bar = getattr(self, "last_signal_bar", 0) if keep_signal_bar else 0
         self.active = False
         self.is_open = False
@@ -238,6 +452,18 @@ class AutoSlot:
         self.fill_bar = 0
         self.last_eval_bar = 0
         self.last_signal_bar = sig_bar
+        self.diary_record_id = 0
+        self.diary_placed_day = 0
+        self.diary_plan_sl_pts = 0
+        self.diary_regime = 0
+        self.diary_style = 0
+        self.diary_cost_tp1_pct = 0.0
+        self.diary_peak_tp1_pct = 0.0
+        self.diary_deal_net = 0.0
+        self.diary_deal_volume = 0.0
+        self.diary_last_exit_price = 0.0
+        self.diary_stop_exit = False
+        self.diary_stop_known = False
         self.head = ""
         self.lbl = {}
         self.val = {}
@@ -252,12 +478,15 @@ class AutoTraderSim:
     #  first SL); the no-SL behaviour is verified explicitly further down
     #  with use_stop_loss=False.
     def __init__(self, symbol="XAUUSD", spec=None, balance=800.0, auto_trading=True,
-                 require_m15_m30_same_trend=False, range_mode=True,
+                 require_m15_m30_same_trend=False, allow_choppy_trade=True,
+                 range_mode=True,
                  use_auto_schedule=False, auto_start_time="08:00",
                  auto_end_time="17:00", auto_off_hours=0,
                  local_minute_of_day=600, gmt_now=1700000000, pause_store=None,
                  use_stop_loss=True, use_trail_stop=True, trail_pct_tight=40,
                  trail_pct_steady=55, auto_panel_pos=AUTO_POS_RIGHT, panel_x=12, panel_y=24,
+                 show_health=False, diary_store=None, local_day_key=20261026,
+                 chart_tf="M5",
                  use_risk=True, use_min_lot=False, risk2=0.5, risk3=1.0,
                  sl_atr=None, tp_atr=None, pend_atr=0.5, valid_bars=3):
         self.symbol = symbol
@@ -266,6 +495,7 @@ class AutoTraderSim:
         self.cur = "USD"
         self.auto_trading = auto_trading
         self.require_m15_m30_same_trend = require_m15_m30_same_trend
+        self.allow_choppy_trade = allow_choppy_trade
         self.range_mode = range_mode
         self.use_auto_schedule = use_auto_schedule
         self.auto_start_time = auto_start_time
@@ -290,6 +520,9 @@ class AutoTraderSim:
         self.trail_pct_tight = trail_pct_tight
         self.trail_pct_steady = trail_pct_steady
         self.auto_panel_pos = auto_panel_pos
+        self.show_health = show_health          # InpShowHealth (panel only)
+        self.local_day_key = local_day_key      # PC-local YYYYMMDD
+        self.chart_tf = chart_tf
         self.panel_x = panel_x
         self.panel_y = panel_y
         self.use_risk = use_risk
@@ -313,7 +546,8 @@ class AutoTraderSim:
         self.range_sl_atr = RANGE_SL_ATR
         self.atr = {"M5": 0.28, "M15": 0.85, "M30": 1.70}
         self.rows = {t: dict(ok=True, dir=0, score=0, trend="Sideways",
-                             regime="Mixed", last_bar=1000, mode=0, reason="",
+                             regime="Mixed", last_bar=1000, mode=0,
+                             choppy_blocked=False, reason="",
                              rng_top=0.0, rng_bot=0.0, last_close=0.0)
                      for t in TAGS}
         self.plans = {t: dict(state=0, dir=0, score=0, market=False, lines=1,
@@ -321,6 +555,41 @@ class AutoTraderSim:
                               sl_pts=0, tp_pts=0, tp1_pts=0, tp2_pts=0, tp3_pts=0,
                               lbl={}, val={}) for t in TAGS}
         self.auto = {t: AutoSlot() for t in TAGS}
+        #  DiaryInit(): load this symbol's rows even when the History
+        #  panel is hidden.  A shared diary_store models a restart.
+        self.diary_store = {} if diary_store is None else diary_store
+        # load_failed models an existing diary file that FileOpen could
+        # not safely read (or whose format version is not understood):
+        # EA keeps that run in memory and refuses to overwrite it blind.
+        self.diary_load_failed = bool(self.diary_store.get("load_failed", False))
+        self.diary_started_day = int(self.diary_store.get("started_day", local_day_key))
+        self.diary = []
+        self.diary_next_id = 1
+        self.diary_event_seq = 0
+        for line in ([] if self.diary_load_failed
+                     else self.diary_store.get("lines", [])):
+            rec = diary_parse_record_line(line)
+            if rec is None:
+                continue
+            self.diary.append(rec)
+            self.diary_next_id = max(self.diary_next_id, rec["id"] + 1)
+            self.diary_event_seq = max(self.diary_event_seq,
+                                       rec["placed_at"], rec["closed_at"])
+        self.diary_suppress = {t: False for t in TAGS}
+        self.diary_upgrade = {t: dict(active=False) for t in TAGS}
+        self.day_totals = {}
+        self.all_totals = {}
+        self.health = {}
+        self.diary_refresh_summaries()
+        self.diary_save()
+        for t, slot in self.auto.items():
+            slot.owner = self
+            slot.tag = t
+        self.hist_x = 0
+        self.hist_y = 0
+        self.hist_w = 0
+        self.hist_h = 0
+        self.hist_shown = False
         self.sig_birth = {t: 0 for t in TAGS}
         self.next_ticket = 100
         self.panel_w = PLAN_W_MIN
@@ -353,20 +622,28 @@ class AutoTraderSim:
         if reason is None:
             reason = "" if direction != 0 else (
                 "score %+d/3 — under the %+d/%+d gate" % (score, self.buy_score, self.sell_score))
-        #  THE SCORE GATE (ScoreAllowsTrade): the score decides WHETHER the
-        #  row trades, in every regime.  The regime only decides HOW the
-        #  limit is priced (mode == 2 = at the box band).
+        #  THE SCORE GATE (ScoreAllowsTrade) publishes the would-be
+        #  direction.  InpAllowChoppyTrade is then a separate NEW-entry
+        #  veto on a Choppy row: direction/score stay intact (so an open
+        #  trade is not mistaken for HOLD), box mode is suppressed, and
+        #  update_plan()/place_plan_order() refuse a new order.
         if direction != 0 and not self.score_allows(direction, score):
             reason = "score %+d/3 — under the %+d/%+d gate" % (
                 score, self.buy_score, self.sell_score)
             mode = 0
             direction = 0
+        choppy_blocked = (direction != 0 and regime == "Choppy"
+                          and not self.allow_choppy_trade)
+        if choppy_blocked:
+            reason = "choppy — Choppy Trade is Off"
+            mode = 0
         r["ok"] = ok
         r["dir"] = direction
         r["score"] = score
         r["trend"] = trend
         r["regime"] = regime
         r["mode"] = mode
+        r["choppy_blocked"] = choppy_blocked
         r["reason"] = reason
         r["rng_top"] = rng_top
         r["rng_bot"] = rng_bot
@@ -512,11 +789,12 @@ class AutoTraderSim:
         return "Resume %dm" % mins
 
     def header_line1_slots(self):
-        """The two character slots DrawSupportedPanel() reserves on line 1."""
+        """The character slots DrawSupportedPanel() reserves on line 1."""
         auto_slot = max(6, len(self.auto_trading_header_text()))
         resume = self.resume_header_text()
         resume_slot = 0 if resume == "" else len(resume) + 2
-        return auto_slot, resume_slot
+        day_slot = len(self.diary_day_header_text()) + 2
+        return auto_slot, resume_slot, day_slot
 
     def timer_header_text(self):
         """TimerHeaderText() in SimpleAdvisor.mq5."""
@@ -532,13 +810,765 @@ class AutoTraderSim:
     def header_status_values(self):
         """The three values on Main Panel header line 2."""
         return (self.timer_header_text(),
-                "On" if self.range_mode else "Off",
+                "On" if self.allow_choppy_trade else "Off",
                 "On" if self.require_m15_m30_same_trend else "Off")
 
     def header_status_line(self):
         timer, choppy, same_trend = self.header_status_values()
         return "Timer: %s | Choppy Trade: %s | M15/M30 Same Trend: %s" % (
             timer, choppy, same_trend)
+
+    # ---- calibration-health diary (Rule 17) ----------------------------
+    def diary_save(self):
+        """DiarySave(): persist the whole small diary into the store."""
+        if self.diary_load_failed:
+            return
+        self.diary_store["started_day"] = self.diary_started_day
+        self.diary_store["lines"] = [diary_record_line(r) for r in self.diary]
+
+    def diary_after_change(self):
+        self.diary_save()
+        self.diary_refresh_summaries()
+
+    def diary_record_index(self, record_id):
+        if not record_id:
+            return -1
+        for idx, rec in enumerate(self.diary):
+            if rec["id"] == record_id:
+                return idx
+        return -1
+
+    def diary_regime_code(self, tag):
+        regime = self.rows[tag]["regime"]
+        return 1 if regime == "Steady" else (2 if regime == "Choppy" else 0)
+
+    def diary_cost_pct(self, spread_price, tp1_pts):
+        point = self.spec["point"]
+        if point <= 0.0 or tp1_pts <= 0 or spread_price < 0.0:
+            return 0.0
+        return (spread_price / point) / tp1_pts * 100.0
+
+    def diary_begin_placement(self, tag, market, plan_sl_pts):
+        """DiaryBeginPlacement(): S exists only after a placed order."""
+        a = self.auto[tag]
+        if not a.active:
+            return
+        self.diary_event_seq += 1
+        regime = self.diary_regime_code(tag)
+        r = self.rows[tag]
+        if market:
+            style = 4 if regime == 2 else 0
+        elif r["mode"] == 2:
+            style = 2
+        else:
+            style = 3 if regime == 2 else 1
+
+        a.diary_placed_day = self.local_day_key
+        a.diary_plan_sl_pts = plan_sl_pts
+        a.diary_regime = regime
+        a.diary_style = style
+        a.diary_cost_tp1_pct = self.diary_cost_pct(self.ask - self.bid,
+                                                   a.tp1_pts)
+        a.diary_peak_tp1_pct = 0.0
+        a.diary_deal_net = 0.0
+        a.diary_deal_volume = 0.0
+        a.diary_last_exit_price = 0.0
+        a.diary_stop_exit = False
+        a.diary_stop_known = False
+
+        rec = dict(
+            id=self.diary_next_id, tf=tag, dir=a.dir, score=a.entry_score,
+            regime=regime, style=style, status=0, outcome=0,
+            placed_day=self.local_day_key, closed_day=0,
+            placed_at=self.gmt_now + self.diary_event_seq, closed_at=0,
+            local_placed=self.gmt_now + self.diary_event_seq, local_closed=0,
+            order_ticket=a.ticket,
+            position_id=a.ticket if market else 0,
+            lot=a.init_lot, entry_price=a.entry_price,
+            plan_sl_pts=plan_sl_pts, tp1_pts=a.tp1_pts, tp2_pts=a.tp2_pts,
+            tp3_pts=a.tp3_pts, cost_tp1_pct=a.diary_cost_tp1_pct,
+            peak_tp1_pct=0.0, result_r=0.0, filled=bool(market),
+            tp1_hit=False, tp2_hit=False, tp3_hit=False,
+            risk_pct=self.risk2, use_risk=self.use_risk,
+            use_min_lot=self.use_min_lot, use_stop_loss=self.use_stop_loss,
+            use_trail_stop=self.use_trail_stop,
+            allow_choppy=self.allow_choppy_trade, range_mode=self.range_mode,
+            exit_reason="", provisional=False,
+            point_value=point_value_per_lot(self.spec),
+            trail_pct=a.trail_pct if market else 0,
+            trail_steady=bool(market and a.trail_steady),
+            trail_known=bool(market),
+            trail_armed=bool(market and a.trail_started),
+            protection_armed=bool(market and a.trail_active),
+            trail_lock_tp1_pct=-1.0, best_lock_tp1_pct=-9999.0,
+            final_tp1_pct=-9999.0, stop_exit=False, stop_known=False,
+        )
+        self.diary_next_id += 1
+        self.diary.append(rec)
+        a.diary_record_id = rec["id"]
+        self.diary_after_change()
+
+    def diary_find_open_record(self, tag):
+        a = self.auto[tag]
+        idx = self.diary_record_index(a.diary_record_id)
+        if idx >= 0 and self.diary[idx]["status"] == 0 \
+                and self.diary[idx]["tf"] == tag:
+            return idx
+        for idx, rec in enumerate(self.diary):
+            if rec["tf"] != tag or rec["status"] != 0:
+                continue
+            if a.ticket and rec["order_ticket"] == a.ticket:
+                return idx
+            if a.is_open and rec["position_id"] == a.ticket:
+                return idx
+        candidates = [
+            idx for idx, rec in enumerate(self.diary)
+            if rec["tf"] == tag and rec["status"] == 0 and rec["dir"] == a.dir
+            and (not a.is_open or rec["filled"])
+            and abs(rec["entry_price"] - a.entry_price) <= 2.5 * self.spec["point"]
+            and abs(rec["lot"] - max(a.init_lot, a.cur_lot)) <= 1e-8
+        ]
+        return candidates[0] if len(candidates) == 1 else -1
+
+    def diary_sync_slot_record(self, tag, save_now=False):
+        a = self.auto[tag]
+        if not a.active:
+            return False
+        idx = self.diary_record_index(a.diary_record_id)
+        if idx < 0 or self.diary[idx]["status"] != 0:
+            return False
+        rec = self.diary[idx]
+        before = diary_record_line(rec)
+        if a.is_open:
+            rec["filled"] = True
+            rec["position_id"] = a.ticket
+        else:
+            rec["order_ticket"] = a.ticket
+            if a.diary_plan_sl_pts > 0:
+                rec["plan_sl_pts"] = a.diary_plan_sl_pts
+        rec["entry_price"] = a.entry_price
+        if a.tp1_pts > 0:
+            rec["tp1_pts"] = a.tp1_pts
+        if a.tp2_pts > 0:
+            rec["tp2_pts"] = a.tp2_pts
+        if a.tp3_pts > 0:
+            rec["tp3_pts"] = a.tp3_pts
+        if a.diary_cost_tp1_pct > 0.0:
+            rec["cost_tp1_pct"] = a.diary_cost_tp1_pct
+        rec["peak_tp1_pct"] = max(rec["peak_tp1_pct"], a.diary_peak_tp1_pct)
+        if a.is_open:
+            rec["trail_known"] = True
+            if a.trail_pct > 0:
+                rec["trail_pct"] = a.trail_pct
+                rec["trail_steady"] = a.trail_steady
+            trail_applied = (a.trail_started and a.trail_pct > 0
+                             and a.trail_applied_pct + 1e-9 >= a.trail_pct)
+            rec["trail_armed"] = bool(rec["trail_armed"] or trail_applied)
+            rec["protection_armed"] = bool(
+                rec["protection_armed"] or a.trail_active)
+            if trail_applied and a.trail_applied_pct > 0.0:
+                rec["trail_lock_tp1_pct"] = max(
+                    rec["trail_lock_tp1_pct"],
+                    max(0.0, a.trail_applied_pct - a.trail_gap_pct))
+            point = self.spec["point"]
+            if (a.sl_price > 0.0 and point > 0.0 and rec["tp1_pts"] > 0
+                    and rec["entry_price"] > 0.0 and rec["dir"]):
+                best_lock = (rec["dir"] * (a.sl_price - rec["entry_price"])
+                             / point / rec["tp1_pts"] * 100.0)
+                rec["best_lock_tp1_pct"] = max(rec["best_lock_tp1_pct"],
+                                                best_lock)
+        if a.tp1_hit or rec["peak_tp1_pct"] >= 100.0 - 1e-9:
+            rec["tp1_hit"] = True
+        if a.tp2_hit or (rec["tp1_pts"] > 0 and rec["tp2_pts"] > 0 and
+                         rec["peak_tp1_pct"] >= rec["tp2_pts"] / rec["tp1_pts"] * 100.0 - 1e-9):
+            rec["tp2_hit"] = True
+        if rec["tp1_pts"] > 0 and rec["tp3_pts"] > 0 and \
+                rec["peak_tp1_pct"] >= rec["tp3_pts"] / rec["tp1_pts"] * 100.0 - 1e-9:
+            rec["tp3_hit"] = True
+        changed = diary_record_line(rec) != before
+        if save_now and changed:
+            self.diary_save()
+        return changed
+
+    def diary_attach_slot_record(self, tag):
+        a = self.auto[tag]
+        if not a.active:
+            return
+        idx = self.diary_find_open_record(tag)
+        if idx < 0:
+            a.diary_record_id = 0
+            return
+        rec = self.diary[idx]
+        was_filled = rec["filled"]
+        a.diary_record_id = rec["id"]
+        a.diary_placed_day = rec["placed_day"]
+        a.diary_plan_sl_pts = rec["plan_sl_pts"]
+        a.diary_regime = rec["regime"]
+        a.diary_style = rec["style"]
+        a.diary_cost_tp1_pct = rec["cost_tp1_pct"]
+        a.diary_peak_tp1_pct = rec["peak_tp1_pct"]
+        if a.is_open and not was_filled:
+            a.diary_cost_tp1_pct = self.diary_cost_pct(
+                self.ask - self.bid, a.tp1_pts or rec["tp1_pts"])
+        self.diary_sync_slot_record(tag, save_now=False)
+        self.diary_after_change()
+
+    def diary_update_open_slot(self, tag, fav_pts, save_now=False):
+        a = self.auto[tag]
+        if not a.active or not a.is_open:
+            return
+        if a.tp1_pts > 0:
+            pct = min(300.0, max(0.0, fav_pts / a.tp1_pts * 100.0))
+            a.diary_peak_tp1_pct = max(a.diary_peak_tp1_pct, pct)
+        self.diary_sync_slot_record(tag, save_now=save_now)
+
+    def diary_finalize_slot(self, tag):
+        """DiaryFinalizeSlot(): called by AutoSlot.reset(), the one exit."""
+        a = self.auto[tag]
+        if self.diary_suppress.get(tag, False) or not a.active:
+            return
+        idx = self.diary_record_index(a.diary_record_id)
+        if idx < 0:
+            idx = self.diary_find_open_record(tag)
+            if idx >= 0:
+                a.diary_record_id = self.diary[idx]["id"]
+        if idx < 0 or self.diary[idx]["status"] != 0:
+            return
+        self.diary_sync_slot_record(tag, save_now=False)
+        rec = self.diary[idx]
+        self.diary_event_seq += 1
+        rec["closed_at"] = self.gmt_now + self.diary_event_seq
+        rec["local_closed"] = rec["closed_at"]
+        rec["closed_day"] = self.local_day_key
+        rec["provisional"] = False
+        # A position_id on a still-pending slot is this mirror's stand-in
+        # for HistoryOrderSelect() finding ORDER_POSITION_ID: the pending
+        # filled and closed while ticks were interrupted, so it is a
+        # broker-history close, not an expired unfilled order.
+        broker_history_closed = (not a.is_open and rec["position_id"] > 0)
+        if not a.is_open and not broker_history_closed:
+            rec.update(status=2, outcome=0, result_r=0.0,
+                       exit_reason="pending-cancelled")
+        else:
+            self.refresh_live_pnl()
+            net = a.diary_deal_net + (a.profit_usd if a.is_open else 0.0)
+            denom = rec["point_value"] * rec["lot"] * rec["plan_sl_pts"]
+            rec["result_r"] = net / denom if denom > 0.0 else 0.0
+            if denom > 0.0:
+                rec["outcome"] = (3 if abs(rec["result_r"]) <= HEALTH_BE_EPS_R
+                                  else (1 if rec["result_r"] > 0.0 else 2))
+            else:
+                rec["outcome"] = (3 if abs(net) <= 0.005
+                                  else (1 if net > 0.0 else 2))
+            rec["status"] = 1
+            rec["filled"] = True
+            rec["provisional"] = bool(
+                broker_history_closed
+                and a.diary_deal_volume < rec["lot"] - 1e-8)
+            if not rec["provisional"]:
+                exit_price = a.diary_last_exit_price
+                if exit_price <= 0.0 and a.is_open:
+                    exit_price = self.bid if rec["dir"] > 0 else self.ask
+                point = self.spec["point"]
+                if (exit_price > 0.0 and point > 0.0 and rec["tp1_pts"] > 0
+                        and rec["entry_price"] > 0.0 and rec["dir"]):
+                    final_pct = (rec["dir"]
+                                 * (exit_price - rec["entry_price"]) / point
+                                 / rec["tp1_pts"] * 100.0)
+                    rec["final_tp1_pct"] = max(-1000.0, min(1000.0, final_pct))
+                if a.diary_stop_known:
+                    rec["stop_known"] = True
+                    rec["stop_exit"] = a.diary_stop_exit
+                elif a.is_open:
+                    # The sim knows this reset was not its broker-SL
+                    # branch; the EA learns the same fact from the
+                    # final deal's DEAL_REASON.
+                    rec["stop_known"] = True
+                    rec["stop_exit"] = False
+            rec["exit_reason"] = ("broker-history" if broker_history_closed
+                                  else ("tp3" if rec["tp3_hit"] else "closed"))
+        self.diary_after_change()
+
+    def diary_begin_upgrade(self, tag):
+        a = self.auto[tag]
+        self.diary_suppress[tag] = True
+        idx = self.diary_record_index(a.diary_record_id)
+        rec = self.diary[idx] if idx >= 0 else None
+        self.diary_upgrade[tag] = dict(
+            active=True, record_id=a.diary_record_id,
+            placed_day=rec["placed_day"] if rec else a.diary_placed_day,
+            placed_at=rec["placed_at"] if rec else 0,
+            local_placed=rec["local_placed"] if rec else 0,
+            regime=rec["regime"] if rec else a.diary_regime,
+        )
+
+    def diary_cancel_upgrade(self, tag):
+        self.diary_suppress[tag] = False
+        self.diary_upgrade[tag] = dict(active=False)
+
+    def diary_finish_upgrade(self, tag, placed):
+        up = self.diary_upgrade.get(tag, {})
+        self.diary_suppress[tag] = False
+        self.diary_upgrade[tag] = dict(active=False)
+        if not up.get("active"):
+            return
+        old_idx = self.diary_record_index(up.get("record_id", 0))
+        a = self.auto[tag]
+        if placed and a.active:
+            new_idx = self.diary_record_index(a.diary_record_id)
+            if old_idx >= 0 and new_idx >= 0 and old_idx != new_idx:
+                merged = dict(self.diary[new_idx])
+                old = self.diary[old_idx]
+                merged.update(id=old["id"], placed_day=old["placed_day"],
+                              placed_at=old["placed_at"],
+                              local_placed=old["local_placed"],
+                              regime=old["regime"])
+                self.diary[old_idx] = merged
+                del self.diary[new_idx]
+                a.diary_record_id = merged["id"]
+                a.diary_placed_day = merged["placed_day"]
+                a.diary_regime = merged["regime"]
+            elif new_idx >= 0 and up.get("placed_day"):
+                self.diary[new_idx].update(
+                    placed_day=up["placed_day"], placed_at=up["placed_at"],
+                    local_placed=up["local_placed"], regime=up["regime"])
+                a.diary_placed_day = up["placed_day"]
+                a.diary_regime = up["regime"]
+            self.diary_after_change()
+            return
+        if old_idx >= 0 and self.diary[old_idx]["status"] == 0:
+            self.diary_event_seq += 1
+            self.diary[old_idx].update(
+                status=2, closed_at=self.gmt_now + self.diary_event_seq,
+                local_closed=self.gmt_now + self.diary_event_seq,
+                closed_day=self.local_day_key,
+                exit_reason="upgrade-failed")
+            self.diary_after_change()
+
+    def diary_flush_open_slots(self):
+        for tag in TAGS:
+            if self.auto[tag].active:
+                self.diary_sync_slot_record(tag, save_now=False)
+        self.diary_save()
+
+    def diary_refresh_summaries(self):
+        """DiaryRefreshSummaries() + DiaryComputeLaneHealth()."""
+        def totals():
+            return dict(signals=0, wins=0, losses=0, be=0, open=0,
+                        wait=0, expired=0, net_r=0.0)
+
+        self.day_totals = totals()
+        self.all_totals = totals()
+        self.health = {}
+        for tag in TAGS:
+            self.health[tag] = dict(
+                signals=0, wins=0, losses=0, be=0, open=0, wait=0,
+                expired=0, closed=0, net_r=0.0,
+                score2_signals=0, score2_closed=0, score2_wins=0,
+                score2_losses=0, score2_tp1=0,
+                score3_signals=0, score3_closed=0, score3_wins=0,
+                score3_losses=0, score3_tp1=0,
+                recent=[], rec_n=0, rec_wins=0, rec_losses=0, rec_be=0,
+                rec_tp1=0, rec_tp2=0, rec_tp3=0, rec_cost_n=0,
+                rec_net_r=0.0, rec_tp1_rate=-1.0, rec_median_peak=-1.0,
+                rec_median_cost=-1.0, rec_trail_eligible=0,
+                rec_trail_armed=0, rec_trail_lock_n=0,
+                rec_trail_stop_known=0, rec_trail_stop_exits=0,
+                rec_trail_giveback_n=0, rec_trail_arm_rate=-1.0,
+                rec_trail_median_lock=-1.0, rec_trail_median_giveback=-1.0,
+                base_n=0, base_tp1_rate=-1.0,
+                base_median_cost=-1.0,
+                status=-1, primary_issue=0, issue_count=0, follow_level=0,
+                cost_level=0, score_level=0, style_level=0,
+                label="Health: Learning",
+                action="Keep collecting; health starts at 30 closed trades.",
+                note="")
+
+        today = self.local_day_key
+        for rec in self.diary:
+            lane = self.health[rec["tf"]]
+            lane["signals"] += 1
+            self.all_totals["signals"] += 1
+            if rec["placed_day"] == today:
+                self.day_totals["signals"] += 1
+            lane["score3_signals" if abs(rec["score"]) >= 3 else "score2_signals"] += 1
+            if rec["status"] == 0:
+                key = "open" if rec["filled"] else "wait"
+                lane[key] += 1
+                self.all_totals[key] += 1
+            elif rec["status"] == 2:
+                lane["expired"] += 1
+                self.all_totals["expired"] += 1
+                if rec["closed_day"] == today:
+                    self.day_totals["expired"] += 1
+            elif rec["status"] == 1:
+                lane["closed"] += 1
+                lane["net_r"] += rec["result_r"]
+                self.all_totals["net_r"] += rec["result_r"]
+                if rec["closed_day"] == today:
+                    self.day_totals["net_r"] += rec["result_r"]
+                outcome_key = {1: "wins", 2: "losses", 3: "be"}.get(rec["outcome"])
+                if outcome_key:
+                    lane[outcome_key] += 1
+                    self.all_totals[outcome_key] += 1
+                    if rec["closed_day"] == today:
+                        self.day_totals[outcome_key] += 1
+                score_key = "score3" if abs(rec["score"]) >= 3 else "score2"
+                lane[score_key + "_closed"] += 1
+                if rec["outcome"] == 1:
+                    lane[score_key + "_wins"] += 1
+                elif rec["outcome"] == 2:
+                    lane[score_key + "_losses"] += 1
+                if rec["tp1_hit"]:
+                    lane[score_key + "_tp1"] += 1
+
+        for tag in TAGS:
+            closed = [r for r in self.diary
+                      if r["tf"] == tag and r["status"] == 1]
+            closed.sort(key=lambda r: (r["closed_at"], r["id"]), reverse=True)
+            recent = list(reversed(closed[:HEALTH_RECENT_N + HEALTH_BASE_N]))
+            self.health[tag]["recent"] = recent
+            self._diary_compute_lane_health(tag)
+
+    def _diary_compute_lane_health(self, tag):
+        lane = self.health[tag]
+        recent = lane["recent"]
+        rec_records = recent[-HEALTH_RECENT_N:] if recent else []
+        base_records = recent[:-len(rec_records)] if len(recent) > len(rec_records) else []
+        base_records = base_records[-HEALTH_BASE_N:]
+        rec = diary_segment(rec_records)
+        base = diary_segment(base_records)
+        lane.update(
+            rec_n=rec["n"], rec_wins=rec["wins"], rec_losses=rec["losses"],
+            rec_be=rec["be"], rec_tp1=rec["tp1"], rec_tp2=rec["tp2"],
+            rec_tp3=rec["tp3"], rec_cost_n=rec["cost_n"],
+            rec_net_r=rec["net_r"], rec_tp1_rate=rec["tp1_rate"],
+            rec_median_peak=rec["median_peak"],
+            rec_median_cost=rec["median_cost"],
+            rec_trail_eligible=rec["trail_eligible"],
+            rec_trail_armed=rec["trail_armed"],
+            rec_trail_lock_n=rec["trail_lock_n"],
+            rec_trail_stop_known=rec["trail_stop_known"],
+            rec_trail_stop_exits=rec["trail_stop_exits"],
+            rec_trail_giveback_n=rec["trail_giveback_n"],
+            rec_trail_arm_rate=rec["trail_arm_rate"],
+            rec_trail_median_lock=rec["median_trail_lock"],
+            rec_trail_median_giveback=rec["median_trail_giveback"],
+            base_n=base["n"],
+            base_tp1_rate=base["tp1_rate"],
+            base_median_cost=base["median_cost"])
+        if lane["closed"] < HEALTH_MIN_CLOSED or rec["n"] < HEALTH_MIN_CLOSED:
+            return
+
+        half_old = diary_segment(rec_records[:len(rec_records) // 2])
+        half_new = diary_segment(rec_records[len(rec_records) // 2:])
+
+        follow_drop = (base["tp1_rate"] - rec["tp1_rate"]
+                       if base["n"] >= 15 and base["tp1_rate"] >= 0.0 else 0.0)
+        half_old_weak = (half_old["tp1_rate"] >= 0.0 and
+                         (half_old["tp1_rate"] < 0.45 or half_old["median_peak"] < 65.0))
+        half_new_weak = (half_new["tp1_rate"] >= 0.0 and
+                         (half_new["tp1_rate"] < 0.45 or half_new["median_peak"] < 65.0))
+        follow_candidate = (rec["tp1_rate"] < 0.30 or rec["median_peak"] < 45.0
+                            or (follow_drop >= 0.25 and rec["tp1_rate"] < 0.45))
+        if follow_candidate and half_old_weak and half_new_weak:
+            lane["follow_level"] = 2
+        elif rec["tp1_rate"] < 0.45 or rec["median_peak"] < 65.0 or follow_drop >= 0.15:
+            lane["follow_level"] = 1
+        follow_issue = 1 if (rec["median_peak"] >= 50.0 or
+                             (rec["n"] and rec["near"] / rec["n"] >= 0.35)) else 2
+
+        if rec["cost_n"] >= 20 and rec["median_cost"] >= 0.0:
+            cost_rise = (rec["median_cost"] - base["median_cost"]
+                         if base["cost_n"] >= 15 and base["median_cost"] >= 0.0 else 0.0)
+            cost_candidate = (rec["median_cost"] >= 12.0 or
+                              (cost_rise >= 7.0 and rec["median_cost"] >= 10.0))
+            halves_dear = (half_old["median_cost"] >= 10.0 and
+                           half_new["median_cost"] >= 10.0)
+            if cost_candidate and halves_dear:
+                lane["cost_level"] = 2
+            elif rec["median_cost"] > 8.0 or cost_rise >= 4.0:
+                lane["cost_level"] = 1
+
+        def score_stats(records):
+            stats = {2: [0, 0, 0.0], 3: [0, 0, 0.0]}
+            for item in records:
+                key = 3 if abs(item["score"]) >= 3 else 2
+                stats[key][0] += 1
+                stats[key][1] += bool(item["tp1_hit"])
+                stats[key][2] += item["result_r"]
+            return stats
+
+        all_score = score_stats(recent)
+        split_at = len(recent) // 2
+        old_score = score_stats(recent[:split_at])
+        new_score = score_stats(recent[split_at:])
+        s2, s3 = all_score[2], all_score[3]
+        if s2[0] >= HEALTH_SCORE_MIN_EACH and s3[0] >= HEALTH_SCORE_MIN_EACH:
+            rate_diff = s3[1] / s3[0] - s2[1] / s2[0]
+            avg_diff = s3[2] / s3[0] - s2[2] / s2[0]
+            halves_known = (old_score[2][0] >= 5 and old_score[3][0] >= 5 and
+                            new_score[2][0] >= 5 and new_score[3][0] >= 5)
+            halves_not_better = False
+            if halves_known:
+                def not_better(stats):
+                    return (stats[3][1] / stats[3][0] - stats[2][1] / stats[2][0] <= 0.0 or
+                            stats[3][2] / stats[3][0] - stats[2][2] / stats[2][0] <= 0.0)
+                halves_not_better = not_better(old_score) and not_better(new_score)
+            if rate_diff <= -0.20 and avg_diff <= -0.20 and halves_known and halves_not_better:
+                lane["score_level"] = 2
+            elif rate_diff <= -0.10 or avg_diff <= -0.15:
+                lane["score_level"] = 1
+
+        def subset_stats(pred):
+            sub = [r for r in recent if pred(r)]
+            other = [r for r in recent if not pred(r)]
+            return (len(sub), sum(r["tp1_hit"] for r in sub),
+                    sum(r["result_r"] for r in sub),
+                    len(other), sum(r["tp1_hit"] for r in other),
+                    sum(r["result_r"] for r in other))
+
+        box_level = diary_subset_level(*subset_stats(lambda r: r["style"] == 2))
+        chop_level = diary_subset_level(*subset_stats(lambda r: r["regime"] == 2))
+        if box_level == 2 and not diary_subset_persists(recent, True):
+            box_level = 1
+        if chop_level == 2 and not diary_subset_persists(recent, False):
+            chop_level = 1
+        lane["style_level"] = max(box_level, chop_level)
+        style_issue = 5 if box_level > 0 and box_level >= chop_level else (6 if chop_level > 0 else 0)
+
+        levels = [lane["follow_level"], lane["cost_level"],
+                  lane["score_level"], lane["style_level"]]
+        lane["issue_count"] = sum(level > 0 for level in levels)
+        worst = max(levels)
+        lane["status"] = worst
+        if worst == 0:
+            lane.update(label="Health: OK", action="No change suggested.")
+            return
+        if lane["cost_level"] == worst:
+            lane["primary_issue"] = 3
+        elif lane["style_level"] == worst:
+            lane["primary_issue"] = style_issue
+        elif lane["follow_level"] == worst:
+            lane["primary_issue"] = follow_issue
+        else:
+            lane["primary_issue"] = 4
+        issue_name = {1: "TP1", 2: "TP1", 3: "Cost", 4: "Score",
+                      5: "Box", 6: "Chop"}.get(lane["primary_issue"], "Health")
+        lane["label"] = "%s: %s%s" % (
+            issue_name, "Poor" if worst == 2 else "Watch",
+            "+" if lane["issue_count"] > 1 else "")
+
+        if worst == 1:
+            lane["action"] = {
+                3: "No change yet; watch spread as a share of TP1.",
+                5: "No change yet; keep watching the box trades.",
+                6: "No change yet; keep watching the Choppy trades.",
+                4: "No change yet; keep watching 3/3 against 2/3.",
+            }.get(lane["primary_issue"],
+                  "No change yet; keep watching progress to TP1.")
+            return
+
+        if lane["primary_issue"] == 3:
+            lane["action"] = "Use minimum lot or avoid expensive hours first."
+            lane["note"] = "Health %s: Spread is %.0f%% of TP1. %s" % (
+                tag, max(0.0, rec["median_cost"]), lane["action"])
+        elif lane["primary_issue"] == 1:
+            lane["action"] = "Test a nearer TP1 first; do not change live yet."
+            lane["note"] = "Health %s: Trades reach %.0f%% of TP1 then reverse. %s" % (
+                tag, max(0.0, rec["median_peak"]), lane["action"])
+        elif lane["primary_issue"] == 2:
+            lane["action"] = "Lower risk; consider 3/3-only while reviewing."
+            lane["note"] = "Health %s: Trades only reach %.0f%% of TP1. %s" % (
+                tag, max(0.0, rec["median_peak"]), lane["action"])
+        elif lane["primary_issue"] == 4:
+            lane["action"] = "Keep risk low and review this lane first."
+            lane["note"] = "Health %s: 3/3 is not beating 2/3. %s" % (
+                tag, lane["action"])
+        elif lane["primary_issue"] == 5:
+            lane["action"] = "Test Range Mode Off first (it is a global switch)."
+            lane["note"] = "Health %s: Box trades are the weak part. %s" % (
+                tag, lane["action"])
+        elif lane["primary_issue"] == 6:
+            lane["action"] = "Consider Choppy Trade Off first (it is a global switch)."
+            lane["note"] = "Health %s: Choppy trades are the weak part. %s" % (
+                tag, lane["action"])
+
+    def health_label_text(self, tag):
+        return self.health[tag]["label"]
+
+    def health_note_text(self):
+        poor = [tag for tag in TAGS if self.health[tag]["status"] == 2]
+        if not poor:
+            return ""
+        chosen = self.chart_tf if self.chart_tf in poor else poor[0]
+        note = self.health[chosen]["note"]
+        if len(poor) > 1:
+            note += " (+%d more)" % (len(poor) - 1)
+        return note
+
+    def diary_day_header_text(self):
+        return "| Day: S %d W %d L %d" % (
+            self.day_totals["signals"], self.day_totals["wins"],
+            self.day_totals["losses"])
+
+    def diary_started_text(self):
+        day = int(self.diary_started_day)
+        return "%04d.%02d.%02d" % (day // 10000, (day // 100) % 100, day % 100)
+
+    def history_panel_lines(self):
+        """DrawHistoryPanel()'s 21 content lines in SimpleAdvisor.mq5."""
+        def pct(num, den):
+            return "--" if den <= 0 else "%d%%" % int(round(num / den * 100.0))
+
+        def rate(value):
+            return "--" if value < 0.0 else "%d%%" % int(round(value * 100.0))
+
+        lines = [
+            "Day: S %d  W %d  L %d  BE %d  Exp %d" % (
+                self.day_totals["signals"], self.day_totals["wins"],
+                self.day_totals["losses"], self.day_totals["be"],
+                self.day_totals["expired"]),
+            "All: S %d  W %d  L %d  BE %d  Open %d  Wait %d  Exp %d  Net %+.1fR" % (
+                self.all_totals["signals"], self.all_totals["wins"],
+                self.all_totals["losses"], self.all_totals["be"],
+                self.all_totals["open"], self.all_totals["wait"],
+                self.all_totals["expired"], self.all_totals["net_r"]),
+        ]
+        for tag in TAGS:
+            lane = self.health[tag]
+            status = lane["label"]
+            if not status.startswith("Health:"):
+                status = "Health: " + status
+            if lane["status"] < 0:
+                status += " (%d/%d closed)" % (lane["closed"], HEALTH_MIN_CLOSED)
+            lines.append("%s  %s" % (tag, status))
+            lines.append(
+                "  All: S %d W %d L %d BE %d Open %d Wait %d Exp %d | Win %s | Net %+.1fR" % (
+                    lane["signals"], lane["wins"], lane["losses"], lane["be"],
+                    lane["open"], lane["wait"], lane["expired"],
+                    pct(lane["wins"], lane["wins"] + lane["losses"] + lane["be"]),
+                    lane["net_r"]))
+            lines.append(
+                "  Score 2/3: W %d L %d TP1 %s (%d closed) | 3/3: W %d L %d TP1 %s (%d closed)" % (
+                    lane["score2_wins"], lane["score2_losses"],
+                    pct(lane["score2_tp1"], lane["score2_closed"]),
+                    lane["score2_closed"],
+                    lane["score3_wins"], lane["score3_losses"],
+                    pct(lane["score3_tp1"], lane["score3_closed"]),
+                    lane["score3_closed"]))
+            peak = "--" if lane["rec_median_peak"] < 0.0 else "%.0f%%" % lane["rec_median_peak"]
+            cost = "--" if lane["rec_median_cost"] < 0.0 else "%.0f%%" % lane["rec_median_cost"]
+            lines.append(
+                "  Last %d: W %d L %d BE %d | TP1 %s Peak %s Cost %s | Net %+.1fR" % (
+                    lane["rec_n"], lane["rec_wins"], lane["rec_losses"],
+                    lane["rec_be"], rate(lane["rec_tp1_rate"]), peak, cost,
+                    lane["rec_net_r"]))
+            trail_lock = ("--" if lane["rec_trail_median_lock"] < 0.0
+                          else "%.0f%%" % lane["rec_trail_median_lock"])
+            trail_giveback = ("--" if lane["rec_trail_median_giveback"] < 0.0
+                              else "%.0f%%" % lane["rec_trail_median_giveback"])
+            trail_stop = (str(lane["rec_trail_stop_exits"])
+                          if lane["rec_trail_stop_known"] > 0 else "--")
+            lines.append(
+                "  Trail %d: Armed %s | Lock %s | Stop exits %s | Giveback %s" % (
+                    lane["rec_n"], rate(lane["rec_trail_arm_rate"]),
+                    trail_lock, trail_stop, trail_giveback))
+            lines.append("  First step: " + lane["action"])
+        lines.append("Diary suggests first steps; it never changes settings.")
+        return lines
+
+    def history_panel_geometry(self):
+        """DrawHistoryPanel()'s opposite-side placement and measured size."""
+        if not self.show_health:
+            self.hist_shown = False
+            self.hist_w = 0
+            self.hist_h = 0
+            return None
+        lines = self.history_panel_lines()
+        since_text = "|  %s  |  Since %s" % (self.symbol, self.diary_started_text())
+        title_w = 7 * char_w(FONT + 1, DPI)
+        width = 10 + title_w + EM + len(since_text) * EM + 10
+        for line in lines:
+            width = max(width, 10 + len(line) * EM + 10)
+        width = max(width, HIST_W_MIN)
+        row_h = FONT + 11
+        height = HEAD_H + 21 * row_h + 2 * 4 + 8
+        if self.auto_panel_pos == AUTO_POS_RIGHT:
+            x = self.panel_x
+            y = self.panel_y + self.panel_h + AUTO_GAP_Y
+        else:
+            x = self.panel_x + self.panel_w + AUTO_GAP_X
+            y = self.panel_y
+        self.hist_x, self.hist_y = x, y
+        self.hist_w, self.hist_h = width, height
+        self.hist_shown = True
+        return x, y, width, height, lines
+
+    def render_history_panel(self, title):
+        """Render the optional History panel and return overflow/overlap rows."""
+        geom = self.history_panel_geometry()
+        print("\n" + "=" * 96)
+        print(title)
+        print("=" * 96)
+        if geom is None:
+            print("  History panel: HIDDEN (diary still records)")
+            return []
+        x, y, width, height, lines = geom
+        w_cols = int((width - 4) / CELL)
+        grid = [[" "] * w_cols for _ in range(27)]
+        placed = []
+        separators = set()
+
+        def put(text, x_px, line):
+            if not text:
+                return
+            col = max(0, int(round(x_px / CELL)))
+            for k, ch in enumerate(text):
+                if col + k < w_cols:
+                    grid[line][col + k] = ch
+            placed.append((line, x_px, x_px + len(text) * RENDER_CW, text))
+
+        since_text = "|  %s  |  Since %s" % (self.symbol, self.diary_started_text())
+        put("History", 10, 0)
+        put(since_text, width - 10 - len(since_text) * RENDER_CW, 0)
+        separators.add(1)
+        line = 2
+        for idx, text in enumerate(lines):
+            if idx in (8, 14):
+                separators.add(line)
+                line += 1
+            put(text, 10, line)
+            line += 1
+        rows = ["".join(r).rstrip() for r in grid]
+        for r in separators:
+            rows[r] = "-" * w_cols
+        print("  +" + "-" * w_cols + "+")
+        for idx in range(line):
+            print("  | %s |" % rows[idx].ljust(w_cols))
+        print("  +" + "-" * w_cols + "+")
+        place = ("below Main Panel" if self.auto_panel_pos == AUTO_POS_RIGHT
+                 else "right of Main Panel")
+        print("  History panel (%s at x=%d, y=%d): %d x %d px"
+              % (place, x, y, width, height))
+
+        over = []
+        for ln, _x0, x_end, txt in placed:
+            if x_end > width - 3:
+                over.append((ln, txt, x_end))
+                print("  !! line %d ends at %.0f px in a %d px panel: %r"
+                      % (ln, x_end, width, txt))
+        by_line = {}
+        for ln, x0, x_end, txt in placed:
+            by_line.setdefault(ln, []).append((x0, x_end, txt))
+        for ln, spans in sorted(by_line.items()):
+            spans.sort()
+            for (a0, a1, at), (b0, b1, bt) in zip(spans, spans[1:]):
+                if b0 < a1 - 0.5:
+                    over.append((ln, "%s | %s" % (at, bt), b0 - a1))
+                    print("  !! line %d: %r overlaps %r by %.1f px"
+                          % (ln, at, bt, a1 - b0))
+        return over
 
     def score_allows(self, dir_, score):
         """ScoreAllowsTrade() in SimpleAdvisor.mq5 - the absolute gate."""
@@ -667,9 +1697,22 @@ class AutoTraderSim:
                          note=r["reason"] or "nothing to place")
                 continue
 
+            #  Choppy Trade Off: no executable plan for a flat/pending
+            #  lane.  An already-open same-direction position is the one
+            #  exception: its plan stays state 2 for management only,
+            #  while place_plan_order() below still refuses to send it.
+            a_for_plan = self.auto[t]
+            open_same_dir = (a_for_plan.active and a_for_plan.is_open
+                             and a_for_plan.dir == r["dir"]
+                             and a_for_plan.entry_price > 0.0)
+            if r["choppy_blocked"] and not open_same_dir:
+                p.update(state=0, kind="HOLD",
+                         note=r["reason"] or "choppy — Choppy Trade is Off")
+                continue
+
             dir_, score = r["dir"], r["score"]
-            #  3/3 -> market, 2/3 -> limit, in EVERY regime.  mode == 2 only
-            #  says the box prices this limit.
+            #  Once Choppy permission passes: 3/3 -> market, 2/3 ->
+            #  limit.  mode == 2 only says the box prices this limit.
             market = abs(score) >= 3
             is_range = (r["mode"] == 2) and not market
             a = self.auto[t]
@@ -789,6 +1832,8 @@ class AutoTraderSim:
         r = self.rows[tag]
         if p["state"] != 2 or p["dir"] == 0 or not self.trend_match_for_tf(tag):
             return False
+        if r["choppy_blocked"]:
+            return False
         if not self.score_allows(p["dir"], p["score"]):
             return False
 
@@ -827,6 +1872,7 @@ class AutoTraderSim:
             a.last_eval_bar = r["last_bar"]
             a.last_signal_bar = r["last_bar"]
             self.init_trail(tag)      # market fill: freeze the trailstop % now
+            self.diary_begin_placement(tag, True, p["sl_pts"])
             return True
         else:
             pend_p = self.norm_price(p["entry_price"])
@@ -867,6 +1913,7 @@ class AutoTraderSim:
             a.placed_bar = r["last_bar"]
             a.last_eval_bar = r["last_bar"]
             a.last_signal_bar = r["last_bar"]
+            self.diary_begin_placement(tag, False, p["sl_pts"])
             return True
 
     def refresh_live_pnl(self):
@@ -902,6 +1949,7 @@ class AutoTraderSim:
                 exit_p = self.bid if a.dir > 0 else self.ask
                 fav_pts = ((exit_p - a.entry_price) / point if a.dir > 0
                            else (a.entry_price - exit_p) / point)
+                self.diary_update_open_slot(t, fav_pts, save_now=True)
 
                 if r["ok"] and r["dir"] == a.dir and abs(r["score"]) > abs(a.entry_score):
                     a.entry_score = r["score"]
@@ -959,6 +2007,12 @@ class AutoTraderSim:
 
             # CASE B: Waiting Pending Limit Order
             if a.active and not a.is_open:
+                # Choppy permission veto: cancel, never refresh/upgrade.
+                if r["choppy_blocked"]:
+                    a.last_signal_bar = r["last_bar"]
+                    a.reset(keep_signal_bar=True)
+                    continue
+
                 tf_sec = TF_SEC[t]
                 leash = self.valid_bars_range if a.is_range else self.valid_bars
                 expired = (a.placed_bar > 0 and r["last_bar"] > a.placed_bar
@@ -988,8 +2042,10 @@ class AutoTraderSim:
 
                 # Score upgraded from 2/3 (Pending) to 3/3 (Market) in same direction
                 if p["market"]:
+                    self.diary_begin_upgrade(t)
                     a.reset(keep_signal_bar=False)
-                    self.place_plan_order(t)
+                    upgraded = self.place_plan_order(t)
+                    self.diary_finish_upgrade(t, upgraded)
                     continue
 
                 # Closed candle in same direction (still Pending 2/3) -> update Entry/SL/TP
@@ -1001,11 +2057,14 @@ class AutoTraderSim:
                 a.sl_price = self.norm_price(a.entry_price - a.dir * a.sl_pts * point) if self.use_stop_loss else 0.0
                 a.tp_price = self.norm_price(a.entry_price + a.dir * a.tp3_pts * point)
                 a.last_eval_bar = r["last_bar"]
+                a.diary_plan_sl_pts = p["sl_pts"]
+                self.diary_sync_slot_record(t, save_now=True)
                 continue
 
             # CASE C: Flat -> check new order placement
             if not a.active:
-                if (timer_allows_placement and r["ok"] and r["dir"] != 0 and p["state"] == 2
+                if (timer_allows_placement and r["ok"] and not r["choppy_blocked"]
+                        and r["dir"] != 0 and p["state"] == 2
                         and self.trend_match_for_tf(t)
                         and a.last_signal_bar != r["last_bar"]):
                     self.place_plan_order(t)
@@ -1039,6 +2098,7 @@ class AutoTraderSim:
                         a.is_open = True
                         a.fill_bar = self.rows[t]["last_bar"]
                         self.init_trail(t)   # pending fill: freeze the trailstop %
+                        self.diary_attach_slot_record(t)
                         self.refresh_live_pnl()
                     else:
                         continue
@@ -1046,10 +2106,14 @@ class AutoTraderSim:
                 exit_p = bid if a.dir > 0 else ask
                 fav_pts = ((exit_p - a.entry_price) / point if a.dir > 0
                            else (a.entry_price - exit_p) / point)
+                self.diary_update_open_slot(t, fav_pts, save_now=False)
 
                 # Check SL hit on broker
                 if a.sl_price > 0.0:
                     if (a.dir > 0 and bid <= a.sl_price) or (a.dir < 0 and ask >= a.sl_price):
+                        a.diary_last_exit_price = a.sl_price
+                        a.diary_stop_exit = True
+                        a.diary_stop_known = True
                         a.reset(keep_signal_bar=True)
                         continue
 
@@ -1073,6 +2137,8 @@ class AutoTraderSim:
 
                     close70 = calc_tp1_close_lot(a.cur_lot, self.spec)
                     if close70 > 0.0:
+                        a.diary_deal_net += close70 * fav_pts * point_value_per_lot(self.spec)
+                        a.diary_deal_volume += close70
                         a.cur_lot = floor_lot_step(a.cur_lot - close70, self.spec)
 
                     #  range fades are exempt from the score watcher (Part 2)
@@ -1092,6 +2158,8 @@ class AutoTraderSim:
 
                     close_min = calc_tp2_close_lot(a.cur_lot, self.spec)
                     if close_min > 0.0:
+                        a.diary_deal_net += close_min * fav_pts * point_value_per_lot(self.spec)
+                        a.diary_deal_volume += close_min
                         a.cur_lot = self.spec["min_lot"]
 
                     #  range fades are exempt from the score watcher (Part 2)
@@ -1562,8 +2630,8 @@ def main():
     on_state = AutoTraderSim(auto_trading=True)
     check(on_state.auto_trading_header_text() == "On"
           and on_state.resume_header_text() == ""
-          and on_state.header_line1_slots() == (6, 0),
-          "with no timer in the way line 1 must read On and reserve nothing; got %r %r"
+          and on_state.header_line1_slots() == (6, 0, len("| Day: S 0 W 0 L 0") + 2),
+          "with no timer in the way line 1 must read On and reserve only Day; got %r %r"
           % (on_state.auto_trading_header_text(), on_state.header_line1_slots()))
 
     off_state = AutoTraderSim(auto_trading=False)
@@ -1585,8 +2653,9 @@ def main():
     check(sched.resume_header_text() == "Resume 1h00m",
           "at 07:00 the countdown must say one hour; got %r"
           % sched.resume_header_text())
-    check(sched.header_line1_slots() == (11, len("Resume 1h00m") + 2),
-          "a blocking timer must reserve the 11-character word and the countdown; got %r"
+    check(sched.header_line1_slots() == (11, len("Resume 1h00m") + 2,
+                                         len(sched.diary_day_header_text()) + 2),
+          "a blocking timer must reserve the word, countdown and Day counts; got %r"
           % (sched.header_line1_slots(),))
     sched.local_minute_of_day = 8 * 60
     check(sched.resume_header_text() == "",
@@ -1622,12 +2691,17 @@ def main():
                       % (font, dpi, word, resume, right + 2 * em, sym_left))
     print("  ok  Header line 1: the word and the countdown fit at every font 6-16 x DPI 72-192")
 
-    modes = AutoTraderSim(range_mode=False, require_m15_m30_same_trend=True)
+    modes = AutoTraderSim(allow_choppy_trade=False, range_mode=True,
+                          require_m15_m30_same_trend=True)
     check(modes.header_status_values() == ("Off", "Off", "On"),
           "header line 2 must mirror Timer / Choppy Trade / Same Trend inputs; got %r"
           % (modes.header_status_values(),))
+    range_style_only = AutoTraderSim(allow_choppy_trade=True, range_mode=False)
+    check(range_style_only.header_status_values()[1] == "On",
+          "Range Mode Off must not turn the Choppy Trade permission header Off")
     widest = AutoTraderSim(use_auto_schedule=True, local_minute_of_day=7 * 60,
-                           range_mode=False, require_m15_m30_same_trend=False)
+                           allow_choppy_trade=False, range_mode=True,
+                           require_m15_m30_same_trend=False)
     check(len(widest.header_status_line()) == 71,
           "widest header status line must match STATUS_LINE_C=71; got %d (%r)"
           % (len(widest.header_status_line()), widest.header_status_line()))
@@ -1929,8 +3003,17 @@ def main():
     tr.manage_auto_tick(bid=4285.75, ask=4285.77)
     check(not a_tr.active,
           "price falling onto the trailed SL must close the trade before TP1")
+    tr_rec = tr.diary[0]
+    check(tr_rec["trail_pct"] == 40 and not tr_rec["trail_steady"]
+          and tr_rec["trail_known"] and tr_rec["trail_armed"]
+          and tr_rec["protection_armed"]
+          and abs(tr_rec["trail_lock_tp1_pct"] - 34.0) < 0.01
+          and abs(tr_rec["final_tp1_pct"] - (5.0 / 14.0 * 100.0)) < 0.01
+          and tr_rec["stop_known"] and tr_rec["stop_exit"],
+          "the diary must record Tight activation, +34%% lock, stop exit and final progress; got %r"
+          % tr_rec)
     print("  ok  Rule 13 (Tight): activation places SL at +24%, +5% steps, pre-TP1 stop-out, "
-          "first SL self-placed when InpUseStopLoss=false")
+          "first SL self-placed when InpUseStopLoss=false; diary records the trail")
 
     # Steady 55% on M15: same activation idea, gap widened x1.25
     tr2 = AutoTraderSim(auto_trading=True)
@@ -1996,7 +3079,8 @@ def main():
     print("  ok  Rule 4, 7, 10, 11, 12: Candle updates, 2/3->3/3 upgrade, HOLD-in-profit close, and 2nd panel auto-close")
 
     # ------------------------------------------------------------------
-    # 8. The score decides (in every regime); the regime prices the limit
+    # 8. Score publishes direction/order type; Choppy permission gates
+    #    new entries; an allowed regime/Range Mode prices the limit
     # ------------------------------------------------------------------
     # 8a. Rows that stand aside say WHY, and never place
     rng = AutoTraderSim(auto_trading=True)
@@ -2018,10 +3102,10 @@ def main():
           "rows under the gate must never place an order")
     print("  ok  8a: rows under the score gate (and a dead market) hold with a reason, place nothing")
 
-    # 8a-2. THE RULE, UNIFORM IN EVERY REGIME: 3 -> market, 2 -> limit.
-    #       A Mixed row at +2 places a LIMIT (it used to stand aside), and
-    #       a Choppy row at -3 places a MARKET order (the range game used
-    #       to be limit-only).
+    # 8a-2. WITH CHOPPY PERMISSION ON (the shipped default), the rule
+    #       is uniform in every regime: 3 -> market, 2 -> limit.  A Mixed
+    #       row at +2 places a LIMIT, and an allowed Choppy row at -3
+    #       places a MARKET order.
     for regime, score, want_market in (("Mixed", 2, False), ("Steady", 2, False),
                                        ("Mixed", 3, True), ("Choppy", 3, True),
                                        ("Steady", 3, True)):
@@ -2040,7 +3124,7 @@ def main():
               "%s at %+d/3 must place a%s %s order; got open=%r"
               % (regime, score, "" if want_market else " waiting",
                  "market" if want_market else "limit", a5.is_open))
-    print("  ok  8a-2: 3/3 -> market and 2/3 -> limit in EVERY regime (Mixed included)")
+    print("  ok  8a-2: with Choppy permission On, 3/3 -> market and 2/3 -> limit in every regime")
 
     # 8a-3. The THIRD VOTE is its own measurement, so 2/3 is reachable.
     #       StructureVote() in SimpleAdvisor.mq5: net move over
@@ -2198,6 +3282,537 @@ def main():
           "PlacePlanOrder must refuse an order whose score is under the gate")
     print("  ok  Score gate: InpBuyScore/InpSellScore gate the ORDER in both games "
           "(row + placement), and a refused row says why")
+
+    # ------------------------------------------------------------------
+    # 8g. CHOPPY PERMISSION IS NOT RANGE MODE
+    #     InpAllowChoppyTrade answers "may this Choppy row open a new
+    #     trade at all?"  InpRangeMode only answers "box band or normal
+    #     pullback?" after permission has been given.
+    # ------------------------------------------------------------------
+    for range_mode in (True, False):
+        for direction, score in ((1, 2), (1, 3), (-1, -2), (-1, -3)):
+            blocked = AutoTraderSim(auto_trading=True,
+                                    allow_choppy_trade=False,
+                                    range_mode=range_mode)
+            blocked.set_bar("M5", direction, score, regime="Choppy", mode=2,
+                            rng_top=box_top, rng_bot=box_bot, bar_time=1000)
+            blocked.update_plan()
+            brow = blocked.rows["M5"]
+            check(brow["dir"] == direction and brow["choppy_blocked"]
+                  and brow["mode"] == 0,
+                  "Choppy Off must keep the would-be direction for display/"
+                  "management but suppress box mode; got %r" % (brow,))
+            check(blocked.header_status_values()[1] == "Off",
+                  "header Choppy Trade must mirror the permission switch")
+            check(blocked.plans["M5"]["state"] == 0
+                  and blocked.plans["M5"]["kind"] == "HOLD"
+                  and blocked.plans["M5"]["note"] == "choppy — Choppy Trade is Off",
+                  "Choppy Off at %+d/3 must publish HOLD with its reason; got %r"
+                  % (score, blocked.plans["M5"]))
+            blocked.manage_auto_bar()
+            check(not blocked.any_auto_active(),
+                  "Choppy Off must place no order at %+d/3 (Range Mode=%r)"
+                  % (score, range_mode))
+
+    # Second key: even if a state-2 plan were somehow present, the final
+    # placement function must refuse while the row is Choppy-blocked.
+    blocked2 = AutoTraderSim(auto_trading=True, allow_choppy_trade=False)
+    blocked2.set_bar("M5", -1, -3, regime="Choppy", mode=2,
+                     rng_top=box_top, rng_bot=box_bot, bar_time=1000)
+    blocked2.update_plan()
+    blocked2.plans["M5"].update(state=2, dir=-1, score=-3, market=True,
+                                entry_price=blocked2.bid, lot=0.01,
+                                sl_pts=28, tp1_pts=14, tp2_pts=19, tp3_pts=25)
+    check(not blocked2.place_plan_order("M5") and not blocked2.auto["M5"].active,
+          "PlacePlanOrder must refuse a Choppy-blocked row even with a state-2 plan")
+
+    # Permission On + Range Mode Off: the old standard pullback remains,
+    # and 3/3 remains a market order.  This is the exact distinction the
+    # old one-switch wording obscured.
+    pullback = AutoTraderSim(auto_trading=True, allow_choppy_trade=True,
+                             range_mode=False)
+    pullback.set_bar("M5", -1, -2, regime="Choppy", mode=1,
+                     rng_top=box_top, rng_bot=box_bot, bar_time=1000)
+    pullback.update_plan()
+    check(pullback.header_status_values()[1] == "On",
+          "Range Mode Off alone must leave Choppy Trade On in the header")
+    check(pullback.plans["M5"]["kind"] != "range fade"
+          and abs(pullback.plans["M5"]["entry_price"] - 4285.84) < 1e-9,
+          "allowed Choppy 2/3 with Range Mode Off must use the 0.5 ATR "
+          "pullback (4285.84); got %r" % pullback.plans["M5"])
+    pullback.manage_auto_bar()
+    check(pullback.auto["M5"].active and not pullback.auto["M5"].is_open
+          and not pullback.auto["M5"].is_range,
+          "allowed Choppy 2/3 with Range Mode Off must place a plain pending")
+
+    chop_market = AutoTraderSim(auto_trading=True, allow_choppy_trade=True,
+                                range_mode=False)
+    chop_market.set_bar("M5", -1, -3, regime="Choppy", mode=1, bar_time=1000)
+    chop_market.update_plan()
+    chop_market.manage_auto_bar()
+    check(chop_market.auto["M5"].active and chop_market.auto["M5"].is_open,
+          "allowed Choppy 3/3 must remain a market order when Range Mode is Off")
+
+    # Permission On + Range Mode On but no usable box is represented in
+    # this transcription by mode != 2 (EvaluateRow chooses that in the
+    # EA): it must use the same pullback fallback, not stand aside.
+    fallback = AutoTraderSim(auto_trading=True, allow_choppy_trade=True,
+                             range_mode=True)
+    fallback.set_bar("M5", -1, -2, regime="Choppy", mode=1,
+                     rng_top=box_top, rng_bot=box_bot, bar_time=1000)
+    fallback.update_plan()
+    check(abs(fallback.plans["M5"]["entry_price"] - 4285.84) < 1e-9
+          and fallback.plans["M5"]["kind"] != "range fade",
+          "an allowed Choppy row with no usable box must fall back to pullback")
+
+    # A waiting pending is still an unfilled new entry: when its row
+    # turns Choppy with permission Off, cancel it instead of refreshing.
+    pend_block = AutoTraderSim(auto_trading=True, allow_choppy_trade=False)
+    pend_block.set_bar("M5", 1, 2, regime="Steady", bar_time=1000)
+    pend_block.update_plan()
+    pend_block.manage_auto_bar()
+    check(pend_block.auto["M5"].active and not pend_block.auto["M5"].is_open,
+          "setup: a Steady 2/3 pending must be waiting")
+    pend_block.set_bar("M5", 1, 2, regime="Choppy", mode=2,
+                       rng_top=box_top, rng_bot=box_bot, bar_time=1300)
+    pend_block.update_plan()
+    check(pend_block.plans["M5"]["state"] == 0,
+          "a pending lane that turns Choppy-blocked must lose its active plan")
+    pend_block.manage_auto_bar()
+    check(not pend_block.auto["M5"].active,
+          "a waiting pending must cancel when its row turns Choppy with permission Off")
+
+    # An already-open trade is different: turning Choppy must not be
+    # mistaken for HOLD/flip.  Its management plan stays alive, the
+    # position stays open, and the placement function still cannot use
+    # that management plan to send another order.
+    open_block = AutoTraderSim(auto_trading=True, allow_choppy_trade=False)
+    open_block.set_bar("M5", 1, 3, regime="Steady", bar_time=1000)
+    open_block.update_plan()
+    open_block.manage_auto_bar()
+    check(open_block.auto["M5"].active and open_block.auto["M5"].is_open,
+          "setup: a Steady 3/3 market trade must be open")
+    open_ticket = open_block.auto["M5"].ticket
+    open_block.set_bar("M5", 1, 3, regime="Choppy", mode=2,
+                       rng_top=box_top, rng_bot=box_bot, bar_time=1300)
+    open_block.update_plan()
+    check(open_block.rows["M5"]["choppy_blocked"]
+          and open_block.plans["M5"]["state"] == 2,
+          "an open same-direction trade must keep a management plan in Choppy")
+    check(not open_block.place_plan_order("M5")
+          and open_block.auto["M5"].ticket == open_ticket,
+          "the management-only plan must never become a second order")
+    open_block.manage_auto_bar()
+    check(open_block.auto["M5"].active and open_block.auto["M5"].is_open,
+          "Choppy permission Off must not close an already-open trade by itself")
+
+    # Permission is per timeframe row: a blocked M5 does not stop an
+    # independent Steady M15 signal.
+    independent = AutoTraderSim(auto_trading=True, allow_choppy_trade=False)
+    independent.set_bar("M5", 1, 3, regime="Choppy", bar_time=1000)
+    independent.set_bar("M15", 1, 3, regime="Steady", bar_time=1000)
+    independent.update_plan()
+    independent.manage_auto_bar()
+    check(not independent.auto["M5"].active
+          and independent.auto["M15"].active and independent.auto["M15"].is_open,
+          "Choppy Off must block only the Choppy row, not independent timeframes")
+    print("  ok  Choppy permission: Off vetoes 2/3+3/3 and cancels pendings; "
+          "Range Mode only chooses pullback vs box; open trades stay managed")
+
+    # ------------------------------------------------------------------
+    # 8h. CALIBRATION-HEALTH DIARY (Rule 17)
+    # ------------------------------------------------------------------
+    def seed_closed(sim, tag, items):
+        """Append fully closed diary rows in the EA's saved field shape."""
+        for item in items:
+            sim.diary_event_seq += 1
+            result_r = item.get("result_r", 0.3)
+            peak = item.get("peak", 110.0)
+            use_trail = item.get("use_trail_stop", True)
+            rec = dict(
+                id=sim.diary_next_id, tf=tag, dir=1,
+                score=item.get("score", 2), regime=item.get("regime", 1),
+                style=item.get("style", 1), status=1,
+                outcome=(3 if abs(result_r) <= HEALTH_BE_EPS_R
+                         else (1 if result_r > 0.0 else 2)),
+                placed_day=20261001, closed_day=20261001,
+                placed_at=1700000000 + sim.diary_event_seq,
+                closed_at=1700000000 + sim.diary_event_seq,
+                local_placed=1700000000 + sim.diary_event_seq,
+                local_closed=1700000000 + sim.diary_event_seq,
+                order_ticket=900000 + sim.diary_next_id,
+                position_id=900000 + sim.diary_next_id,
+                lot=0.01, entry_price=100.0, plan_sl_pts=100,
+                tp1_pts=56, tp2_pts=75, tp3_pts=100,
+                cost_tp1_pct=item.get("cost", 3.0), peak_tp1_pct=peak,
+                result_r=result_r, filled=True,
+                tp1_hit=item.get("tp1", peak >= 100.0),
+                tp2_hit=peak >= 75.0 / 56.0 * 100.0,
+                tp3_hit=peak >= 100.0 / 56.0 * 100.0,
+                risk_pct=0.5, use_risk=True, use_min_lot=False,
+                use_stop_loss=False, use_trail_stop=use_trail,
+                allow_choppy=True, range_mode=True, exit_reason="closed",
+                provisional=False, point_value=point_value_per_lot(sim.spec),
+                trail_pct=item.get("trail_pct", 55 if use_trail else 0),
+                trail_steady=item.get("trail_steady", True),
+                trail_known=item.get("trail_known", use_trail),
+                trail_armed=item.get("trail_armed", False),
+                protection_armed=item.get("protection_armed", False),
+                trail_lock_tp1_pct=item.get("trail_lock", -1.0),
+                best_lock_tp1_pct=item.get("best_lock", -9999.0),
+                final_tp1_pct=item.get("final", -9999.0),
+                stop_exit=item.get("stop_exit", False),
+                stop_known=item.get("stop_known", False),
+            )
+            sim.diary_next_id += 1
+            sim.diary.append(rec)
+        sim.diary_after_change()
+
+    # New diary rows append ten trailstop fields without moving the
+    # original forty.  A shortened old row must load with those facts
+    # unknown, not as a false "trail never armed" sample.
+    compat = AutoTraderSim(diary_store={})
+    seed_closed(compat, "M5", [dict(result_r=0.4)])
+    new_line = diary_record_line(compat.diary[0])
+    old_line = ";".join(new_line.split(";")[:40])
+    old_rec = diary_parse_record_line(old_line)
+    check(len(new_line.split(";")) == 50 and old_rec is not None
+          and not old_rec["trail_known"] and not old_rec["trail_armed"]
+          and old_rec["trail_lock_tp1_pct"] == -1.0
+          and old_rec["final_tp1_pct"] == -9999.0
+          and not old_rec["stop_known"],
+          "old 40-field diary rows must load with trail facts unknown; got %r"
+          % old_rec)
+
+    # A plan by itself is not S: only an accepted order creates a row.
+    no_order = AutoTraderSim(auto_trading=False, diary_store={})
+    no_order.set_bar("M5", 1, 3, regime="Steady", bar_time=1000)
+    no_order.update_plan()
+    no_order.manage_auto_bar()
+    check(not no_order.diary and no_order.all_totals["signals"] == 0,
+          "an advice-only plan must not create a diary signal")
+    check(AutoTraderSim(diary_store={}).show_health is False,
+          "InpShowHealth must default to false")
+
+    # An existing diary that cannot safely be read must be preserved:
+    # this run may remember new rows, but DiarySave must not replace
+    # the unread history with them.
+    guard_store = {}
+    guard_source = AutoTraderSim(diary_store=guard_store)
+    seed_closed(guard_source, "M5", [dict(result_r=0.4)])
+    preserved_lines = list(guard_store["lines"])
+    guard_store["load_failed"] = True
+    guarded = AutoTraderSim(auto_trading=True, diary_store=guard_store)
+    guarded.set_bar("M5", 1, 3, regime="Steady", bar_time=1000)
+    guarded.update_plan()
+    guarded.manage_auto_bar()
+    check(guarded.diary_load_failed and len(guarded.diary) == 1
+          and guard_store["lines"] == preserved_lines,
+          "an unreadable existing diary must not be overwritten blind")
+
+    # Lifecycle with the History panel hidden: market + two pendings,
+    # a pending refresh, one expiry, one fill, TP1 partial + TP3, BE.
+    life_store = {}
+    life = AutoTraderSim(auto_trading=True, use_stop_loss=False,
+                         show_health=False, diary_store=life_store,
+                         local_day_key=20261026)
+    life.ask = 4285.72
+    life.set_bar("M5", 1, 3, regime="Steady", bar_time=1000)
+    life.set_bar("M15", 1, 2, regime="Steady", bar_time=1000)
+    life.set_bar("M30", 1, 2, regime="Steady", bar_time=1000)
+    life.update_plan()
+    life.manage_auto_bar()
+    check(len(life.diary) == 3 and len(life_store["lines"]) == 3,
+          "three accepted orders must create exactly three diary rows even hidden")
+    check(life.diary_day_header_text() == "| Day: S 3 W 0 L 0",
+          "Day header must count today's three placements; got %r"
+          % life.diary_day_header_text())
+    check(life.history_panel_geometry() is None and not life.hist_shown,
+          "Show Health off must hide only the panel, not stop recording")
+    life_ids = [r["id"] for r in life.diary]
+
+    life.set_bar("M15", 1, 2, regime="Steady", bar_time=1900)
+    life.set_bar("M30", 1, 2, regime="Steady", bar_time=2800)
+    life.update_plan()
+    life.manage_auto_bar()
+    check([r["id"] for r in life.diary] == life_ids,
+          "refreshing waiting pendings must not create new S rows")
+
+    life.set_bar("M30", 0, 0, regime="Steady", bar_time=4600)
+    life.update_plan()
+    life.manage_auto_bar()
+    m30_rec = [r for r in life.diary if r["tf"] == "M30"][0]
+    check(m30_rec["status"] == 2 and life.all_totals["expired"] == 1,
+          "a cancelled unfilled pending must become Expired; got %r" % m30_rec)
+    check(life.all_totals["signals"] == 3,
+          "an expired pending remains one acted-on signal")
+
+    m15_entry = life.auto["M15"].entry_price
+    life.manage_auto_tick(bid=m15_entry - 0.01, ask=m15_entry)
+    m15_rec = [r for r in life.diary if r["tf"] == "M15"][0]
+    check(life.auto["M15"].is_open and m15_rec["filled"]
+          and m15_rec["cost_tp1_pct"] > 0.0,
+          "a pending fill must mark its one row filled and record entry cost")
+
+    m5 = life.auto["M5"]
+    tp1_bid = m5.entry_price + m5.tp1_pts * life.spec["point"]
+    life.manage_auto_tick(bid=tp1_bid, ask=tp1_bid + 0.02)
+    check(life.auto["M5"].active and len(life.diary) == 3,
+          "the TP1 70% partial must stay inside the original diary row")
+    tp3_bid = m5.entry_price + m5.tp3_pts * life.spec["point"]
+    life.manage_auto_tick(bid=tp3_bid, ask=tp3_bid + 0.02)
+    m5_rec = [r for r in life.diary if r["tf"] == "M5"][0]
+    check(m5_rec["status"] == 1 and m5_rec["outcome"] == 1
+          and m5_rec["tp1_hit"] and m5_rec["tp2_hit"] and m5_rec["tp3_hit"]
+          and m5_rec["result_r"] > 0.0,
+          "TP1 partial + TP3 must finish as one winning original trade; got %r"
+          % m5_rec)
+
+    # A manual/broker close noticed as a slot reset at entry is a scratch.
+    life.bid = life.auto["M15"].entry_price
+    life.ask = life.bid + 0.02
+    life.auto["M15"].reset(keep_signal_bar=True)
+    m15_rec = [r for r in life.diary if r["tf"] == "M15"][0]
+    check(m15_rec["status"] == 1 and m15_rec["outcome"] == 3,
+          "a close within +/-0.05R must be BE, not forced into W/L; got %r"
+          % m15_rec)
+    totals = life.all_totals
+    check(totals["signals"] == totals["wins"] + totals["losses"] + totals["be"]
+          + totals["open"] + totals["wait"] + totals["expired"] == 3,
+          "lifetime diary categories must reconcile; got %r" % totals)
+    check(life.diary_day_header_text() == "| Day: S 3 W 1 L 0",
+          "Day W/L must count final closes on the PC-local day; got %r"
+          % life.diary_day_header_text())
+
+    # If ticks are interrupted after a pending fills and its position
+    # closes at the broker, order history (position_id here) must turn
+    # the row into that closed trade - never into a false Expired row.
+    race = AutoTraderSim(auto_trading=True, diary_store={},
+                         local_day_key=20261026)
+    race.set_bar("M5", 1, 2, regime="Steady", bar_time=1000)
+    race.update_plan()
+    race.manage_auto_bar()
+    race_rec = race.diary[0]
+    race_rec["position_id"] = 777001
+    race_slot = race.auto["M5"]
+    race_slot.diary_deal_net = (race_rec["point_value"] * race_rec["lot"]
+                                 * race_rec["plan_sl_pts"] * 0.8)
+    race_slot.diary_deal_volume = race_rec["lot"]
+    race_slot.diary_last_exit_price = (
+        race_rec["entry_price"]
+        + race_rec["tp1_pts"] * race.spec["point"] * 0.8)
+    race_slot.diary_stop_exit = True
+    race_slot.diary_stop_known = True
+    race_slot.reset(keep_signal_bar=True)
+    check(race_rec["status"] == 1 and race_rec["outcome"] == 1
+          and race_rec["exit_reason"] == "broker-history"
+          and abs(race_rec["final_tp1_pct"] - 80.0) < 0.01
+          and race_rec["stop_known"] and race_rec["stop_exit"]
+          and race.all_totals["expired"] == 0,
+          "a pending that filled+closed unseen must reconcile as a win; got %r"
+          % race_rec)
+
+    # The same store on a fresh sim is the restart: turning Show Health
+    # on later reveals the rows silently collected while it was off.
+    restarted = AutoTraderSim(show_health=True, diary_store=life_store,
+                              local_day_key=20261026,
+                              auto_panel_pos=AUTO_POS_RIGHT)
+    check(len(restarted.diary) == 3 and restarted.diary_started_text() == "2026.10.26",
+          "a restart must reload the diary and its start date")
+    geom = restarted.history_panel_geometry()
+    check(geom is not None and geom[0] == restarted.panel_x
+          and geom[1] == restarted.panel_y + restarted.panel_h + AUTO_GAP_Y,
+          "Autotrading Right must put History below the Main Panel; got %r" % (geom,))
+    restarted.auto_panel_pos = AUTO_POS_BOTTOM
+    geom = restarted.history_panel_geometry()
+    check(geom[0] == restarted.panel_x + restarted.panel_w + AUTO_GAP_X
+          and geom[1] == restarted.panel_y,
+          "Autotrading Bottom must put History on the Right; got %r" % (geom,))
+    over = restarted.render_history_panel(
+        "State H1: History revealed after silent diary recording")
+    check(not over, "History panel overflowed: %s" % (over,))
+    hist_lines = restarted.history_panel_lines()
+    check(hist_lines[0].startswith("Day: S 3")
+          and hist_lines[1].startswith("All: S 3")
+          and "Health: Learning (1/30 closed)" in hist_lines[2]
+          and hist_lines[-1] == "Diary suggests first steps; it never changes settings.",
+          "History must show Day/All, per-lane Learning progress and no-auto-change footer; got %r"
+          % (hist_lines,))
+
+    # A 2/3 pending upgraded to a 3/3 market order is still one idea,
+    # and its Day S remains the original pending placement day.
+    upgrade_store = {}
+    upgrade = AutoTraderSim(auto_trading=True, diary_store=upgrade_store,
+                            local_day_key=20261026)
+    upgrade.set_bar("M5", 1, 2, regime="Steady", bar_time=1000)
+    upgrade.update_plan()
+    upgrade.manage_auto_bar()
+    original_id = upgrade.diary[0]["id"]
+    upgrade.local_day_key = 20261027
+    upgrade.set_bar("M5", 1, 3, regime="Steady", bar_time=1300)
+    upgrade.update_plan()
+    upgrade.manage_auto_bar()
+    check(upgrade.auto["M5"].is_open and len(upgrade.diary) == 1
+          and upgrade.diary[0]["id"] == original_id
+          and upgrade.diary[0]["score"] == 3
+          and upgrade.diary[0]["placed_day"] == 20261026
+          and upgrade.all_totals["signals"] == 1
+          and upgrade.day_totals["signals"] == 0,
+          "the pending-to-market upgrade must remain one S from its original day; got %r"
+          % (upgrade.diary,))
+
+    # Learning floor: 29 terrible trades are evidence, not a verdict.
+    learning = AutoTraderSim(diary_store={})
+    seed_closed(learning, "M5", [dict(result_r=-0.5, peak=5.0, cost=25.0)] * 29)
+    check(learning.health["M5"]["status"] == -1
+          and learning.health_label_text("M5") == "Health: Learning"
+          and learning.health_note_text() == "",
+          "29 closed trades must stay Learning with no Poor note")
+
+    ok_sim = AutoTraderSim(diary_store={})
+    seed_closed(ok_sim, "M5", [dict(score=2 if i % 2 == 0 else 3,
+                                    result_r=0.3, peak=110.0, cost=3.0)
+                               for i in range(30)])
+    check(ok_sim.health["M5"]["status"] == 0
+          and ok_sim.health_label_text("M5") == "Health: OK",
+          "30 healthy recent trades must read Health: OK")
+
+    # Recent cost can decay while every lifetime trade is still a win.
+    cost_sim = AutoTraderSim(diary_store={}, show_health=True)
+    seed_closed(cost_sim, "M5",
+                [dict(score=2 if i % 2 == 0 else 3, result_r=0.25,
+                      peak=110.0, cost=4.0) for i in range(30)]
+                + [dict(score=2 if i % 2 == 0 else 3, result_r=0.15,
+                        peak=110.0, cost=15.0) for i in range(30)])
+    cost_lane = cost_sim.health["M5"]
+    check(cost_lane["wins"] == 60 and cost_lane["status"] == 2
+          and cost_lane["label"] == "Cost: Poor"
+          and "minimum lot" in cost_lane["note"],
+          "persistent 15%%-of-TP1 spread must be Cost Poor with a first fix; got %r"
+          % cost_lane)
+    cost_lines = cost_sim.history_panel_lines()
+    check("Score 2/3: W 30" in cost_lines[4] and "Cost 15%" in cost_lines[5],
+          "History must expose the lifetime score split and recent cost; got %r"
+          % (cost_lines[2:7],))
+
+    # Trailstop evidence uses only recent closed trades placed with
+    # the trail on and actually observed.  Old unknown rows and
+    # trail-off rows cannot dilute Armed, Lock, stop exits or giveback.
+    trail_sim = AutoTraderSim(diary_store={}, show_health=True)
+    trail_items = []
+    for i in range(12):
+        trail_items.append(dict(
+            result_r=0.25, peak=80.0, cost=3.0, tp1=False,
+            trail_pct=55, trail_steady=True, trail_known=True,
+            trail_armed=True, protection_armed=True, trail_lock=30.0,
+            best_lock=30.0, final=50.0,
+            stop_exit=(i < 5), stop_known=(i < 10)))
+    trail_items += [dict(result_r=0.3, peak=110.0, cost=3.0,
+                         trail_known=True, trail_armed=False)] * 6
+    trail_items += [dict(result_r=0.3, peak=110.0, cost=3.0,
+                         trail_known=False, trail_armed=True,
+                         trail_lock=90.0, final=100.0,
+                         stop_exit=True, stop_known=True)] * 6
+    trail_items += [dict(result_r=0.3, peak=110.0, cost=3.0,
+                         use_trail_stop=False, trail_known=True,
+                         trail_armed=True, trail_lock=90.0, final=100.0,
+                         stop_exit=True, stop_known=True)] * 6
+    seed_closed(trail_sim, "M5", trail_items)
+    trail_lane = trail_sim.health["M5"]
+    check(trail_lane["rec_trail_eligible"] == 18
+          and trail_lane["rec_trail_armed"] == 12
+          and abs(trail_lane["rec_trail_arm_rate"] - (12.0 / 18.0)) < 1e-12
+          and trail_lane["rec_trail_lock_n"] == 12
+          and trail_lane["rec_trail_median_lock"] == 30.0
+          and trail_lane["rec_trail_stop_known"] == 10
+          and trail_lane["rec_trail_stop_exits"] == 5
+          and trail_lane["rec_trail_giveback_n"] == 12
+          and trail_lane["rec_trail_median_giveback"] == 30.0,
+          "Trail aggregates must exclude unknown and trail-off rows; got %r"
+          % trail_lane)
+    trail_lines = trail_sim.history_panel_lines()
+    check(len(trail_lines) == 21
+          and trail_lines[6] == "  Trail 30: Armed 67% | Lock 30% | Stop exits 5 | Giveback 30%"
+          and trail_lines[7].startswith("  First step:")
+          and trail_lines[20] == "Diary suggests first steps; it never changes settings.",
+          "History must add one Trail line per TF before First step; got %r"
+          % (trail_lines,))
+
+    # Watch is not Poor when only the newest half has turned expensive.
+    watch_sim = AutoTraderSim(diary_store={})
+    seed_closed(watch_sim, "M5",
+                [dict(result_r=0.2, peak=110.0, cost=5.0)] * 15
+                + [dict(result_r=0.2, peak=110.0, cost=20.0)] * 15)
+    check(watch_sim.health["M5"]["status"] == 1
+          and watch_sim.health_label_text("M5") == "Cost: Watch"
+          and watch_sim.health_note_text() == "",
+          "a one-half cost spike must be Watch, with no Main Panel note")
+
+    near_sim = AutoTraderSim(diary_store={})
+    seed_closed(near_sim, "M15",
+                [dict(score=2 if i % 2 == 0 else 3, result_r=-0.2,
+                      peak=80.0, cost=3.0, tp1=False) for i in range(30)])
+    check(near_sim.health["M15"]["label"] == "TP1: Poor"
+          and "reach 80% of TP1 then reverse" in near_sim.health["M15"]["note"]
+          and "nearer TP1" in near_sim.health["M15"]["note"],
+          "near-TP1 reversals must suggest testing a nearer TP1; got %r"
+          % near_sim.health["M15"])
+
+    weak_sim = AutoTraderSim(diary_store={})
+    seed_closed(weak_sim, "M30",
+                [dict(score=2 if i % 2 == 0 else 3, result_r=-0.2,
+                      peak=20.0, cost=3.0, tp1=False) for i in range(30)])
+    check(weak_sim.health["M30"]["label"] == "TP1: Poor"
+          and "Lower risk; consider 3/3-only" in weak_sim.health["M30"]["note"],
+          "barely-moving trades must suggest lower risk / 3/3-only; got %r"
+          % weak_sim.health["M30"])
+
+    score_sim = AutoTraderSim(diary_store={})
+    score_items = []
+    for _half in range(2):
+        for _i in range(15):
+            score_items.append(dict(score=2, result_r=0.4, peak=110.0, cost=3.0))
+            score_items.append(dict(score=3, result_r=-0.4, peak=80.0,
+                                    cost=3.0, tp1=False))
+    seed_closed(score_sim, "M15", score_items)
+    check(score_sim.health["M15"]["label"] == "Score: Poor"
+          and "3/3 is not beating 2/3" in score_sim.health["M15"]["note"],
+          "persistent 3/3 underperformance must be Score Poor; got %r"
+          % score_sim.health["M15"])
+
+    box_sim = AutoTraderSim(diary_store={})
+    box_items = []
+    for _half in range(2):
+        for _i in range(15):
+            box_items.append(dict(score=2, regime=2, style=2,
+                                  result_r=-0.4, peak=60.0, cost=3.0,
+                                  tp1=False))
+            box_items.append(dict(score=2, regime=1, style=1,
+                                  result_r=0.4, peak=110.0, cost=3.0))
+    seed_closed(box_sim, "M5", box_items)
+    check(box_sim.health["M5"]["label"] == "Box: Poor"
+          and "Range Mode Off" in box_sim.health["M5"]["note"],
+          "a persistent box-only weakness must suggest testing Range Mode Off; got %r"
+          % box_sim.health["M5"])
+
+    # The chart lane's Poor warning wins the single note; other Poor
+    # lanes are counted, not stacked into extra Main Panel lines.
+    multi = AutoTraderSim(diary_store={}, chart_tf="M15")
+    seed_closed(multi, "M5", [dict(result_r=-0.2, peak=80.0, cost=3.0,
+                                   tp1=False)] * 30)
+    seed_closed(multi, "M15", [dict(result_r=0.2, peak=110.0, cost=15.0)] * 30)
+    note = multi.health_note_text()
+    check(note.startswith("Health M15:") and note.endswith(" (+1 more)"),
+          "the chart lane must own the one Poor note and count the rest; got %r" % note)
+
+    print("  ok  Rule 17 diary: one row per placed idea, partials/upgrades stay one S, "
+          "silent recording persists, categories reconcile")
+    print("  ok  Rule 17 health: Learning <30, persistent Poor for Cost/TP1/Score/Box, "
+          "Watch needs no note, Poor suggests a safest first fix")
+    print("  ok  Rule 17 trailstop performance: old rows stay unknown; observed activation/"
+          "lock/stop exits/giveback aggregate without changing health")
+    print("  ok  Rule 17 History: Day/All, per-TF lifetime + score split + recent 30 + Trail, "
+          "hidden by default and opposite Autotrading when shown")
 
     # ------------------------------------------------------------------
     # 9. Rule 14: the time cells - Valid countdown & Hold (open trade)
