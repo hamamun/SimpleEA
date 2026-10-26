@@ -672,6 +672,17 @@ int OnInit()
    //  and the notice one - whatever the font size.
    g_panelW = NoticeWidth();
 
+   // Keep exclusive ownership for the entire run, not just during saves.
+   // A second writer would have a stale in-memory copy of the diary.
+   g_diaryLockHandle = FileOpen(DiaryFileName() + ".lock",
+                               FILE_READ | FILE_WRITE | FILE_BIN |
+                               (MQLInfoInteger(MQL_TESTER) ? 0 : FILE_COMMON));
+   if(g_diaryLockHandle == INVALID_HANDLE)
+   {
+      Print("SimpleEA: diary is already in use or its lock cannot be opened. "
+            "Stop the other EA using this account/symbol/magic, then retry.");
+      return(INIT_FAILED);
+   }
    DiaryInit();
    BuildPanel();
    InitAutoState();
@@ -721,6 +732,11 @@ void OnDeinit(const int reason)
 {
    EventKillTimer();
    DiaryFlushOpenSlots();
+   if(g_diaryLockHandle != INVALID_HANDLE)
+   {
+      FileClose(g_diaryLockHandle);
+      g_diaryLockHandle = INVALID_HANDLE;
+   }
    DeletePanel();
 }
 
@@ -2303,6 +2319,7 @@ SDiaryTotals  g_allTotals;
 SHealthLane   g_health[TF_COUNT];
 SDiaryUpgrade g_diaryUpgrade[TF_COUNT];
 
+int      g_diaryLockHandle     = INVALID_HANDLE;
 bool     g_diaryReady          = false;
 bool     g_diaryWarned         = false;
 bool     g_diaryLoadFailed     = false;   // existing file unreadable: never overwrite it blind
@@ -2354,7 +2371,7 @@ string DiaryFileName()
       ushort ch = StringGetCharacter(_Symbol, k);
       bool ok = ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
                  (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '_');
-      safe += ok ? CharToString(ch) : "_";
+      safe += ok ? ShortToString(ch) : "_";
    }
    if(safe == "") safe = "SYMBOL";
    return(StringFormat("SimpleEA_Diary_%I64d_%s_%I64d.csv",
@@ -2433,7 +2450,28 @@ bool DiaryParseRecordLine(string line, SDiaryRecord &r)
 {
    string p[];
    int n = StringSplit(line, ';', p);
-   if(n < 40) return(false);
+   if(n < 40 || n > 50) return(false);
+   // Numeric conversion alone accepts damaged text as zero. Reject it
+   // before conversion so an unreadable row cannot be silently rewritten.
+   for(int field = 0; field < n; field++)
+   {
+      if(field == 37) continue; // exit reason is the only text field
+      if(StringLen(p[field]) == 0) return(false);
+      bool digitSeen = false;
+      int dots = 0;
+      for(int c = 0; c < StringLen(p[field]); c++)
+      {
+         ushort ch = StringGetCharacter(p[field], c);
+         if(ch >= '0' && ch <= '9') { digitSeen = true; continue; }
+         if(ch == '-' && c == 0) continue;
+         bool decimalField = (field == 17 || field == 18 || field == 23 ||
+                              field == 24 || field == 25 || field == 30 ||
+                              field == 39 || field == 45 || field == 46 || field == 47);
+         if(ch == '.' && decimalField && ++dots == 1) continue;
+         return(false);
+      }
+      if(!digitSeen) return(false);
+   }
    if(StringToInteger(p[0]) != DIARY_VERSION) return(false);
 
    r.id            = StringToInteger(p[1]);
@@ -2498,7 +2536,9 @@ bool DiaryParseRecordLine(string line, SDiaryRecord &r)
    if(n > 47) r.finalTp1Pct     = StringToDouble(p[47]);
    if(n > 48) r.stopExit        = (StringToInteger(p[48]) != 0);
    if(n > 49) r.stopKnown       = (StringToInteger(p[49]) != 0);
-   return(r.id > 0 && r.tf >= 0 && r.tf < TF_COUNT);
+   return(r.id > 0 && r.tf >= 0 && r.tf < TF_COUNT &&
+          (r.dir == 1 || r.dir == -1) && r.status >= 0 && r.status <= 2 &&
+          r.outcome >= 0 && r.outcome <= 3);
 }
 
 //+------------------------------------------------------------------+
@@ -2630,7 +2670,7 @@ void DiaryResetLane(int i)
    g_health[i].scoreLevel    = 0;
    g_health[i].styleLevel    = 0;
    g_health[i].label         = "Health: Learning";
-   g_health[i].action        = "Keep collecting; health starts at 30 closed trades.";
+   g_health[i].action        = "Keep collecting; health starts at 30 observed closed trades.";
    g_health[i].note          = "";
 }
 
@@ -2690,7 +2730,8 @@ void DiaryComputeSegment(int lane, int start, int count, SDiarySegment &seg)
       if(!c.tp1Hit && c.peakTp1Pct >= 70.0 && c.peakTp1Pct < 100.0)
          seg.nearCount++;
       seg.netR += c.resultR;
-      peaks[peakN++] = MathMax(0.0, c.peakTp1Pct);
+      if(c.peakTp1Pct >= 0.0)
+         peaks[peakN++] = c.peakTp1Pct;
       if(c.costTp1Pct > 0.0)
          costs[costN++] = c.costTp1Pct;
 
@@ -2793,10 +2834,11 @@ int DiarySubsetLevel(int subN, int subTp1, double subR,
 //+------------------------------------------------------------------+
 bool DiarySubsetPersists(int lane, bool boxSplit)
 {
-   int splitAt = g_health[lane].recentCount / 2;
+   int startAt = (int)MathMax(0, g_health[lane].recentCount - HEALTH_RECENT_N);
+   int splitAt = startAt + (g_health[lane].recentCount - startAt) / 2;
    for(int half = 0; half < 2; half++)
    {
-      int start = (half == 0) ? 0 : splitAt;
+      int start = (half == 0) ? startAt : splitAt;
       int stop  = (half == 0) ? splitAt : g_health[lane].recentCount;
       int subN = 0, subTp1 = 0, otherN = 0, otherTp1 = 0;
       double subR = 0.0, otherR = 0.0;
@@ -2851,7 +2893,7 @@ void DiaryComputeLaneHealth(int i)
    lane.scoreLevel   = 0;
    lane.styleLevel   = 0;
    lane.label        = "Health: Learning";
-   lane.action       = "Keep collecting; health starts at 30 closed trades.";
+   lane.action       = "Keep collecting; health starts at 30 observed closed trades.";
    lane.note         = "";
 
    int recN    = (int)MathMin(HEALTH_RECENT_N, lane.recentCount);
@@ -2901,14 +2943,14 @@ void DiaryComputeLaneHealth(int i)
    double followDrop = (base.n >= 15 && base.tp1Rate >= 0.0 && rec.tp1Rate >= 0.0)
                        ? (base.tp1Rate - rec.tp1Rate) : 0.0;
    bool halfOldWeak = (halfOld.tp1Rate >= 0.0 &&
-                       (halfOld.tp1Rate < 0.45 || halfOld.medianPeak < 65.0));
+                       (halfOld.tp1Rate < 0.45 || (halfOld.medianPeak >= 0.0 && halfOld.medianPeak < 65.0)));
    bool halfNewWeak = (halfNew.tp1Rate >= 0.0 &&
-                       (halfNew.tp1Rate < 0.45 || halfNew.medianPeak < 65.0));
-   bool followPoorCandidate = (rec.tp1Rate < 0.30 || rec.medianPeak < 45.0 ||
+                       (halfNew.tp1Rate < 0.45 || (halfNew.medianPeak >= 0.0 && halfNew.medianPeak < 65.0)));
+   bool followPoorCandidate = (rec.tp1Rate < 0.30 || (rec.medianPeak >= 0.0 && rec.medianPeak < 45.0) ||
                                (followDrop >= 0.25 && rec.tp1Rate < 0.45));
    if(followPoorCandidate && halfOldWeak && halfNewWeak)
       lane.followLevel = 2;
-   else if(rec.tp1Rate < 0.45 || rec.medianPeak < 65.0 || followDrop >= 0.15)
+   else if(rec.tp1Rate < 0.45 || (rec.medianPeak >= 0.0 && rec.medianPeak < 65.0) || followDrop >= 0.15)
       lane.followLevel = 1;
 
    int followIssue = (rec.medianPeak >= 50.0 ||
@@ -2936,8 +2978,8 @@ void DiaryComputeLaneHealth(int i)
    double o2R = 0.0, o3R = 0.0;
    int    n2N = 0, n3N = 0, n2Tp1 = 0, n3Tp1 = 0;
    double n2R = 0.0, n3R = 0.0;
-   int splitAt = lane.recentCount / 2;
-   for(int k = 0; k < lane.recentCount; k++)
+   int splitAt = recStart + recN / 2;
+   for(int k = recStart; k < lane.recentCount; k++)
    {
       SDiaryClosed c = lane.recent[k];
       bool newer = (k >= splitAt);
@@ -2981,7 +3023,7 @@ void DiaryComputeLaneHealth(int i)
    double boxR = 0.0, nonBoxR = 0.0;
    int    chopN = 0, chopTp1 = 0, nonChopN = 0, nonChopTp1 = 0;
    double chopR = 0.0, nonChopR = 0.0;
-   for(int k = 0; k < lane.recentCount; k++)
+   for(int k = recStart; k < lane.recentCount; k++)
    {
       SDiaryClosed c = lane.recent[k];
       if(c.style == 2)
@@ -3193,7 +3235,7 @@ void DiaryRefreshSummaries()
       }
    }
 
-   //  The health window is the newest 60 CLOSED trades in close-time
+   //  The health window is the newest 60 observed CLOSED trades in close-time
    //  order: the last 30 are judged, the 30 before them are the
    //  baseline they are compared with.
    bool picked[];
@@ -3217,6 +3259,9 @@ void DiaryRefreshSummaries()
             if(picked[k]) continue;
             SDiaryRecord r = g_diary[k];
             if(r.tf != i || r.status != 1) continue;
+            // Offline-close rows retain their real P/L in totals, but cannot
+            // prove target hits or excursions. Do not judge health from them.
+            if(r.peakTp1Pct < 0.0) continue;
             long when = (long)r.closedAt;
             if(when > bestTime || (when == bestTime && r.id > bestId))
             {
@@ -3890,6 +3935,10 @@ void DiaryReconcileOpenRecords()
             outVol >= g_diary[k].lot - 1e-8)
          {
             g_diary[k].positionId = pos;
+            // History proves the money result, not the path price took while
+            // this EA was absent. Exclude incomplete peak/trail observations.
+            g_diary[k].peakTp1Pct = -1.0;
+            g_diary[k].trailKnown = false;
             DiaryApplyClosedResult(k, net, false, lastDeal,
                                    DiaryLocalFromServer(lastDeal),
                                    "broker-history", lastExitPrice,
@@ -4170,7 +4219,20 @@ void DiaryInit()
             }
             SDiaryRecord r;
             if(!DiaryParseRecordLine(line, r))
+            {
+               // Never rewrite a partially readable diary: that would erase
+               // the rows this build could not parse.
+               g_diaryLoadFailed = true;
+               Print("SimpleEA: invalid diary row; existing file is protected "
+                     "from overwrite. Back it up and repair it before restarting.");
                continue;
+            }
+            if(DiaryRecordIndexById(r.id) >= 0)
+            {
+               g_diaryLoadFailed = true;
+               Print("SimpleEA: duplicate diary row id; file protected from overwrite.");
+               continue;
+            }
             int n = ArraySize(g_diary);
             ArrayResize(g_diary, n + 1);
             g_diary[n] = r;
