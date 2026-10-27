@@ -117,6 +117,12 @@
 //|     or the box is unusable).                                      |
 //|   - M5 trades its own signal directly. M15/M30 are untied by      |
 //|     default; tie them with InpRequireM15M30SameTrend = true.      |
+//|   - New orders are placed ONLY on the close of that timeframe's  |
+//|     own bar: attaching/restarting the EA, returning to a          |
+//|     supported chart, a timer resume, or another timeframe's bar   |
+//|     closing never places mid-bar - the next entry waits for the   |
+//|     row's next closed bar.  Mid-bar ticks only manage open trades |
+//|     (TP partial closes, SL/trailing modifies); they never enter.  |
 //|   - Optional PC-local timer/pause: while OFF, no new orders are   |
 //|     placed and pendings are cancelled; open trades stay managed.  |
 //|     The header states the EFFECTIVE state ("Timer Pause", never   |
@@ -493,6 +499,14 @@ int  g_panelW  = 406;   // wide enough for the header + the notice line
 int  g_panelH  = 130;   // height of the full panel (recomputed in OnInit)
 int  g_rowH    = 20;
 bool g_panelOK = false; // what is currently drawn: false = notice only
+//  Rows whose OWN timeframe printed a new closed bar in the current
+//  CheckNewBars() pass.  This is the one permission slip for placing a
+//  NEW order: PlacePlanOrder() refuses every row not marked here, so
+//  ManageAutoBar() calls that did not come from a fresh bar of that
+//  row (OnInit, the !g_panelOK rebuild, a timer resume, or another
+//  timeframe's close) can manage, close and cancel but can never open.
+//  In-memory only on purpose: a restart must re-earn the slip.
+bool g_freshBar[TF_COUNT];
 datetime g_srvSaidClosedUntil = 0;  // server said "market closed": trust it for a while
 
 //  Autotrading timer (PC local) + one-shot pause state.  The pause
@@ -811,18 +825,26 @@ void CheckNewBars()
 
    bool need = false;
 
+   //  Work out, for EVERY row, whether its own timeframe just printed a
+   //  new closed bar - before EvaluateAll() overwrites g_rows[].lastBar.
+   //  A row only counts as fresh when it was already being tracked
+   //  (panel live, a real baseline bar): a bar that closed while the
+   //  chart sat on an unsupported timeframe, or the first bar ever seen
+   //  after (re)attach, is a catch-up sighting, not a fresh close, so
+   //  it earns no placement slip.
    for(int i = 0; i < TF_COUNT; i++)
    {
       datetime closedBar = LastClosedBarTime(_Symbol, g_rows[i].tf);
       if(closedBar != g_rows[i].lastBar)
-      {
          need = true;
-         break;
-      }
+      g_freshBar[i] = (g_panelOK && g_rows[i].lastBar > 0 &&
+                       closedBar > 0 && closedBar != g_rows[i].lastBar);
    }
 
    //  Coming back onto M5/M15/M30 after an unsupported timeframe: rebuild
    //  from the current data instead of showing whatever was last computed.
+   //  g_freshBar[] is all false here (the panel was the notice), so this
+   //  pass manages what exists but places nothing mid-bar.
    if(!g_panelOK)
    {
       EvaluateAll();
@@ -839,6 +861,9 @@ void CheckNewBars()
       EvaluateAll();
       UpdatePlan();
       ManageAutoBar();
+      //  The slip is spent: any ManageAutoBar() call later in this same
+      //  tick (e.g. a timer resume) must not re-use it.
+      ArrayInitialize(g_freshBar, false);
       UpdateAutoPanel();
       DrawPanel();
       ChartRedraw(0);
@@ -5823,6 +5848,16 @@ void SyncAutoState()
 //+------------------------------------------------------------------+
 bool PlacePlanOrder(int i)
 {
+   //  THE NEW-BAR PLACEMENT GATE, first key on this door.  A new order
+   //  may only leave the terminal for a row whose own timeframe printed
+   //  a new closed bar in the current CheckNewBars() pass.  Every other
+   //  ManageAutoBar() pass - EA attach/restart, the return to a
+   //  supported chart, a timer/schedule resume, or a pass triggered by
+   //  another timeframe's close - reaches this function with the row
+   //  unmarked and is refused here, so no caller can place mid-bar.
+   //  Managing what already exists (closes, cancels, SL/TP modifies)
+   //  never comes through this function and is unaffected.
+   if(i < 0 || i >= TF_COUNT || !g_freshBar[i]) return(false);
    if(!CanPlaceAutoOrders()) return(false);
    if(g_plans[i].state != 2 || g_plans[i].dir == 0) return(false);
    if(!TrendMatchForTF(i)) return(false);

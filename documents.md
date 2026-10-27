@@ -258,10 +258,22 @@ The table below is the score's would-be action after the ER dead-market gate and
 
 | Score / row state | Qualification | Action Taken |
 |---|---|---|
-| **+3 / 3** or **-3 / 3** | All 3 votes agree | **Market Order** immediately at live Ask/Bid in Steady/Mixed, and in Choppy only when `InpAllowChoppyTrade = true` (subject to the existing low-volume safeguard in §2). |
+| **+3 / 3** or **-3 / 3** | All 3 votes agree | **Market Order** at live Ask/Bid (sent at that row's bar close — see *Placement Timing* below) in Steady/Mixed, and in Choppy only when `InpAllowChoppyTrade = true` (subject to the existing low-volume safeguard in §2). |
 | **+2 / 3** or **-2 / 3** | 2 of 3 votes agree | **Pending Limit Order** waiting for a favorable price (see the entry-style rules below). |
 | Qualifying score, row is **Choppy**, `InpAllowChoppyTrade = false` | Score direction exists but the operator has vetoed new Choppy entries | **No order** — no 2/3 limit and no 3/3 market order. The Trade Plan shows `HOLD — choppy — Choppy Trade is Off`. |
 | **-1, 0, +1** | Score below threshold | **HOLD (Stand aside)**. The panel states the exact refusal reason. |
+
+### Placement Timing — New Orders Only on That Timeframe's Own Bar Close
+
+Every **new** order (market, limit, reversal entry, and the market replacement of a deleted pending) is placed **only on the close of that row's own timeframe bar** — an M30 entry, for example, can only be sent on an M30 close. This is enforced, not just intended: `CheckNewBars()` marks each row whose own timeframe printed a new closed bar (`g_freshBar[]`), and `PlacePlanOrder()` — the single funnel through which every new order leaves the terminal — refuses any row without that mark. The mark is spent (cleared) by the bar-close pass itself, so nothing later in the same tick can re-use it.
+
+Consequences:
+
+- **Attaching, restarting, or recompiling the EA** never places an order mid-bar; the first entry waits for that row's next closed bar.
+- **Returning to a supported chart** (M5/M15/M30) after an unsupported timeframe, or the **market reopening**, rebuilds the panel but places nothing until the row's next close.
+- **A timer/schedule resume** (§8) is not a placement trigger: after it turns ON, each row's first entry still waits for its own next bar close (up to ~5/15/30 minutes per row). The signal used is the one recomputed at that close, never a stale mid-bar reading.
+- **Another timeframe's bar closing** (say an M5 close while an M30 row is mid-bar) cannot place or re-place that row's order — not even a retry after a broker rejection, or a re-entry after a tick-level TP close freed the slot.
+- This governs **placement only**. Mid-bar ticks continue to manage open trades exactly as before (TP1/TP2/TP3 partial and full closes, trailstop and profit-floor SL moves, §5); closes, pending cancellations, and SL/TP modifies are never delayed by this rule. A waiting limit order can also still **fill** mid-bar at the broker — that is a fill of an order placed at a bar boundary, not a new placement.
 
 ### Where Pending Limit Orders Wait & Refresh
 - **Choppy permission first (`InpAllowChoppyTrade = false`)**: if the row currently reads Choppy, there is **no pending order at all**, regardless of `InpRangeMode`.
@@ -272,7 +284,7 @@ The table below is the score's would-be action after the ER dead-market gate and
 - **Choppy Regime, allowed, `InpRangeMode = false`**: The standard $0.5 \times \text{ATR}$ pullback limit is used. Turning Range Mode off changes only the entry style; it is not another way to forbid Choppy trading.
 - **Closed-Bar Pending Refresh & `2/3 -> 3/3` Market Upgrade**:
   - On each new closed bar in the same direction while the reading remains `2/3`, SimpleEA updates the waiting limit's `Entry`, `SL` (if `InpUseStopLoss = true`), and `TP1/TP2/TP3` to the freshest plan.
-  - If the row upgrades from `2/3` to `3/3` (with volume confirmed) in the same direction, SimpleEA deletes the waiting limit order and immediately opens a **Market Order**, merging both into the **same single `S` diary record** and original placement date.
+  - If the row upgrades from `2/3` to `3/3` (with volume confirmed) in the same direction, SimpleEA deletes the waiting limit order and opens a **Market Order** at that same bar-close pass, merging both into the **same single `S` diary record** and original placement date.
 
 ---
 
@@ -457,7 +469,7 @@ Both are layered **on top of** the existing permission checks: master switch, su
 
 The split is deliberate. Pending orders are *unfilled entries resting at the broker*, so they must not survive an OFF transition. Open trades are the opposite case: with `InpUseStopLoss = false` a hard freeze could leave a position with no stop at all, so management must never stop.
 
-When the timer turns back ON, nothing is replayed or "caught up": placement is simply allowed again from that moment, using the freshest plan. Each transition is written to the Experts log.
+When the timer turns back ON, nothing is replayed or "caught up": placement is allowed again, but — like every new order — the first entry still waits for the close of that timeframe's own next bar (attaching/restarting the EA follows the same rule; only closes, cancels and SL/TP management act mid-bar). Each transition is written to the Experts log.
 
 ### 8.2 One-shot pause persistence
 
@@ -486,6 +498,7 @@ When the timer turns back ON, nothing is replayed or "caught up": placement is s
 - The daily window follows the **PC/VPS clock**. Moving the EA to a VPS in another timezone moves `08:00` with it, and a clock left wrong shifts the window.
 - "Timer allows placement" is not the same as "an order will be sent": the signal, score gate, trend gate, Choppy permission and broker conditions must also agree. The header can legitimately read `On` while nothing is placed.
 - Loading the EA during an OFF period cancels this EA's waiting pendings within a couple of seconds — by design.
+- A **resume is not a placement trigger**: after the timer turns back ON, the first new order still waits for that row's own next bar close (§3, *Placement Timing*). The same applies right after the EA is attached or restarted.
 - The timer never closes positions. It is a schedule and a snooze button for *entering* trades, not a "close everything at 17:00" switch.
 
 ---
