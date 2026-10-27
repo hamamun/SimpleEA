@@ -236,17 +236,41 @@ $$\text{ER} = \frac{|\text{Close}[i] - \text{Close}[i-20]|}{\sum_{k=0}^{19} |\te
 - If $\text{ER} < 0.10$ (`ER_DEAD`): Market is flat noise. Trade is blocked with the reason: `quiet — nothing worth trading`.
 
 ### Tick Volume Confirmation Gate (`VOL_RATIO_MIN = 0.50`)
-- Compares the finished bar's tick volume against its 20-bar moving average.
+- Compares the finished bar's tick volume against the **20 closed bars that preceded it**. The bar under test is deliberately excluded from its own baseline.
 - If market volume has dried up ($< 50\%$ of average), an aggressive `3/3` Market Order is automatically stepped down to a **Pending Limit Order**, protecting against illiquid rollover spread spikes.
 - Gracefully permits trading if the broker feed does not provide tick volume.
 
+> **Why the bar excludes itself:** the baseline used to be a moving average that *included* the bar being judged, so a thin bar dragged down the very number it was measured against and could pass a test it should have failed — a bar sitting at 49% of the surrounding volume cleared a 50% gate. `research/verify_regime_fixes.py` pins this behaviour.
+
 ### Regime Classification: Rolling Hurst Exponent (H)
-Calculated via variance-scaling over a 256-bar window:
+Calculated via variance-scaling over a **per-timeframe window sized to a fixed span** (`HURST_SPAN_HOURS = 128 h`), not one bar count shared by all three rows:
+
+| Row | Window | Real history behind the label |
+|---|---|---|
+| M5 | 1536 bars | 128 h (5.3 days) |
+| M15 | 512 bars | 128 h (5.3 days) |
+| M30 | 256 bars | 128 h (5.3 days) |
+
 - **Steady ($H > 0.55$)**: Persistent trending behavior. Trends extend.
 - **Mixed ($0.45 \le H \le 0.55$)**: Random walk / balanced market.
 - **Choppy ($H < 0.45$)**: Anti-persistent / mean-reverting. Moves pull back.
 
-> **CRITICAL RULE:** Hurst never creates a direction or permission by itself. The score publishes the would-be direction and order type; **`InpAllowChoppyTrade` is the operator's separate new-entry permission for a row currently classified Choppy**. When that permission is on, Hurst/Range Mode choose the entry style. When it is off, the Choppy row places nothing at either 2/3 or 3/3.
+> **Why a span and not a bar count:** 256 bars was 21 hours on M5 but 128 hours on M30, so the noisiest row was judged on one sixth of the evidence. All three rows now see the same stretch of market. M30 lands on 256 bars — exactly where it always was.
+
+#### Where the M5 label comes from (`InpM5RegimeFrom`)
+M5's own label is still measured and still shown, but it is computed from 5-minute returns, and every quote bouncing between bid and ask makes short-horizon returns look mean-reverting. That drags the estimate down. M5 may therefore read its label from a slower row:
+
+| Setting | Meaning |
+|---|---|
+| `Own` (0) | M5 keeps its own label — the original behaviour |
+| `M15` (1) | **Shipped default.** M5 borrows M15's label (15-minute sampling) |
+| `M30` (2) | M5 borrows M30's label (30-minute sampling) |
+
+This **borrows** a label; it does not require the two rows to **agree**. Requiring agreement would be actively harmful: an M5 row that reads Choppy most of the time would only be permitted to trade when the higher row was Choppy too — blocking every trend and allowing only chop. `research/verify_regime_fixes.py` demonstrates this explicitly.
+
+When M5 borrows, the panel names the source (`Choppy<-M15`) so a borrowed label can never be mistaken for M5's own reading. M5's direction, score, trend line, entry, stop and target remain entirely its own — only the regime label moves.
+
+> **CRITICAL RULE:** Hurst never creates a direction or permission by itself. The score publishes the would-be direction and order type; **`InpAllowChoppyTrade` is the operator's separate new-entry permission for a row currently classified Choppy, and `InpAllowMixedTrade` the same for a row classified Mixed.** When a permission is on, the regime chooses the entry style. When it is off, that row places nothing at either 2/3 or 3/3. Neither permission ever closes or abandons a trade that is already open.
 
 ---
 
@@ -261,6 +285,8 @@ The table below is the score's would-be action after the ER dead-market gate and
 | **+3 / 3** or **-3 / 3** | All 3 votes agree | **Market Order** at live Ask/Bid (sent at that row's bar close — see *Placement Timing* below) in Steady/Mixed, and in Choppy only when `InpAllowChoppyTrade = true` (subject to the existing low-volume safeguard in §2). |
 | **+2 / 3** or **-2 / 3** | 2 of 3 votes agree | **Pending Limit Order** waiting for a favorable price (see the entry-style rules below). |
 | Qualifying score, row is **Choppy**, `InpAllowChoppyTrade = false` | Score direction exists but the operator has vetoed new Choppy entries | **No order** — no 2/3 limit and no 3/3 market order. The Trade Plan shows `HOLD — choppy — Choppy Trade is Off`. |
+| Qualifying score, row is **Mixed**, `InpAllowMixedTrade = false` | Score direction exists but the operator has vetoed new Mixed entries | **No order**. The Trade Plan shows `HOLD — mixed — Mixed Trade is Off`. Mixed is the largest of the three buckets (roughly 56% of bars), so this removes well over half of all entries. |
+| Qualifying score, `InpAutoTradeM5` / `M15` / `M30 = false` for that row | The operator has switched that timeframe out of the game | **No order of any kind**, whatever the score or regime. The Trade Plan shows `HOLD — autotrading off — M5 is switched off`. A waiting pending on that row is cancelled; **an already-open trade keeps full management** (trailstop, TP1/2/3, flip and box exits). |
 | **-1, 0, +1** | Score below threshold | **HOLD (Stand aside)**. The panel states the exact refusal reason. |
 
 ### Placement Timing — New Orders Only on That Timeframe's Own Bar Close
@@ -389,9 +415,15 @@ Each active position is managed candle-by-candle and tick-by-tick through a stru
 | | `InpTrailPctTight` | `40` | Trailstop activation % for Mixed and Choppy regimes (10–70%). |
 | | `InpTrailPctSteady` | `55` | Trailstop activation % for Steady regime with clear trend (10–70%). |
 | | `InpMagicBase` | `202610` | Base magic number (`+0` M5, `+1` M15, `+2` M30). |
-| **Signal, Choppy & Range** | `InpBuyScore` | `2` | Score $\ge$ this triggers BUY. |
+| | `InpAutoTradeM5` | `true` | **Master switch for M5.** `false` = no new M5 order of any kind; a waiting M5 pending is cancelled; an open M5 trade keeps full management. M15 and M30 are unaffected. The row keeps reading and still draws its plan. |
+| | `InpAutoTradeM15` | `true` | As above, for M15. |
+| | `InpAutoTradeM30` | `true` | As above, for M30. |
+| **Signal, Regime & Range** | `InpBuyScore` | `2` | Score $\ge$ this triggers BUY. |
 | | `InpSellScore` | `-2` | Score $\le$ this triggers SELL. |
 | | `InpAllowChoppyTrade` | `true` | **New-entry permission** for a row currently reading Choppy. `false` = no new 2/3 limit or 3/3 market order on that row; a waiting pending is cancelled when the row turns Choppy; already-open trades keep normal management. Header Line 2's `Choppy Trade` mirrors this input. |
+| | `InpAllowMixedTrade` | `true` | **New-entry permission** for a row currently reading Mixed — the same shape as the Choppy permission. `false` = no new order on a Mixed row; a waiting pending is cancelled when the row turns Mixed; already-open trades keep normal management. Mixed is the largest bucket, so switching this off removes well over half of all entries. |
+| | `InpM5RegimeFrom` | `M15` | Where the **M5 row's regime label** comes from: `Own` / `M15` / `M30`. This borrows the label — it never requires the two rows to agree. M5's direction, score, trend line, entry, stop and target stay its own. When borrowing, the panel names the source (`Choppy<-M15`). |
+| | `InpM5RequireHigher` | `false` | `true` = M5 may only place when M15's trade direction matches. **Ships off:** a direction veto costs 15–30 minutes and an M5 reading only lives 10–15, so this stops most of the trades it would allow. Provided as a switch, not a hard-coded exclusion. |
 | | `InpRangeMode` | `true` | **Entry style only**, after Choppy permission is on: use the 20-bar box band for an allowed Choppy 2/3 when the box is usable; `false` (or an unusable box) = standard half-ATR pullback. |
 | **Trade Plan & Sizing**| `InpUseRisk` | `true` | Risk % sizing mode (`false` = fixed lot ladder per 1,000 balance). |
 | | `InpRiskPct` | `0.5` | Risk % per trade at score $\pm 2$; score $\pm 3$ risks double (1.0%). |
@@ -420,8 +452,10 @@ These constants represent SimpleEA 2.0's measured standard calibration (intentio
 | | `STRUCT_PERIOD` / `STRUCT_DEAD_ATR` | `20` / `0.25` | Vote 3 displacement & swing-structure window and ATR floor |
 | | `ER_PERIOD` / `ER_DEAD` | `20` / `0.10` | Kaufman Efficiency Ratio window and flat-market `HOLD` gate |
 | | `VOL_RATIO_MIN` | `0.50` | Minimum 20-bar tick-volume ratio required for `3/3` Market execution |
-| | `HURST_WINDOW` / `HURST_TREND` / `HURST_REVERT` | `256` / `0.55` / `0.45` | Rolling Hurst window and Steady / Mixed / Choppy boundaries |
-| | `BARS_BASE` / `BARS_WARMUP_X` / `BARS_MAX` | `700` / `4` / `50000` | Closed-bar history depth pulled per timeframe |
+| | `HURST_SPAN_HOURS` | `128.0` | Real history behind a regime label. Each row's bar count is derived from this, so all three judge the same stretch of market. |
+| | `HURST_WINDOW_M5` / `_M15` / `_M30` | `1536` / `512` / `256` | Per-row Hurst windows in bars — each equals 128 h. M30 lands on 256, exactly where it always was. |
+| | `HURST_TREND` / `HURST_REVERT` | `0.55` / `0.45` | Steady / Mixed / Choppy boundaries (identical on every row) |
+| | `BARS_BASE` / `BARS_WARMUP_X` / `BARS_MAX` | `700` / `4` / `50000` | Closed-bar history depth pulled per timeframe. The pull sizes itself to the longest Hurst window (1586 bars); if a broker's history is too shallow it falls back to `BARS_BASE` and the long window reads `Mixed`, rather than the row being lost. |
 | **Stops, Targets & Sizing** | `ATR_PERIOD` | `14` | Closed-bar ATR period per timeframe |
 | | `SL_ATR_M5` / `TP_ATR_M5` | `1.0` / `0.9` | M5 Scalp stop & TP3 multiples ($\text{R:R } 1:0.9$) |
 | | `SL_ATR_M15` / `TP_ATR_M15` | `1.2` / `1.8` | M15 Short-term stop & TP3 multiples ($\text{R:R } 1:1.5$) |
@@ -662,3 +696,57 @@ When several checks warn at once, the row label names the primary issue in this 
 | `Health: Learning` | Keep collecting; health starts at 30 closed trades. |
 
 These are deliberately *first steps to test or consider*, not instructions the EA executes. In particular, a nearer TP1, a score-rule change, or any recalibration should be tested outside the live lane first. The diary's job is to make decay visible early enough for a human decision; the fixed calibration remains fixed until the operator changes it.
+
+---
+
+## 10. Maintenance Log — Corrected Defects & Added Controls
+
+This section records a review of `SimpleAdvisor.mq5` against the purpose stated in its own header, and the changes that came out of it. Items 1–3 are unambiguous defects; 4–5 are structural gaps between what the EA claims to be (a *multi-timeframe* tool) and what the code did.
+
+| # | Item | Nature | Effect of the fix |
+|---|---|---|---|
+| 1 | **Volume gate included the bar it judged** | Defect | `IsVolumeConfirmed()` compared the bar under test against a 20-bar average that *contained* that same bar, so a thin bar dragged down the number it was measured against. A bar at 49% of the surrounding volume passed a 50% gate. The baseline now starts at the preceding closed bar. |
+| 2 | **`HasTradedOnBar()` failed open and mutated state** | Defect | Named as a question, it wrote `g_auto[].lastSignalBar`; and when `HistorySelect()` failed it returned *"not traded"* — the one answer that authorises a **duplicate order on a bar that already has one**. Every doubt now blocks, and the function is a pure query. `PlacePlanOrder()` stamps the bar itself. |
+| 3 | **`HurstExponent()` could read `close[-1]`** | Latent defect | The guard `i + 1 < window` admitted `i == window - 1`, making `start == 0` and the innermost read `close[start - 1]`. Never fired with the shipped numbers, but it made the window unsafe to change — which item 5 then does. Guard is now `i < window`, so the smallest index touched is 0. |
+| 4 | **The rows never informed each other** | Structural gap | `EvaluateRow()` reads only its own bars, and `TrendMatchForTF()` exempted M5 *by name* (`if(i == 0 ...)`), so no setting anywhere could give M5 higher-timeframe context. `EvaluateAll()` now runs slowest-first, M5 may borrow a slower row's regime label (`InpM5RegimeFrom`), and the M5 direction tie is a switch (`InpM5RequireHigher`) rather than a hard-coded exclusion. |
+| 5 | **Regime window counted bars, not time** | Calibration gap | One window (256 bars) meant 21 h of history on M5 and 128 h on M30 — the noisiest row judged on a sixth of the evidence. Now `HURST_SPAN_HOURS = 128 h` with each row's bar count derived from it: M5 1536, M15 512, M30 256 (unchanged). |
+
+### New operator controls
+
+| Input | Default | Purpose |
+|---|---|---|
+| `InpAutoTradeM5` / `M15` / `M30` | `true` / `true` / `true` | Master per-timeframe switch. Off = no new orders and pending cancelled on that row; open trades keep full management. |
+| `InpAllowMixedTrade` | `true` | New-entry permission for Mixed rows, mirroring `InpAllowChoppyTrade`. |
+| `InpM5RegimeFrom` | `M15` | Where M5's regime label comes from (Own / M15 / M30). |
+| `InpM5RequireHigher` | `false` | Optional M5↔M15 direction tie. |
+
+All four ship at values that preserve the previous behaviour, so nothing changes until the operator changes it.
+
+### Why borrowing and not matching
+
+A "M5 and M15 must have the same regime" rule was considered and rejected. Because M5 reads Choppy most of the time, such a gate would only permit a trade when the higher row was *also* Choppy — blocking every trend and allowing only chop. `research/verify_regime_fixes.py` demonstrates this. Borrowing the label is implemented; requiring agreement is not, and should not be.
+
+### Measurement behind items 4 and 5
+
+Two research scripts were added, both runnable with numpy alone and needing no market data:
+
+- `research/hurst_noise_bias.py` — generates series with a *known* Hurst and measures how far SimpleEA's estimator drifts under bid/ask bounce, at M5, M15 and M30 sampling.
+- `research/hurst_noise_fixes.py` — compares candidate fixes against that known ground truth.
+
+Their finding, which shaped the design: **lengthening M5's window does not fix the M5 regime problem.** It lowers variance (sd 0.067 → 0.027) but leaves the bias essentially untouched (62.5% → 57.4% mislabelling of a true trend). The bias comes from the *sampling frequency*, not the sample count — bounce noise does not average away when bars are summed, because the added increments telescope. Only sampling less often removes it:
+
+| Regime label source | Mislabels a true trend (H = 0.65) at realistic spread |
+|---|---|
+| M5, as shipped | 62.5% |
+| M5, 1536-bar window | 57.4% |
+| M5, skipping the shortest scales | 31.8% |
+| **M15 (shipped default)** | **7.7%** |
+| M30 | 2.6% |
+
+So item 5 supplies evidence and comparability; item 4 is what makes M5's label trustworthy. They are complementary, not alternatives.
+
+Caveat worth repeating: those figures come from simulated series with a known Hurst. The mechanism is proven; the magnitude on any real symbol depends on that symbol's spread-to-bar-size ratio, which has not been measured on live data.
+
+### Verification
+
+`research/verify_regime_fixes.py` (41 checks) covers all of the above. The pre-existing suites — `verify_autotrading.py`, `verify_plan_math.py`, `verify_timeframe_gate.py` and the `tests/` unit tests — all still pass. Note that every verifier in `research/` *transcribes* the EA's logic into Python rather than parsing `SimpleAdvisor.mq5`, so a green run proves no regression in modelled behaviour; it does not prove the MQL5 compiles.
