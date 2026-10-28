@@ -12,7 +12,7 @@ This document serves as the **single source of truth** for SimpleEA 2.0's archit
 
 SimpleEA runs simultaneously as:
 1. **An Analytical On-Chart Dashboard (Main Panel & Trade Plan)**: Evaluates trend, timing, market structure, and statistical memory (Hurst regime) independently across M5, M15, and M30.
-2. **An Automated Execution Engine (`InpAutoTrading`)**: Places, manages, trails, scales out (partials), and protects orders on each timeframe independently via unique magic numbers (`InpMagicBase + TF_INDEX`).
+2. **An Automated Execution Engine (`InpAutoTrading`)**: Places orders, applies fixed TP1/TP2/TP3 exits, and keeps the entry SL unchanged on each timeframe independently via unique magic numbers (`InpMagicBase + TF_INDEX`).
 3. **A Calibration-Health Diary**: Records one small row for every original order idea SimpleEA actually places, keeps Day and lifetime totals per symbol, and warns when a timeframe lane's recent follow-through, entry cost, score behaviour, or entry style deteriorates. It suggests a first fix; it never retunes the EA by itself (see §9).
 
 ### Main Panel Display Format
@@ -91,20 +91,18 @@ Each of the three timeframes (**M5 Scalp**, **M15 Short-term**, **M30 Intraday**
                     ▼
           [ Order Sent to Broker ]
    - Diary S is born here: one row for this original order idea
-   - Lot sized from planned ATR stop
-   - Deliberate SL: SL=0.0 (breathing room) or Hard SL if InpUseStopLoss=true
-   - Target TP3, TP2, TP1 locked at entry (no ATR drift mid-trade)
+   - Lot sized from planned ATR/box stop
+   - Planned broker SL and TP3 attached to every new order
+   - TP3, TP2 and TP1 frozen at entry (no ATR drift mid-trade)
                     │
                     ▼
-      [ Active Position Lifecycle ]
-   - Universal Profit-Protection SL Floor (Trailstop On or Off):
-       50% of TP1 -> SL at +25% of TP1 | 100% of TP1 -> SL at +50% of TP1 | TP2 -> SL at TP1
-   - Pre-TP1 Stepped Trailstop (when Trailstop On: arms at +40% Tight / +55% Steady)
-   - TP1 Hit: 70% partial close, SL -> +50% of TP1 (or tighter trailed SL), Score Watcher armed
-   - TP2 Hit: Close down to broker minLot, SL locked to TP1 (100% of TP1)
-   - TP3 Hit: Full exit
-   - Diary row keeps updating peak-to-TP1, observed trail activation/lock, and partial exits until final W/L/BE
-   - Reversal / Box-kill: protection exit — closes immediately only while in profit (default); `InpImmediateFlipClose = true` restores the immediate exit whatever the P&L
+      [ Active Position Lifecycle — fixed exits only ]
+   - SL remains exactly where entry put it; no trailing or profit locks
+   - TP1 Hit: 70% partial close when a valid remainder can stay open
+   - TP2 Hit: reduce the remainder to broker minLot when possible
+   - TP3 Hit: full exit; broker SL is the only other automatic exit
+   - Flip, HOLD, score weakening and box breaks never close an open trade
+   - Diary row keeps updating peak progress and partial exits until W/L/BE
 ```
 
 The panel's top band is two lines: the master status, then the modes behind it.
@@ -173,16 +171,14 @@ Below the three timeframe rows (separated by a hairline), SimpleEA 2.0 renders o
 
 The **Autotrading** panel opens automatically (`Right` or `Bottom` of the Main Panel via `InpAutoPanelPos`) whenever at least one market position or pending limit order is active, and deletes all of its chart objects (`0` objects) the instant all lanes are flat.
 
-- **Header**: `Autotrading | Trailstop : Off / On / Active | Stoploss : On / Off |  SYMBOL`
-  - `Trailstop`: `Off` (`InpUseTrailStop = false`), `On` (enabled, armed, waiting for activation), or `Active` (at least one trade is trailing or profit-protected).
-  - `Stoploss`: `On` whenever at least one active order/position currently carries a physical broker `SL > 0.0`; `Off` otherwise.
+- **Header**: `Autotrading | Exits : TP/SL | Stoploss : Fixed / Missing |  SYMBOL`
+  - `Exits: TP/SL` states the complete open-position exit policy.
+  - `Stoploss: Fixed` appears when every active order/position has a physical broker `SL > 0.0`; `Missing` warns that at least one does not. SimpleEA does not alter an existing position to clear that warning.
 - **4-Line Active Order Card** (`M5  | OPEN BUY`, `OPEN SELL`, `BUY LIMIT`, `SELL LIMIT`):
   - **Line 0**: `Lot @ <curLot>` | `Entry: <entryPrice>` | `Bid:` / `Ask: <livePrice>`
   - **Line 1**: `TP1: <price> (<CCY>) [HIT]` | `TP2: <price> (<CCY>) [HIT]`
-  - **Line 2**: `TP3: <price> (<CCY>)` | `SL: <price> (<CCY>)`
-    - When `SL = 0.0`: displays `-- (Bid: <price>)` / `-- (Ask: <price>)` in silver.
-    - When `SL > 0.0`: colored **Green** (`InpBuyColor`) on open positions once `SL` is at Entry or in profit (`[BE]` appended if `0 pts` from Entry), or **Red** (`InpSellColor`) while still on the initial risk side.
-  - **Line 3**: `Status: P/L +/-X.XX <CCY>` *(or `Waiting: distance N pts` for pending limits)* | `Distance: to TP1/TP2/TP3 N pts` *(real-time countdown from live Bid/Ask to the next unhit target)* | `TS: 40% Tight` / `55% Steady` / `--` / `Off` *(turns green once pre-TP1 stepped trail has activated)*.
+  - **Line 2**: `TP3: <price> (<CCY>)` | `SL: <price> (<CCY>)`; a missing legacy/external stop displays `-- (missing)` in red.
+  - **Line 3**: `Status: P/L +/-X.XX <CCY>` *(or `Waiting: distance N pts` for pending limits)* | `Distance: to TP1/TP2/TP3 N pts` | `Exit: TP/SL`.
 
 
 ---
@@ -286,7 +282,7 @@ The table below is the score's would-be action after the ER dead-market gate and
 | **+2 / 3** or **-2 / 3** | 2 of 3 votes agree | **Pending Limit Order** waiting for a favorable price (see the entry-style rules below). |
 | Qualifying score, row is **Choppy**, `InpAllowChoppyTrade = false` | Score direction exists but the operator has vetoed new Choppy entries | **No order** — no 2/3 limit and no 3/3 market order. The Trade Plan shows `HOLD — choppy — Choppy Trade is Off`. |
 | Qualifying score, row is **Mixed**, `InpAllowMixedTrade = false` | Score direction exists but the operator has vetoed new Mixed entries | **No order**. The Trade Plan shows `HOLD — mixed — Mixed Trade is Off`. Mixed is the largest of the three buckets (roughly 56% of bars), so this removes well over half of all entries. |
-| Qualifying score, `InpAutoTradeM5` / `M15` / `M30 = false` for that row | The operator has switched that timeframe out of the game | **No order of any kind**, whatever the score or regime. The Trade Plan shows `HOLD — autotrading off — M5 is switched off`. A waiting pending on that row is cancelled; **an already-open trade keeps full management** (trailstop, TP1/2/3, flip and box exits). |
+| Qualifying score, `InpAutoTradeM5` / `M15` / `M30 = false` for that row | The operator has switched that timeframe out of the game | **No order of any kind**, whatever the score or regime. The Trade Plan shows `HOLD — autotrading off — M5 is switched off`. A waiting pending on that row is cancelled; **an already-open trade keeps its fixed SL and TP1/TP2/TP3 exits**. |
 | **-1, 0, +1** | Score below threshold | **HOLD (Stand aside)**. The panel states the exact refusal reason. |
 
 ### Placement Timing — New Orders Only on That Timeframe's Own Bar Close
@@ -299,7 +295,7 @@ Consequences:
 - **Returning to a supported chart** (M5/M15/M30) after an unsupported timeframe, or the **market reopening**, rebuilds the panel but places nothing until the row's next close.
 - **A timer/schedule resume** (§8) is not a placement trigger: after it turns ON, each row's first entry still waits for its own next bar close (up to ~5/15/30 minutes per row). The signal used is the one recomputed at that close, never a stale mid-bar reading.
 - **Another timeframe's bar closing** (say an M5 close while an M30 row is mid-bar) cannot place or re-place that row's order — not even a retry after a broker rejection, or a re-entry after a tick-level TP close freed the slot.
-- This governs **placement only**. Mid-bar ticks continue to manage open trades exactly as before (TP1/TP2/TP3 partial and full closes, trailstop and profit-floor SL moves, §5); closes, pending cancellations, and SL/TP modifies are never delayed by this rule. A waiting limit order can also still **fill** mid-bar at the broker — that is a fill of an order placed at a bar boundary, not a new placement.
+- This governs **placement only**. Mid-bar ticks continue to apply TP1/TP2/TP3 exits (§5); pending cancellations and pending Entry/SL/TP modifications are never delayed by this rule. An open position’s SL is never modified. A waiting limit order can also still **fill** mid-bar at the broker — that is a fill of an order placed at a bar boundary, not a new placement.
 
 ### Where Pending Limit Orders Wait & Refresh
 - **Choppy permission first (`InpAllowChoppyTrade = false`)**: if the row currently reads Choppy, there is **no pending order at all**, regardless of `InpRangeMode`.
@@ -309,7 +305,7 @@ Consequences:
   - *Fallback*: If any box gate fails, the limit automatically falls back to the standard $0.5 \times \text{ATR}$ pullback limit. The box gates never cancel a Choppy trade that permission allowed.
 - **Choppy Regime, allowed, `InpRangeMode = false`**: The standard $0.5 \times \text{ATR}$ pullback limit is used. Turning Range Mode off changes only the entry style; it is not another way to forbid Choppy trading.
 - **Closed-Bar Pending Refresh & `2/3 -> 3/3` Market Upgrade**:
-  - On each new closed bar in the same direction while the reading remains `2/3`, SimpleEA updates the waiting limit's `Entry`, `SL` (if `InpUseStopLoss = true`), and `TP1/TP2/TP3` to the freshest plan.
+  - On each new closed bar in the same direction while the reading remains `2/3`, SimpleEA updates the waiting limit's `Entry`, planned fixed `SL`, and `TP1/TP2/TP3` to the freshest plan before fill.
   - If the row upgrades from `2/3` to `3/3` (with volume confirmed) in the same direction, SimpleEA deletes the waiting limit order and opens a **Market Order** at that same bar-close pass, merging both into the **same single `S` diary record** and original placement date.
 
 ---
@@ -326,14 +322,13 @@ Consequences:
 3. **Minimum Lot (`InpUseMinLot = true`)**:
    - Always forces broker minimum lot (e.g., 0.01).
 
-### Deliberate Stop Loss Architecture (`InpUseStopLoss = false` vs `true`)
-SimpleEA features an intentional, two-phase stop loss design:
-- **Default `InpUseStopLoss = false` (Deliberate Breathing Room)**:
-  - Orders are submitted to the broker with **`SL = 0.0`**.
-  - *Why:* Prevents immediate entry spread spikes, broker slippage, or 1-bar random noise from knocking trades out prematurely upon fill.
-  - *Risk Containment:* Position size is still strictly calculated using the planned ATR stop distance. The **stepped trailstop** (at +40% Tight / +55% Steady) and **universal profit-protection floor** (locking +25% of TP1 once price covers 50% of TP1) attach the first physical SL dynamically at the broker once the position makes favorable progress.
-- **Option `InpUseStopLoss = true` (Immediate Hard SL)**:
-  - For prop firms or accounts strictly requiring an initial broker stop loss, setting this to `true` attaches the full ATR Stop Loss directly on the initial order at fill.
+### Fixed Stop Loss Architecture
+
+- Every new market and pending order is submitted with its planned ATR/box **SL** and **TP3** already attached. There is no optional-SL switch.
+- The planned stop still defines position size and the diary's `1R` denominator.
+- Pending orders may be repriced before fill, so their Entry/SL/TP move together with the refreshed entry plan.
+- **After a fill, SimpleEA never modifies the position's SL or broker TP.** It does not trail, move to breakeven, lock profit at TP1/TP2, or tighten on later same-direction candles.
+- A legacy or externally altered position found without an SL is shown as `Missing`; the EA does not invent a post-entry stop for it.
 
 ### Take Profit Target Stability (TP Walk Prevention)
 - **TP3** = 100% of target points (M5: $0.9 \times \text{ATR}$, M15: $1.8 \times \text{ATR}$, M30: $3.0 \times \text{ATR}$).
@@ -343,59 +338,49 @@ SimpleEA features an intentional, two-phase stop loss design:
 
 ---
 
-## 5. Active Position Lifecycle & Trade Management
+## 5. Active Position Lifecycle & Fixed-Exit Contract
 
-Each active position is managed candle-by-candle and tick-by-tick through a structured four-stage process:
+An open position has exactly four automatic exit routes: **TP1 partial**, **TP2 partial**, **TP3 final**, and the **original broker SL**. There are no signal-based or trailing exits.
 
+```text
+Entry + fixed broker SL/TP3
+   ├── TP1: close 70% when a valid remainder can remain; SL unchanged
+   ├── TP2: reduce remainder to broker minLot when possible; SL unchanged
+   ├── TP3: close all remaining volume
+   └── SL: broker closes at the unchanged entry stop
 ```
-  Entry ──► 50% TP1 (+25% TP1 SL Floor) / Pre-TP1 Trailstop ──► TP1 Hit (70% Exit & +50% TP1 SL Floor) ──► TP2 Hit (MinLot & TP1 SL) ──► TP3 Hit (Full Exit)
-```
 
-### 1. Universal 3-Step Profit-Protection SL Floor & Pre-TP1 Trailstop
-- **Universal Profit-Protection SL Floor (`UpdateProfitProtectionFloor`)**:
-  - Operates automatically **whether Trailstop is ON or OFF**, and **never pulls back a tighter SL** (`IsSLTighter`):
-    1. **At $50\%$ of TP1** (`HALF_TP1_TRIGGER_RATIO = 0.50`): Places/moves SL to **$+25\%$ of TP1 ahead of Entry** (`HALF_TP1_LOCK_RATIO = 0.25`), keeping $100\%$ lot open.
-    2. **At $100\%$ of TP1 (TP1 Hit)**: Moves SL up to **$+50\%$ of TP1 ahead of Entry** (`TP1_LOCK_RATIO = 0.50`) if tighter than any trailed SL.
-    3. **At TP2 ($75\%$ of TP3)**: Locks SL to **TP1 price ($100\%$ of TP1)** if tighter than any trailed SL.
-  - **Symmetric Rounding & Broker Stops-Level Guard**: Point offsets are rounded symmetrically (`MilestoneSLPrice`) so BUY and SELL mirror each other to the point. `ClampProfitFloorSL` clamps to the broker's `SYMBOL_TRADE_STOPS_LEVEL` while refusing to place a loss-side stop behind Entry if `Stops Level` exceeds current favorable travel, and automatically self-heals (retried at most once every 3 seconds on failure) once live price clears `Stops Level`.
-- **Pre-TP1 Stepped Trailstop (`UpdatePreTP1Trail`, when `InpUseTrailStop = true`)**:
-  - Operates between Entry and TP1 alongside the universal floor, always keeping whichever SL is tighter.
-  - Activation threshold $P$ (frozen at fill against `trailRefTp1Pts`):
-    - **40% (`InpTrailPctTight`)** in Choppy or Mixed regimes (or range fades).
-    - **55% (`InpTrailPctSteady`)** in Steady regimes with matching trend (the universal $+25\%$ floor locks gains at $50\%$ progress first, then Steady's $+5\%$ steps take over once they surpass $+25\%$).
-  - **Gap Formula & $+5\%$ Ratchet (`TRAIL_STEP_PCT = 5.0`)**:
-    $$\text{Gap\%} = \frac{P^2}{100} \times \text{RoomFactor}, \quad \text{RoomFactor} = \begin{cases} 1.00 & \text{M5} \\ 1.25 & \text{M15} \\ 1.50 & \text{M30} \end{cases}$$
-    $$\text{SL\%} = \text{Level\%} - \text{Gap\%}$$
-    Ratchets forward $+5\%$ of `TP1` for every $+5\%$ of progress up to $100\%$ of `TP1` (failed modifies throttled to 5 seconds per step).
-  - With `InpUseStopLoss = false`, whichever activates first (Tight trail at $40\%$ or the universal floor at $50\%$) places the **first physical SL** at the broker.
+### 5.1 Target and trigger rules
 
-### 2. At TP1 Hit & Stage-2 Runner Trailing
-- **Multi-Condition TP1 Triggering**:
-  - **Tick Path (`ManageAutoTick`)**: Triggers on net favorable tick points (`favPts >= TP1`) OR gross market travel clearing spread (`grossPts >= TP1 && favPts > 0`), ensuring broker bid-ask spread friction does not deny valid target touches. Closes **70%** of the position volume (rounded down to broker lot step, if remaining lot $>$ broker `minLot`), moves SL to **$+50\%$ of TP1 ahead of Entry** (or keeps any tighter trailed SL), and arms the Score Watcher.
-  - **Closed-Bar Wick Extreme Verification (`ManageAutoBar`)**: On bar close, if the finished candle's high/low wick spiked through the TP1 price level while ticks missed it, `tp1Hit` is formally confirmed and the **$+50\%$ of TP1** SL floor is applied.
-- **Closed-Bar SL Tighten-Only Rule**: On subsequent same-direction closed bars, an open trade's SL may only ever **tighten** (`IsSLTighter`) — wider ATR on a later candle never pushes an existing stop further away.
-- **Stage-2 Runner Trailing (Post-TP1 to TP3)**:
-  - While holding the remaining ~30% runner volume towards TP2 and TP3, when `InpUseTrailStop = true` SimpleEA 2.0 trails the stop on closed bars behind the recent **2-bar swing extreme** ($\min(\text{Low}[1], \text{Low}[2]) - 0.10\times\text{ATR}_{14}$ for BUY, $\max(\text{High}[1], \text{High}[2]) + 0.10\times\text{ATR}_{14}$ for SELL) whenever that tightens the current SL.
-  - Automatically locks in higher swing lows / lower swing highs, preventing runner gains from evaporating.
-- **Score & Direction Watcher**:
-  - Peak score in the trade's direction (`entryScore`, e.g., upgrading from `2/3` to `3/3` while open) is tracked and persisted. After `TP1`, trend trades hold runner volume only while the timeframe's score remains at least as strong in the trade direction; if score weakens or changes direction, the runner closes immediately.
-  - *Range fades are exempt from the score watcher*: their exits are strictly governed by the box midpoint, stop, and box-kill.
+- **TP3** = 100% of target points; **TP2** = 75% of TP3; **TP1** = 75% of TP2 (56.25% of TP3), rounded with the existing `ComputeTPLevels()` rules.
+- All three distances and the initial SL are frozen from the entry plan. Later ATR, direction, score or regime readings do not move them.
+- **TP1 (`ManageAutoTick`)** triggers on net favorable points (`favPts >= TP1`) or the established gross-travel/spread fallback (`grossPts >= TP1 && favPts > 0`). It marks TP1 once and closes 70% rounded down to the broker lot step, adjusting the request if necessary to leave at least `minLot`. At minimum lot, no invalid partial is sent.
+- **TP2** requires TP1 to have been marked and `favPts >= TP2`. It closes only the volume needed to leave broker `minLot`; if the position is already at `minLot`, no partial is sent.
+- **TP3** closes the full remainder. A tick that jumps directly to TP3 takes the full-close path rather than manufacturing earlier partial closes.
+- TP1/TP2 milestone flags persist so repeated ticks cannot repeat a partial. TP1/TP2 are EA-managed and therefore need SimpleEA running with trading permitted. The initial SL and TP3 are also attached at the broker; MT5 may execute those broker-side exits while the EA is away.
 
-### 3. At TP2 Hit
-- Closes partial volume to reduce remaining lot to **broker minimum lot**.
-- Locks Stop Loss to **TP1 price level**.
+### 5.2 What never closes or modifies an open position
 
-### 4. At TP3 Hit
-- Closes remaining position volume in full.
+- No pre-TP1 stepped trail, post-TP1 swing trail, universal profit floor, breakeven move, TP1/TP2 SL lock, or same-direction SL tightening exists.
+- An opposite direction signal, `HOLD`, weakening score, a Choppy/Mixed permission change, or a range-box break **never closes an open position**.
+- `ManageAutoBar()` only updates diary observations for an open position. It sends no close or SL/TP modification request. The source has no open-position `TRADE_ACTION_SLTP` wrapper.
+- Disabling a timeframe or the timer blocks new entries and cancels waiting pendings; it does not create an open-position exit.
 
-### 5. Invalidation & Protective Exits
-- **Opposite Signal Reversal**: If a qualified signal fires in the opposite direction, the position closes **only while it is in profit** by default; if the trade is under water it is held and the flip is re-checked on every later closed bar, so a reversal never banks a loss (and no reverse order is placed while the old trade is kept). Set `InpImmediateFlipClose = true` to restore the old immediate-close behaviour at any P&L.
-- **HOLD-in-Profit**: If a timeframe drops to HOLD before TP1 while the trade is in net profit, it closes immediately to bank gains.
-- **Box-Kill (Range Fades)**: If a bar closes outside the 20-bar box, the trade is invalidated and closed **only while it is in profit** by default; under water the position is held (with normal SL/TP management continuing) and re-tested each closed bar until it returns to profit. `InpImmediateFlipClose = true` closes immediately regardless of P&L. Waiting pending limits carry no P&L, so they are still deleted on a box-break.
-- **Choppy Permission Veto**: With `InpAllowChoppyTrade = false`, if a lane with a still-waiting pending turns Choppy, that pending is cancelled on the next closed-bar management pass instead of being refreshed or upgraded. This is a new-entry veto only: a position already open is **not** closed merely because its row turned Choppy; its normal SL/TP/trailing and genuine score/reversal/box rules continue.
-- **Pending Order Leash Expiry**: Waiting limit orders expire and cancel after 3 closed bars (trend) or 8 closed bars (range fade) from signal birth (`sigBirth`), matching the on-screen `Valid: left/total bars` countdown.
-- **Manual Closes**: SimpleEA executes automatically on closed bars. If a trader manually closes a trade in MT5, the EA does not treat this as a permanent block. If the signal remains qualified on the next bar close, the EA will enter again. (To stop trading, use `InpAutoOffHours` or set `InpAutoTrading = false`).
-- **Restart Resilience**: Active slot states (`isRange`, `rngTop`, `rngBot`, `entryScore`, `placedBar`, `tp1Hit`, `tp2Hit`, `trailAppliedPct`) are persisted in terminal GlobalVariables so that terminal restarts or recompiles preserve range-fade box-kill rules, partial-close stages, and trail progress. The calibration diary link for a live order idea is likewise recoverable from its diary row/deal history; a tracked broker-side close that happened while the EA was away is reconciled on return (see §9.2).
+### 5.3 Pending orders are entry management, not open-position exits
+
+The existing pending lifecycle is intentionally preserved:
+
+- Same-direction `2/3` closed bars may refresh pending Entry/SL/TP before fill.
+- A same-direction `3/3` upgrade may delete the limit and place a market order.
+- Direction/HOLD/trend-gate failure, expiry, regime/per-row permission veto, timer pause, or range-box break may cancel a waiting pending.
+- Those cancellation rules stop applying once the order fills. From that moment only §5.1's TP/SL contract applies.
+
+### 5.4 Restart, manual action and diary recovery
+
+- Slot persistence retains range-entry data, placement timestamps, `tp1Hit`, `tp2Hit`, and the diary link. No trailing-progress state is read or written.
+- TP1/TP2 state is recovered from persisted flags/diary evidence, **never inferred from the current SL price**. A fixed SL cannot be mistaken for a milestone lock.
+- If a trader manually closes a position, the next qualified closed-bar signal may enter again under the existing one-trade-per-timeframe and one-entry-per-bar rules. Use the timer or `InpAutoTrading = false` to stop new entries.
+- A broker-side SL/TP close that occurs while the EA is away is reconciled through the existing diary/deal-history recovery (§9.2).
 
 ---
 
@@ -409,11 +394,6 @@ Each active position is managed candle-by-candle and tick-by-tick through a stru
 | | `InpAutoEndTime` | `"17:00"` | Daily trading stop time (`HH:MM`, PC local). At the stop minute, waiting pendings are cancelled and no new orders are placed; open trades keep being managed (see §8). |
 | | `InpAutoOffHours` | `0` | One-shot pause in hours from when applied (`48` = 2-day pause; `0` = off/re-arm). Persisted across restarts; same rules as the daily window (see §8). |
 | | `InpRequireM15M30SameTrend` | `false` | Timeframe alignment: `false` = untied; `true` = both M15 and M30 must have matching trade directions (`BUY` or `SELL`) to place. |
-| | `InpImmediateFlipClose` | `false` | Direction-flip / range box-kill exit mode: `false` = close on the flip only while the open trade is in profit (wait for profit when under water); `true` = close immediately whatever the P&L, as before. |
-| | `InpUseStopLoss` | `false` | Initial Stop Loss switch: `false` = deliberate breathing room (`SL = 0.0`), first SL placed dynamically by the stepped trailstop or universal `+25%`-of-TP1 profit floor; `true` = initial hard ATR stop attached at fill. |
-| | `InpUseTrailStop` | `true` | Pre-TP1 stepped trailstop and Post-TP1 2-bar swing trail enabled. |
-| | `InpTrailPctTight` | `40` | Trailstop activation % for Mixed and Choppy regimes (10–70%). |
-| | `InpTrailPctSteady` | `55` | Trailstop activation % for Steady regime with clear trend (10–70%). |
 | | `InpMagicBase` | `202610` | Base magic number (`+0` M5, `+1` M15, `+2` M30). |
 | | `InpAutoTradeM5` | `true` | **Master switch for M5.** `false` = no new M5 order of any kind; a waiting M5 pending is cancelled; an open M5 trade keeps full management. M15 and M30 are unaffected. The row keeps reading and still draws its plan. |
 | | `InpAutoTradeM15` | `true` | As above, for M15. |
@@ -464,8 +444,6 @@ These constants represent SimpleEA 2.0's measured standard calibration (intentio
 | | `RISK_SCORE3_X` / `BAL_PER_001` / `SCORE3_FACTOR` | `2.0` / `1000.0` / `1.5` | Score-3 risk multiplier and fixed-ladder fallback constants |
 | **Range Box** | `RANGE_BARS` / `RANGE_SL_ATR` / `RANGE_MIN_ATR` | `20` / `1.0` / `2.0` | 20-bar box lookback, stop cushion, and minimum box height ($\times \text{ATR}$) |
 | | `RANGE_SPREAD_X` / `RANGE_ER_MAX` / `RANGE_VALID_BARS` | `3.0` / `0.40` / `8` | Minimum half-box spread multiple, max box ER, and 8-bar fade leash |
-| **SL Floor & Trail** | `HALF_TP1_TRIGGER_RATIO` / `HALF_TP1_LOCK_RATIO` | `0.50` / `0.25` | At $50\%$ of TP1, lock SL at $+25\%$ of TP1 ahead of Entry |
-| | `TP1_LOCK_RATIO` / `TRAIL_STEP_PCT` | `0.50` / `5.0` | At $100\%$ of TP1, lock SL at $+50\%$ of TP1; pre-TP1 step size $5\%$ |
 | **Diary & Health** | `DIARY_VERSION` / `HEALTH_MIN_CLOSED` / `HEALTH_BE_EPS_R` | `1` / `30` / `0.05` | CSV schema version, 30-trade learning floor, and $\pm 0.05\text{R}$ scratch band |
 
 ---
@@ -498,12 +476,12 @@ Both are layered **on top of** the existing permission checks: master switch, su
 |---|---|
 | Open a new market order | **Blocked** |
 | Place / refresh a waiting pending limit order | **Blocked**, and any existing waiting pending is **cancelled** so it cannot fill while you believe autotrading is off (retried every 2 s if the broker refuses); its diary row becomes `Exp` |
-| Trailstop, universal `+25% / +50% / TP1` SL floor, TP1/TP2/TP3 partials, score-based exits, box-kill | **Fully active** — open trades keep being managed exactly as normal |
+| TP1/TP2/TP3 exits | **Fully active** — the fixed broker SL remains unchanged; no trailing or signal-based exit runs |
 | Panel analysis and Trade Plan | **Fully active** — advice is still computed and shown, it is simply not acted on |
 
-The split is deliberate. Pending orders are *unfilled entries resting at the broker*, so they must not survive an OFF transition. Open trades are the opposite case: with `InpUseStopLoss = false` a hard freeze could leave a position with no stop at all, so management must never stop.
+The split is deliberate. Pending orders are *unfilled entries resting at the broker*, so they must not survive an OFF transition. Open trades keep their broker-side fixed SL and EA-managed TP exits; the timer never moves their stop.
 
-When the timer turns back ON, nothing is replayed or "caught up": placement is allowed again, but — like every new order — the first entry still waits for the close of that timeframe's own next bar (attaching/restarting the EA follows the same rule; only closes, cancels and SL/TP management act mid-bar). Each transition is written to the Experts log.
+When the timer turns back ON, nothing is replayed or "caught up": placement is allowed again, but — like every new order — the first entry still waits for the close of that timeframe's own next bar (attaching/restarting the EA follows the same rule; only TP exits, pending cancellations and pending modifications act mid-bar). Each transition is written to the Experts log.
 
 ### 8.2 One-shot pause persistence
 
@@ -522,7 +500,7 @@ When the timer turns back ON, nothing is replayed or "caught up": placement is a
 
 - **Header line 1** reports the effective state (`Off` / `On` / `Timer Pause`) plus the `Resume …` countdown to the moment placement is allowed again — see §1.
 - **Header line 2** names the setting responsible (`Timer: Paused 08:00-17:00`, `Timer: Paused by request`, …) — see §1.
-- The **2nd (Autotrading) panel** appears only when an order exists and keeps its own header (`Autotrading | Trailstop | Stoploss | SYMBOL`); it is not gated by the timer, because it reports trades that are still being managed.
+- The **2nd (Autotrading) panel** appears only when an order exists and keeps its own header (`Autotrading | Exits : TP/SL | Stoploss : Fixed/Missing | SYMBOL`); it is not gated by the timer, because it reports trades that are still being managed.
 - Header line 1 also carries the diary's `Day: S/W/L` counts; the timer does not stop those counts from reflecting closes of trades that remain under management.
 - **Notice panels replace both header lines.** When the market is closed or the chart timeframe is unsupported, the panel collapses to a one-line notice, so no countdown is shown there even though the timer keeps counting.
 - Long pauses also print a one-line confirmation to the Experts log when set, when continuing after a restart, and when completed.
@@ -578,11 +556,11 @@ There is **one row per original placed order idea**, not one row per tick and no
 - entry spread as a percentage of the TP1 distance (for a pending, measured when the fill is noticed);
 - furthest favourable progress toward TP1, capped at 300% so one extraordinary runner cannot dominate a median forever;
 - whether TP1, TP2, and TP3 were reached;
-- observed trailstop performance: the activation percentage and Tight/Steady choice frozen at fill; whether the pre-TP1 stepped trail actually applied; whether any protective stage became active; the best pre-TP1 trailed stop and best broker stop as percentages of the Entry→TP1 distance; the final closing deal's progress toward TP1; and whether that final deal's broker reason was a stop-loss exit;
+- TP1/TP2/TP3 progress, the final closing deal's progress toward TP1, and whether that final deal's broker reason was a stop-loss exit;
 - final status/outcome, result in `R`, a compact exit reason, and whether the result is still provisional;
-- the relevant settings then in force: base risk %, risk/min-lot mode, stop-loss switch, trailstop switch, Choppy permission, and Range Mode.
+- the relevant settings then in force: base risk %, risk/min-lot mode, fixed SL, Choppy permission, and Range Mode.
 
-The file is named for **account + symbol + magic base** (for example, `SimpleEA_Diary_<login>_<symbol>_<magic>.csv`) and is kept in MT5's Common Files area on a live terminal (the tester uses its own file area). Its first line records the local date on which this symbol's diary began. The ten trailstop-performance fields are appended after the original row fields, so a diary written before they existed remains readable; those older rows load with trail activation/lock/final-exit facts marked unknown rather than reconstructed. Saves are written through a temporary file and moved into place so an interrupted save does not leave half-written rows. If an existing diary cannot be read (or declares a diary format this EA build does not understand), SimpleEA logs that fact and refuses to overwrite it blind; that run's new rows are kept in memory until the file problem is fixed and the EA is restarted. A year of placed ideas is still a small file because ticks are not stored.
+The file is named for **account + symbol + magic base** (for example, `SimpleEA_Diary_<login>_<symbol>_<magic>.csv`) and is kept in MT5's Common Files area on a live terminal (the tester uses its own file area). Its first line records the local date on which this symbol's diary began. The original 40-field rows and later 50-field rows remain readable. Eight obsolete CSV columns are now reserved: they are ignored when old rows are loaded and written as neutral defaults when rows are saved. No obsolete trailing value is stored in diary state or included in health statistics. Saves are written through a temporary file and moved into place so an interrupted save does not leave half-written rows. If an existing diary cannot be read (or declares a diary format this EA build does not understand), SimpleEA logs that fact and refuses to overwrite it blind; that run's new rows are kept in memory until the file problem is fixed and the EA is restarted. A year of placed ideas is still a small file because ticks are not stored.
 
 History begins when the diary feature first runs for that account/symbol/magic. A position or pending that already existed before that moment has no diary row and is deliberately left **untracked** rather than reconstructed from guesses. Orders placed manually or by another EA/magic are likewise not diary signals. If SimpleEA later finds that one of its tracked positions closed at the broker while the EA was away, it reconciles that row from deal history; a tracked pending that ended at the broker is reconciled from order history. In particular, if a pending filled and the resulting position closed while ticks were interrupted, the position identifier in order history makes that row a closed `W`/`L`/`BE` trade — it is not misreported as an unfilled `Exp`.
 
@@ -624,7 +602,7 @@ M5  Health: Cost: Poor+
   All: S 80 W 30 L 35 BE 3 Open 1 Wait 0 Exp 11 | Win 44% | Net -4.2R
   Score 2/3: W 20 L 22 TP1 48% (45 closed) | 3/3: W 15 L 10 TP1 57% (28 closed)
   Last 30: W 11 L 16 BE 3 | TP1 37% Peak 54% Cost 14% | Net -3.1R
-  Trail 30: Armed 67% | Lock 38% | Stop exits 8 | Giveback 29%
+  Exits: TP1 partial | TP2 partial | TP3 full | fixed broker SL
   First step: Use minimum lot or avoid expensive hours first.
 ...
 Diary suggests first steps; it never changes settings.
@@ -632,14 +610,9 @@ Diary suggests first steps; it never changes settings.
 
 For each timeframe, the panel deliberately shows **both lifetime and recent health**. Lifetime totals say what the lane has done overall; the newest closed trades say whether it is decaying now. A lane can therefore have a respectable lifetime record and still correctly read `Poor` because its latest block has deteriorated.
 
-The `Trail` line uses that same newest-30 closed-trade window (or fewer while the lane is still learning), but it is **descriptive evidence, not a fifth health check** and never changes the lane's label or suggested first step:
+The `Exits` line is a fixed policy reminder, not a performance statistic: TP1 and TP2 take their valid partials, TP3 closes the remainder, and the broker SL stays at its entry level. It does not affect the lane's health label or suggested first step.
 
-- **`Armed`** is the share of eligible trades whose **pre-TP1 stepped trailstop applied at least once**. Eligible means the trade was placed with `InpUseTrailStop` on and SimpleEA actually observed the filled slot's trail state. Older diary rows without trail fields, and trades placed with the trailstop off, are excluded from this denominator rather than counted as failures to arm. The universal `+25% / +50% / TP1` profit-protection milestone floor by itself does not count as `Armed`.
-- **`Lock`** is the median best pre-TP1 trailed stop among the Armed trades, expressed on the Entry→TP1 scale (`0%` = entry, `100%` = TP1). It answers “when the trail did take over, how much progress had it typically locked?”
-- **`Stop exits`** is a count, among Armed trades whose final closing-deal reason is known, of those whose final deal was triggered by a broker stop-loss. The wording stays at “stop exits” because the broker reason proves a stop-order exit; by itself it does not prove whether that particular stop level came from the pre-TP1 trail, the universal milestone floor, a post-TP1 swing stop, or an initial hard stop.
-- **`Giveback`** is the median `peak progress − final closing-deal progress`, again as percentage points of Entry→TP1 and never below zero, among Armed trades with a known final deal price. Because TP1/TP2 may already have banked partial volume, this is peak-to-**final-leg** giveback, not a volume-weighted giveback for the whole original position; read it beside final `R`, not instead of it.
-
-A field shows `--` when its own eligible/known sample is empty. Existing closed rows cannot recover activation or lock history retrospectively, so after this feature first runs the Trail line fills in as newly observed trades close and replace the recent window.
+Older diary rows may contain trailing-era fields. They remain parseable for compatibility, but the current History panel does not present those fields as a live feature and new rows are written with trailing disabled.
 
 ### 9.5 How a lane is judged
 
@@ -710,6 +683,10 @@ This section records a review of `SimpleAdvisor.mq5` against the purpose stated 
 | 3 | **`HurstExponent()` could read `close[-1]`** | Latent defect | The guard `i + 1 < window` admitted `i == window - 1`, making `start == 0` and the innermost read `close[start - 1]`. Never fired with the shipped numbers, but it made the window unsafe to change — which item 5 then does. Guard is now `i < window`, so the smallest index touched is 0. |
 | 4 | **The rows never informed each other** | Structural gap | `EvaluateRow()` reads only its own bars, and `TrendMatchForTF()` exempted M5 *by name* (`if(i == 0 ...)`), so no setting anywhere could give M5 higher-timeframe context. `EvaluateAll()` now runs slowest-first, M5 may borrow a slower row's regime label (`InpM5RegimeFrom`), and the M5 direction tie is a switch (`InpM5RequireHigher`) rather than a hard-coded exclusion. |
 | 5 | **Regime window counted bars, not time** | Calibration gap | One window (256 bars) meant 21 h of history on M5 and 128 h on M30 — the noisiest row judged on a sixth of the evidence. Now `HURST_SPAN_HOURS = 128 h` with each row's bar count derived from it: M5 1536, M15 512, M30 256 (unchanged). |
+
+### Fixed-exit simplification (current)
+
+The former trailing/profit-floor/score/flip/box open-position management was removed as one contract change. New orders now always carry the planned SL and TP3; after fill only TP1/TP2 partials, TP3 full close and the unchanged broker SL remain. Pending-order entry management and the signal core were not redesigned. The obsolete exit inputs were removed, and the diary parser still accepts older records.
 
 ### New operator controls
 

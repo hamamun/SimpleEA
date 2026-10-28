@@ -86,7 +86,7 @@
 //|     SimpleEA2.0 | Incompatible chart. Switch to M5/M15/M30.       |
 //|                                                                   |
 //|  -----------------------------------------------------------------|
-//|  TRADE PLAN (advice only - NO ORDER IS EVER SENT)                 |
+//|  TRADE PLAN (levels used by the optional executor)               |
 //|  -----------------------------------------------------------------|
 //|  Under the three timeframe rows, separated by one line, comes a     |
 //|  SECOND GROUP with one block per timeframe - M5, M15, M30 - in the  |
@@ -105,86 +105,36 @@
 //|  -----------------------------------------------------------------|
 //|  AUTOTRADING & SECOND PANEL                                       |
 //|  -----------------------------------------------------------------|
-//|  Controlled by InpAutoTrading (default true, hands-free Full Auto |
-//|  mode; set false for read-only advice).                           |
+//|  Controlled by InpAutoTrading (default true; false = advice only). |
 //|                                                                   |
-//|   - Strictly 1 active trade/order per timeframe (M5, M15, M30)    |
-//|     at a time, tracked by per-timeframe magic numbers.            |
-//|   - Market order at score 3/3; Pending Limit order at score 2/3 -  |
-//|     subject to InpAllowChoppyTrade.  Off vetoes every NEW order    |
-//|     on a Choppy row; On lets InpRangeMode choose the 2/3 entry    |
-//|     style (box band, or half an ATR back when Range Mode is off   |
-//|     or the box is unusable).                                      |
-//|   - M5 trades its own signal directly. M15/M30 are untied by      |
-//|     default; tie them with InpRequireM15M30SameTrend = true.      |
-//|   - New orders are placed ONLY on the close of that timeframe's  |
-//|     own bar: attaching/restarting the EA, returning to a          |
-//|     supported chart, a timer resume, or another timeframe's bar   |
-//|     closing never places mid-bar - the next entry waits for the   |
-//|     row's next closed bar.  Mid-bar ticks only manage open trades |
-//|     (TP partial closes, SL/trailing modifies); they never enter.  |
-//|   - Optional PC-local timer/pause: while OFF, no new orders are   |
-//|     placed and pendings are cancelled; open trades stay managed.  |
-//|     The header states the EFFECTIVE state ("Timer Pause", never   |
-//|     the untouched input) plus a "Resume 2h14m" countdown to when  |
-//|     placement is allowed again.  The input is never rewritten.    |
-//|   - A second Main Panel header line shows Timer, Choppy Trade     |
-//|     and M15/M30 Same Trend mode/status at a glance.               |
-//|   - Three take-profit levels per order:                           |
-//|        TP3 = 100% of SimpleEA's advised target points             |
-//|        TP2 = 25% less than TP3 (75% of TP3)                       |
-//|        TP1 = 25% less than TP2 (75% of TP2 = 56.25% of TP3)       |
-//|   - Market order management:                                      |
-//|        Automatic profit-protection SL floor (Trailstop On or Off):|
-//|                   50% of TP1 -> locks SL +25% of TP1 ahead of     |
-//|                   Entry; 100% of TP1 -> moves SL to +50% of TP1   |
-//|                   ahead of Entry; TP2 -> locks SL at TP1 (100%).  |
-//|        Before TP1 -> stepped trailstop (when Trailstop On): once  |
-//|                   price covers the selected % of Entry->TP1, SL   |
-//|                   steps +5% for every +5% of progress (Tight %    |
-//|                   when not Steady, Steady % in a Steady trend;    |
-//|                   gap widened x1.25 on M15, x1.50 on M30), always |
-//|                   keeping whichever SL is tighter.                |
-//|        TP1 hit -> moves SL to +50% of TP1 ahead of Entry (if      |
-//|                   tighter than any trailed SL) and closes 70% of  |
-//|                   lot (if lot > min lot).                         |
-//|                   Watches score/direction: if score weakens or    |
-//|                   flips, closes immediately; if strong, holds.    |
-//|        TP2 hit -> reduces remaining lot to min lot (if > min lot) |
-//|                   and locks SL to TP1; continues watching score.  |
-//|        TP3 hit -> closes order in full.                           |
-//|        Before TP1 -> if timeframe drops to HOLD while in profit,  |
-//|                   closes immediately; an opposite signal or a     |
-//|                   range box-break closes only while in profit     |
-//|                   unless InpImmediateFlipClose = true (default    |
-//|                   false: wait for profit, never bank the loss).   |
-//|        New candle (same direction) -> updates TP1/TP2/TP3 and     |
-//|                   tightens SL (never widens past initial risk).   |
-//|   - Pending order management:                                     |
-//|        New candle (same direction, score 2/3) -> updates Entry,   |
-//|                   SL and TP1/TP2/TP3 to the new plan.             |
-//|        Score upgrades to 3/3 (same direction) -> deletes pending  |
-//|                   limit order and opens Market order immediately. |
-//|        Direction changes / HOLD / Choppy veto / expiry -> cancels |
-//|                   pending.  The veto never closes an open trade.  |
-//|   - Second Panel ("Autotrading", right or bottom of Main Panel):  |
-//|        Controlled by InpAutoPanelPos (Bottom default, or Right).  |
-//|        Opens automatically when any market/pending order exists   |
-//|        and closes completely when flat.                           |
-//|        Header shows: Autotrading | Trailstop Off/On/Active        |
-//|        | Stoploss On/Off | Symbol.                                |
-//|        Each card shows TP1/TP2/TP3/SL prices (with USD) and       |
-//|        the live gap to TP1 -> TP2 -> TP3 in points.               |
-//|   - Calibration-health diary: every order SimpleEA places leaves  |
-//|        one small record (score, regime, entry style, spread as a  |
-//|        share of TP1, furthest progress to TP1, TP1/TP2/TP3,       |
-//|        trailstop activation/lock/stop-exit/giveback and the final|
-//|        result in planned-risk units).  The header adds             |
-//|        today's S/W/L, each row gets one compact health label, and |
-//|        only a Poor lane adds one problem + first-fix line.  The   |
-//|        optional History panel (InpShowHealth, off by default)    |
-//|        opens the diary up per timeframe.  The diary never changes |
-//|        a setting by itself - it warns, and suggests what to test. |
+//|   - Strictly one active position or pending order per timeframe,  |
+//|     isolated by the M5/M15/M30 magic numbers.                     |
+//|   - Score 3/3 -> market; score 2/3 -> pending limit.  Existing    |
+//|     signal, regime, permission and risk settings decide entries.  |
+//|   - New orders are placed only on their own timeframe's closed    |
+//|     bar.  Attaching, restarting or another row's bar cannot enter |
+//|     mid-bar.                                                      |
+//|   - Every new market/pending order carries its planned broker SL  |
+//|     and TP3.  Pending Entry/SL/TP may update BEFORE a fill.       |
+//|   - After a fill, the SL remains at its initial price.  SimpleEA |
+//|     moves it to breakeven, locks TP1/TP2 profit or re-tightens it |
+//|     on later candles.                                             |
+//|   - The only software-initiated open-position exits are:          |
+//|        TP1 -> close 70% when a valid remainder can stay open;     |
+//|        TP2 -> reduce the remainder to broker minimum lot;         |
+//|        TP3 -> close the remainder in full.                        |
+//|     The broker SL can also close the position.  TP1/TP2 partials  |
+//|     need the EA running; SL and TP3 are also sent to the broker.  |
+//|   - Direction flips, HOLD, weakening score, regime changes and    |
+//|     range-box breaks NEVER close an open position.                |
+//|   - Pending-order cancellation/update on flips, HOLD, expiry,     |
+//|     permission/timer changes or box breaks remains ENTRY          |
+//|     management and is unchanged.                                  |
+//|   - The Autotrading panel shows fixed TP/SL exits and Stoploss    |
+//|     Fixed/Missing, plus each card's TP1/TP2/TP3/SL and live gap.  |
+//|   - The calibration diary remains compatible with older records.  |
+//|     New records describe fixed-SL trading; only current fixed-  |
+//|     exit diagnostics are presented.                             |
 //|  -----------------------------------------------------------------|
 //|  HONEST NOTE ON EXPECTATION                                       |
 //|  -----------------------------------------------------------------|
@@ -229,8 +179,8 @@ enum ENUM_AUTO_PANEL_POS
 //  when the higher row was Choppy too - blocking every trend.
 //
 //  Direction and score stay M5's own.  Only the regime label - and with
-//  it the entry style (box fade vs pullback), the Choppy permission and
-//  the trailstop arm - comes from the chosen row.
+//  it the entry style (box fade vs pullback) and Choppy permission -
+//  comes from the chosen row.
 enum ENUM_M5_REGIME
 {
    M5_REGIME_OWN = 0, // M5's own
@@ -245,17 +195,12 @@ input group "=== Autotrading & order management ==="
 input bool                InpAutoTrading  = true;            // Autotrading (true = full auto, false = read-only)
 //  Daily timer + one-shot pause, both on PC LOCAL time.  These gate
 //  NEW placements only: while OFF, waiting pendings are cancelled and
-//  already-open trades keep being managed (trail / TP / exits).
+//  already-open trades keep their fixed SL and TP1/TP2/TP3 handling.
 input bool                InpUseAutoSchedule = false;        // Use daily autotrading timer (PC local time)
 input string              InpAutoStartTime   = "08:00";      // Autotrading start time (PC local HH:MM)
 input string              InpAutoEndTime     = "17:00";      // Autotrading stop time (PC local HH:MM)
 input int                 InpAutoOffHours    = 0;            // One-shot pause hours from when set (0=off, 48=2 days)
 input bool                InpRequireM15M30SameTrend = false; // M15/M30 same trend required to place (false = untied)
-input bool                InpImmediateFlipClose = false;     // Immediate close on direction/range flip (false = wait until the trade is in profit)
-input bool                InpUseStopLoss  = false;           // Stoploss (true = place initial SL, false = only when trailstop / TP1 places it)
-input bool                InpUseTrailStop = true;            // Pre-TP1 stepped trailstop (true = on, Entry->TP1 only)
-input int                 InpTrailPctTight  = 40;            // Trailstop % when regime is NOT Steady (10-70)
-input int                 InpTrailPctSteady = 55;            // Trailstop % in a Steady, clear trend (10-70)
 input long                InpMagicBase    = 202610;          // Base magic number (+0 M5, +1 M15, +2 M30)
 
 //  WHICH TIMEFRAMES MAY TRADE AT ALL.  Three master switches, all on, so
@@ -265,8 +210,8 @@ input long                InpMagicBase    = 202610;          // Base magic numbe
 //     - NO NEW order of any kind is sent for that row (market or limit);
 //     - a waiting pending on that row is cancelled - it is an unfilled
 //       entry, and it could fill while the row is switched off;
-//     - an ALREADY OPEN position keeps its normal management (trailstop,
-//       TP1/TP2/TP3, exits).  A switch must never abandon a live trade.
+//     - an ALREADY OPEN position keeps TP1/TP2/TP3 handling and its
+//       unchanged SL.  A switch must never abandon a live trade.
 //  The row keeps reading and keeps drawing its plan, so the panel still
 //  shows what that timeframe would do if it were switched back on.
 input bool                InpAutoTradeM5  = true;            // Autotrade M5  (false = no new M5 orders; open M5 trades stay managed)
@@ -373,7 +318,6 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 #define PANEL_TITLE "SimpleEA2.0"
 #define TF_COUNT    3
 #define TF_TEXT     "M5/M15/M30"
-#define TRAIL_STEP_PCT 5.0   // pre-TP1 trailstop: SL jumps this many % per step of progress
 
 //  ---- THE ENGINE PROFILE (baked in: the standard engine) -----------
 //  These five were the "Shared engine settings" inputs until v2.11.
@@ -471,7 +415,7 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 //  NOT HURST_REVERT on purpose: H reads ~256 bars of memory, the E/R
 //  reads the box's own 20.  Reusing 0.45 here would let 0.40-0.45 walks
 //  in as boxes - a different question, a different window.
-#define RANGE_VALID_BARS 8        // range fade leash in bars (the box-kill is the real guard)
+#define RANGE_VALID_BARS 8        // pending range-entry leash; box break cancels only the pending
 
 #define PEND_ATR        0.5       // pending entry sits this many ATR from the market
 #define VALID_BARS      3         // trend reading's leash in bars (research/HORIZON.md)
@@ -547,7 +491,7 @@ struct SRow
    double         hRevert;    // Hurst anti-persistent threshold
    //  The regime label this row actually acts on: 0 Mixed, 1 Steady,
    //  2 Choppy.  It is stored rather than recomputed so the box decision,
-   //  the Choppy veto, the trailstop arm, the diary and the panel all
+   //  the Choppy veto, the diary and the panel all
    //  read the same number even when M5 is using M15's label.
    int            regime;     // effective label, -1 until first evaluated
    int            regimeSrc;  // -1 own, otherwise the row it came from
@@ -561,7 +505,7 @@ struct SRow
    string         blockReason;// why this row is not trading ("" = quiet or no reason)
    double         rngTop;     // range box: upper band (valid while mode == 2)
    double         rngBot;     // range box: lower band (valid while mode == 2)
-   double         lastClose;  // close of the last closed bar (box-kill checks)
+   double         lastClose;  // last closed-bar price (pending box-entry invalidation)
    // ---- refreshed every evaluation ----
    int            score;      // -3 .. +3
    int            direction;  // +1 buy, -1 sell, 0 hold  (what the row TRADES)
@@ -872,8 +816,8 @@ void OnTick()
    CheckAutoTimerTransition();
    CheckDiaryDayTransition();
 
-   //  Real-time tick checks for TP1/TP2/TP3 partial closes, break-even SL,
-   //  and live Ask/Bid/P&L updates on the 2nd Panel.
+   //  Real-time tick checks for TP1/TP2/TP3 exits and live Ask/Bid/P&L
+   //  updates on the 2nd Panel.  The entry SL is never changed here.
    if(ChartSupported() && g_panelOK)
       ManageAutoTick();
 }
@@ -1373,8 +1317,8 @@ bool ScoreAllowsTrade(int dir, int score)
 //==================================================================
 //  Both answer the same question the Choppy veto always did - "may a NEW
 //  order leave the terminal for this row" - and both deliberately say
-//  nothing about what already exists.  Managing an open trade (trailstop,
-//  TP1/TP2/TP3, flip and box exits) never consults either one.
+//  nothing about what already exists.  An open trade's fixed SL and
+//  TP1/TP2/TP3 exits never consult either one.
 //+------------------------------------------------------------------+
 //  The per-timeframe master switch: is this row in the game at all?
 bool AutoTradingAllowed(int i)
@@ -1554,7 +1498,7 @@ void EvaluateRow(int idx)
       else if(H < g_rows[idx].hRevert) game = 2;
    }
    //  One stored label, so the box decision, the Choppy veto, the
-   //  trailstop arm, the diary and the panel can never disagree about
+   //  diary and the panel can never disagree about
    //  which regime this row is in.
    g_rows[idx].regime    = game;
    g_rows[idx].regimeSrc = regimeSrc;
@@ -1888,8 +1832,8 @@ void UpdatePlanRow(int i)
    //  lane whose order is still only a waiting pending.  The executor
    //  will cancel that pending below.  The one exception is a position
    //  ALREADY OPEN in this same direction: this switch is a new-entry
-   //  veto, not an exit rule, so its plan must stay alive for the same
-   //  closed-bar TP/SL management it had before the row turned Choppy.
+   //  veto, not an exit rule, so its plan stays available to display
+   //  the original fixed exits after the row turns Choppy.
    //  PlacePlanOrder() still refuses outright while the flag is set, so
    //  this management-only plan can never become a second/reverse order.
    bool openSameDirForPlan = (g_auto[i].active && g_auto[i].isOpen &&
@@ -2174,7 +2118,7 @@ struct SAutoState
    bool     isOpen;        // true = open market position, false = pending limit order
    ulong    ticket;        // position or order ticket
    int      dir;           // +1 buy, -1 sell
-   int      entryScore;    // score when placed/opened (or strongest score reached)
+   int      entryScore;    // score when placed/opened
    double   initLot;       // initial lot size when placed/opened
    double   curLot;        // current remaining lot size
    double   entryPrice;    // position open price or pending limit price
@@ -2187,24 +2131,12 @@ struct SAutoState
    int      tp3Pts;        // TP3 distance in points (100% of advised target)
    bool     tp1Hit;        // true once TP1 has been reached
    bool     tp2Hit;        // true once TP2 has been reached
-   bool     trailActive;   // true once break-even / trailstop is active
-   // ---- pre-TP1 stepped trailstop (Entry -> TP1 only) -----------------
-   bool     trailSteady;   // true when the Steady % was picked at fill
-   bool     trailStarted;  // true once the activation % has been reached
-   int      trailPct;      // selected activation % of Entry->TP1 (10-70)
-   double   trailGapPct;   // gap behind the stepped peak, in % of Entry->TP1
-   int      trailRefTp1Pts;// Entry->TP1 distance in points, frozen at fill
-   double   trailPeakPts;  // best favourable progress in points since fill
-   double   trailAppliedPct; // highest stepped progress % whose SL is in place
-   double   trailTriedPct;   // last stepped progress % a modify was tried for
-   datetime trailLastTry;    // time of the last trailstop modify attempt
-   datetime floorLastTry;    // time of the last failed profit-floor modify attempt
-   bool     isRange;       // true when this order is a range fade (box trade)
-   double   rngTop;        // range box upper band captured at placement (box-kill)
-   double   rngBot;        // range box lower band captured at placement (box-kill)
+   bool     isRange;       // range-fade entry; box rules apply only while pending
+   double   rngTop;        // pending range entry's upper invalidation band
+   double   rngBot;        // pending range entry's lower invalidation band
    datetime placedBar;     // closed-bar timestamp when pending order was placed
    datetime fillBar;       // closed-bar timestamp when the position filled/opened
-   datetime lastEvalBar;   // last closed bar on which SL/TP update was evaluated
+   datetime lastEvalBar;   // last closed bar on which a pending update was evaluated
    datetime lastSignalBar; // closed-bar timestamp on which a trade was opened
    // ---- calibration-health diary link for this order idea -------------
    long     diaryRecordId;    // SDiaryRecord.id (0 = untracked/pre-diary)
@@ -2276,10 +2208,6 @@ void SaveAutoSlotState(int i)
       GlobalVariableSet(AutoGVKey(i, "tp2"), 1.0);
    else
       GlobalVariableDel(AutoGVKey(i, "tp2"));
-   if(g_auto[i].trailAppliedPct > 0.0)
-      GlobalVariableSet(AutoGVKey(i, "tapp"), g_auto[i].trailAppliedPct);
-   else
-      GlobalVariableDel(AutoGVKey(i, "tapp"));
    if(g_auto[i].diaryRecordId > 0)
    {
       GlobalVariableSet(AutoGVKey(i, "drec"),   (double)g_auto[i].diaryRecordId);
@@ -2316,7 +2244,6 @@ void ClearAutoSlotState(int i)
    GlobalVariableDel(AutoGVKey(i, "placed"));
    GlobalVariableDel(AutoGVKey(i, "tp1"));
    GlobalVariableDel(AutoGVKey(i, "tp2"));
-   GlobalVariableDel(AutoGVKey(i, "tapp"));
    GlobalVariableDel(AutoGVKey(i, "drec"));
    GlobalVariableDel(AutoGVKey(i, "dday"));
    GlobalVariableDel(AutoGVKey(i, "dsl"));
@@ -2347,8 +2274,6 @@ void RestoreAutoSlotState(int i)
       g_auto[i].tp1Hit = (GlobalVariableGet(AutoGVKey(i, "tp1")) > 0.5);
    if(GlobalVariableCheck(AutoGVKey(i, "tp2")))
       g_auto[i].tp2Hit = (GlobalVariableGet(AutoGVKey(i, "tp2")) > 0.5);
-   if(GlobalVariableCheck(AutoGVKey(i, "tapp")))
-      g_auto[i].trailAppliedPct = GlobalVariableGet(AutoGVKey(i, "tapp"));
    if(GlobalVariableCheck(AutoGVKey(i, "drec")))
       g_auto[i].diaryRecordId = (long)MathRound(GlobalVariableGet(AutoGVKey(i, "drec")));
    if(GlobalVariableCheck(AutoGVKey(i, "dday")))
@@ -2426,19 +2351,11 @@ struct SDiaryRecord
    bool     useRisk;
    bool     useMinLot;
    bool     useStopLoss;
-   bool     useTrailStop;
    bool     allowChoppy;
    bool     rangeMode;
    double   pointValue;      // account-currency value of 1 point x 1 lot at placement
    string   exitReason;      // compact token, never contains ';'
    bool     provisional;     // closed before the final deal reached history
-   int      trailPct;        // activation % chosen at fill (0 = off/unknown)
-   bool     trailSteady;     // true when the Steady trail % was chosen
-   bool     trailKnown;      // live filled slot was observed by the diary
-   bool     trailArmed;      // pre-TP1 stepped trailstop applied at least once
-   bool     protectionArmed; // BE / TP lock / trail protection became active
-   double   trailLockTp1Pct; // best pre-TP1 trailed SL as % of TP1 (-1 = none)
-   double   bestLockTp1Pct;  // best broker SL as % of TP1 (-9999 = none seen)
    double   finalTp1Pct;     // final exit progress as % of TP1 (-9999 = unknown)
    bool     stopExit;        // final closing deal was triggered by broker SL
    bool     stopKnown;       // final closing-deal reason was found in history
@@ -2468,15 +2385,6 @@ struct SDiaryClosed
    bool   tp1Hit;
    bool   tp2Hit;
    bool   tp3Hit;
-   bool   useTrailStop;
-   bool   trailKnown;
-   bool   trailArmed;
-   bool   protectionArmed;
-   double trailLockTp1Pct;
-   double bestLockTp1Pct;
-   double finalTp1Pct;
-   bool   stopExit;
-   bool   stopKnown;
 };
 
 struct SDiarySegment
@@ -2494,15 +2402,6 @@ struct SDiarySegment
    double tp1Rate;
    double medianPeak;
    double medianCost;
-   int    trailEligible;   // closed, trailstop on, and trail state observed
-   int    trailArmed;
-   int    trailLockN;
-   int    trailStopKnown;
-   int    trailStopExits;
-   int    trailGivebackN;
-   double trailArmRate;
-   double medianTrailLock;
-   double medianTrailGiveback;
 };
 
 struct SHealthLane
@@ -2545,15 +2444,6 @@ struct SHealthLane
    int    baseN;
    double baseTp1Rate;
    double baseMedianCost;
-   int    recTrailEligible;
-   int    recTrailArmed;
-   int    recTrailLockN;
-   int    recTrailStopKnown;
-   int    recTrailStopExits;
-   int    recTrailGivebackN;
-   double recTrailArmRate;
-   double recTrailMedianLock;
-   double recTrailMedianGiveback;
 
    int    status;          // -1 Learning, 0 OK, 1 Watch, 2 Poor
    int    primaryIssue;    // 0 none, 1 follow-near, 2 follow-weak, 3 cost, 4 score, 5 box, 6 choppy
@@ -2690,19 +2580,14 @@ string DiaryRecordLine(SDiaryRecord &r)
    s += IntegerToString(r.useRisk ? 1 : 0) + ";";
    s += IntegerToString(r.useMinLot ? 1 : 0) + ";";
    s += IntegerToString(r.useStopLoss ? 1 : 0) + ";";
-   s += IntegerToString(r.useTrailStop ? 1 : 0) + ";";
+   s += "0;"; // CSV 34: reserved for backward-compatible row width
    s += IntegerToString(r.allowChoppy ? 1 : 0) + ";";
    s += IntegerToString(r.rangeMode ? 1 : 0) + ";";
    s += r.exitReason + ";";
    s += IntegerToString(r.provisional ? 1 : 0) + ";";
    s += DoubleToString(r.pointValue, 10) + ";";
-   s += IntegerToString(r.trailPct) + ";";
-   s += IntegerToString(r.trailSteady ? 1 : 0) + ";";
-   s += IntegerToString(r.trailKnown ? 1 : 0) + ";";
-   s += IntegerToString(r.trailArmed ? 1 : 0) + ";";
-   s += IntegerToString(r.protectionArmed ? 1 : 0) + ";";
-   s += DoubleToString(r.trailLockTp1Pct, 4) + ";";
-   s += DoubleToString(r.bestLockTp1Pct, 4) + ";";
+   // CSV 40-46: reserved defaults; old and new 50-column rows remain readable.
+   s += "0;0;0;0;0;-1.0000;-9999.0000;";
    s += DoubleToString(r.finalTp1Pct, 4) + ";";
    s += IntegerToString(r.stopExit ? 1 : 0) + ";";
    s += IntegerToString(r.stopKnown ? 1 : 0);
@@ -2771,32 +2656,17 @@ bool DiaryParseRecordLine(string line, SDiaryRecord &r)
    r.useRisk       = (StringToInteger(p[31]) != 0);
    r.useMinLot     = (StringToInteger(p[32]) != 0);
    r.useStopLoss   = (StringToInteger(p[33]) != 0);
-   r.useTrailStop  = (StringToInteger(p[34]) != 0);
+   // p[34] and p[40-46] are reserved compatibility columns, not strategy state.
    r.allowChoppy   = (StringToInteger(p[35]) != 0);
    r.rangeMode     = (StringToInteger(p[36]) != 0);
    r.exitReason    = p[37];
    r.provisional   = (StringToInteger(p[38]) != 0);
    r.pointValue    = StringToDouble(p[39]);
 
-   //  Rows written before trailstop performance was recorded end at
-   //  p[39].  They load with the trail state unknown, never invented.
-   r.trailPct        = 0;
-   r.trailSteady     = false;
-   r.trailKnown      = false;
-   r.trailArmed      = false;
-   r.protectionArmed = false;
-   r.trailLockTp1Pct = -1.0;
-   r.bestLockTp1Pct  = -9999.0;
+   // Rows ending at p[39] predate the final-exit diagnostics.
    r.finalTp1Pct     = -9999.0;
    r.stopExit        = false;
    r.stopKnown       = false;
-   if(n > 40) r.trailPct        = (int)StringToInteger(p[40]);
-   if(n > 41) r.trailSteady     = (StringToInteger(p[41]) != 0);
-   if(n > 42) r.trailKnown      = (StringToInteger(p[42]) != 0);
-   if(n > 43) r.trailArmed      = (StringToInteger(p[43]) != 0);
-   if(n > 44) r.protectionArmed = (StringToInteger(p[44]) != 0);
-   if(n > 45) r.trailLockTp1Pct = StringToDouble(p[45]);
-   if(n > 46) r.bestLockTp1Pct  = StringToDouble(p[46]);
    if(n > 47) r.finalTp1Pct     = StringToDouble(p[47]);
    if(n > 48) r.stopExit        = (StringToInteger(p[48]) != 0);
    if(n > 49) r.stopKnown       = (StringToInteger(p[49]) != 0);
@@ -2917,15 +2787,6 @@ void DiaryResetLane(int i)
    g_health[i].baseN         = 0;
    g_health[i].baseTp1Rate   = -1.0;
    g_health[i].baseMedianCost = -1.0;
-   g_health[i].recTrailEligible = 0;
-   g_health[i].recTrailArmed = 0;
-   g_health[i].recTrailLockN = 0;
-   g_health[i].recTrailStopKnown = 0;
-   g_health[i].recTrailStopExits = 0;
-   g_health[i].recTrailGivebackN = 0;
-   g_health[i].recTrailArmRate = -1.0;
-   g_health[i].recTrailMedianLock = -1.0;
-   g_health[i].recTrailMedianGiveback = -1.0;
    g_health[i].status        = -1;
    g_health[i].primaryIssue  = 0;
    g_health[i].issueCount    = 0;
@@ -2941,28 +2802,19 @@ void DiaryResetLane(int i)
 //+------------------------------------------------------------------+
 void DiaryComputeSegment(int lane, int start, int count, SDiarySegment &seg)
 {
-   seg.n         = 0;
-   seg.wins      = 0;
-   seg.losses    = 0;
-   seg.be        = 0;
-   seg.tp1       = 0;
-   seg.tp2       = 0;
-   seg.tp3       = 0;
-   seg.nearCount = 0;
-   seg.costN     = 0;
-   seg.netR      = 0.0;
-   seg.tp1Rate   = -1.0;
+   seg.n          = 0;
+   seg.wins       = 0;
+   seg.losses     = 0;
+   seg.be         = 0;
+   seg.tp1        = 0;
+   seg.tp2        = 0;
+   seg.tp3        = 0;
+   seg.nearCount  = 0;
+   seg.costN      = 0;
+   seg.netR       = 0.0;
+   seg.tp1Rate    = -1.0;
    seg.medianPeak = -1.0;
    seg.medianCost = -1.0;
-   seg.trailEligible = 0;
-   seg.trailArmed = 0;
-   seg.trailLockN = 0;
-   seg.trailStopKnown = 0;
-   seg.trailStopExits = 0;
-   seg.trailGivebackN = 0;
-   seg.trailArmRate = -1.0;
-   seg.medianTrailLock = -1.0;
-   seg.medianTrailGiveback = -1.0;
    if(count <= 0 || start < 0 || start >= g_health[lane].recentCount)
       return;
    if(start + count > g_health[lane].recentCount)
@@ -2970,16 +2822,10 @@ void DiaryComputeSegment(int lane, int start, int count, SDiarySegment &seg)
 
    double peaks[];
    double costs[];
-   double trailLocks[];
-   double trailGivebacks[];
    ArrayResize(peaks, count);
    ArrayResize(costs, count);
-   ArrayResize(trailLocks, count);
-   ArrayResize(trailGivebacks, count);
    int peakN = 0;
    int costN = 0;
-   int trailLockN = 0;
-   int trailGivebackN = 0;
 
    for(int k = 0; k < count; k++)
    {
@@ -2998,38 +2844,9 @@ void DiaryComputeSegment(int lane, int start, int count, SDiarySegment &seg)
          peaks[peakN++] = c.peakTp1Pct;
       if(c.costTp1Pct > 0.0)
          costs[costN++] = c.costTp1Pct;
-
-      //  Trailstop performance is descriptive evidence, not a fifth
-      //  health verdict.  Its denominator is only the closed trades
-      //  placed with the trailstop on whose live trail state the
-      //  diary actually observed; old rows stay out instead of
-      //  silently pretending the trail never armed.
-      if(c.useTrailStop && c.trailKnown)
-      {
-         seg.trailEligible++;
-         if(c.trailArmed)
-         {
-            seg.trailArmed++;
-            if(c.trailLockTp1Pct >= 0.0)
-               trailLocks[trailLockN++] = c.trailLockTp1Pct;
-            if(c.stopKnown)
-            {
-               seg.trailStopKnown++;
-               if(c.stopExit)
-                  seg.trailStopExits++;
-            }
-            if(c.finalTp1Pct > -9000.0)
-               trailGivebacks[trailGivebackN++] =
-                  MathMax(0.0, c.peakTp1Pct - c.finalTp1Pct);
-         }
-      }
    }
 
    seg.costN = costN;
-   seg.trailLockN = trailLockN;
-   seg.trailGivebackN = trailGivebackN;
-   if(seg.trailEligible > 0)
-      seg.trailArmRate = (double)seg.trailArmed / (double)seg.trailEligible;
    if(seg.n > 0)
       seg.tp1Rate = (double)seg.tp1 / (double)seg.n;
    if(peakN > 0)
@@ -3047,24 +2864,6 @@ void DiaryComputeSegment(int lane, int start, int count, SDiarySegment &seg)
       seg.medianCost = (costN % 2 == 1)
                        ? costs[costN / 2]
                        : 0.5 * (costs[costN / 2 - 1] + costs[costN / 2]);
-   }
-   if(trailLockN > 0)
-   {
-      ArrayResize(trailLocks, trailLockN);
-      ArraySort(trailLocks);
-      seg.medianTrailLock = (trailLockN % 2 == 1)
-                            ? trailLocks[trailLockN / 2]
-                            : 0.5 * (trailLocks[trailLockN / 2 - 1] +
-                                     trailLocks[trailLockN / 2]);
-   }
-   if(trailGivebackN > 0)
-   {
-      ArrayResize(trailGivebacks, trailGivebackN);
-      ArraySort(trailGivebacks);
-      seg.medianTrailGiveback = (trailGivebackN % 2 == 1)
-                                ? trailGivebacks[trailGivebackN / 2]
-                                : 0.5 * (trailGivebacks[trailGivebackN / 2 - 1] +
-                                         trailGivebacks[trailGivebackN / 2]);
    }
 }
 
@@ -3183,15 +2982,6 @@ void DiaryComputeLaneHealth(int i)
    lane.baseN         = base.n;
    lane.baseTp1Rate   = base.tp1Rate;
    lane.baseMedianCost = base.medianCost;
-   lane.recTrailEligible = rec.trailEligible;
-   lane.recTrailArmed = rec.trailArmed;
-   lane.recTrailLockN = rec.trailLockN;
-   lane.recTrailStopKnown = rec.trailStopKnown;
-   lane.recTrailStopExits = rec.trailStopExits;
-   lane.recTrailGivebackN = rec.trailGivebackN;
-   lane.recTrailArmRate = rec.trailArmRate;
-   lane.recTrailMedianLock = rec.medianTrailLock;
-   lane.recTrailMedianGiveback = rec.medianTrailGiveback;
 
    if(lane.closedCount < HEALTH_MIN_CLOSED || rec.n < HEALTH_MIN_CLOSED)
    {
@@ -3546,15 +3336,6 @@ void DiaryRefreshSummaries()
          desc[got].tp1Hit      = g_diary[best].tp1Hit;
          desc[got].tp2Hit      = g_diary[best].tp2Hit;
          desc[got].tp3Hit      = g_diary[best].tp3Hit;
-         desc[got].useTrailStop = g_diary[best].useTrailStop;
-         desc[got].trailKnown  = g_diary[best].trailKnown;
-         desc[got].trailArmed  = g_diary[best].trailArmed;
-         desc[got].protectionArmed = g_diary[best].protectionArmed;
-         desc[got].trailLockTp1Pct = g_diary[best].trailLockTp1Pct;
-         desc[got].bestLockTp1Pct = g_diary[best].bestLockTp1Pct;
-         desc[got].finalTp1Pct = g_diary[best].finalTp1Pct;
-         desc[got].stopExit    = g_diary[best].stopExit;
-         desc[got].stopKnown   = g_diary[best].stopKnown;
          got++;
       }
       g_health[i].recentCount = got;
@@ -3877,67 +3658,6 @@ bool DiarySyncSlotRecord(int i, bool saveNow)
       changed = true;
    }
 
-   if(g_auto[i].isOpen)
-   {
-      if(!g_diary[idx].trailKnown)
-      {
-         g_diary[idx].trailKnown = true;
-         changed = true;
-      }
-      if(g_auto[i].trailPct > 0 && g_diary[idx].trailPct != g_auto[i].trailPct)
-      {
-         g_diary[idx].trailPct = g_auto[i].trailPct;
-         changed = true;
-      }
-      if(g_auto[i].trailPct > 0 &&
-         g_diary[idx].trailSteady != g_auto[i].trailSteady)
-      {
-         g_diary[idx].trailSteady = g_auto[i].trailSteady;
-         changed = true;
-      }
-      //  Diary "Armed" means a pre-TP1 trail step was actually
-      //  applied.  Requiring the applied level, not trailStarted
-      //  alone, keeps a restart that merely finds the universal
-      //  break-even SL from being misread as a trail activation.
-      bool trailApplied = (g_auto[i].trailStarted && g_auto[i].trailPct > 0 &&
-                           g_auto[i].trailAppliedPct + 1e-9 >=
-                           (double)g_auto[i].trailPct);
-      if(trailApplied && !g_diary[idx].trailArmed)
-      {
-         g_diary[idx].trailArmed = true;
-         changed = true;
-      }
-      if(g_auto[i].trailActive && !g_diary[idx].protectionArmed)
-      {
-         g_diary[idx].protectionArmed = true;
-         changed = true;
-      }
-      if(trailApplied && g_auto[i].trailAppliedPct > 0.0)
-      {
-         double trailLock = MathMax(0.0, g_auto[i].trailAppliedPct -
-                                         g_auto[i].trailGapPct);
-         if(trailLock > g_diary[idx].trailLockTp1Pct + 0.001)
-         {
-            g_diary[idx].trailLockTp1Pct = trailLock;
-            changed = true;
-         }
-      }
-      double diaryPoint = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-      if(g_auto[i].slPrice > 0.0 && diaryPoint > 0.0 &&
-         g_diary[idx].tp1Pts > 0 && g_diary[idx].entryPrice > 0.0 &&
-         g_diary[idx].dir != 0)
-      {
-         double bestLock = (double)g_diary[idx].dir *
-                           (g_auto[i].slPrice - g_diary[idx].entryPrice) /
-                           diaryPoint / (double)g_diary[idx].tp1Pts * 100.0;
-         if(bestLock > g_diary[idx].bestLockTp1Pct + 0.001)
-         {
-            g_diary[idx].bestLockTp1Pct = bestLock;
-            changed = true;
-         }
-      }
-   }
-
    bool hit1 = (g_auto[i].tp1Hit || g_diary[idx].peakTp1Pct >= 100.0 - 1e-9);
    bool hit2 = g_auto[i].tp2Hit;
    bool hit3 = false;
@@ -3981,7 +3701,6 @@ void DiaryAttachSlotRecord(int i)
    g_auto[i].diaryPeakTp1Pct  = r.peakTp1Pct;
    if(r.tp1Hit) g_auto[i].tp1Hit = true;
    if(r.tp2Hit) g_auto[i].tp2Hit = true;
-   if(r.protectionArmed) g_auto[i].trailActive = true;
    if(r.lot > 0.0 && g_auto[i].initLot <= 0.0)
       g_auto[i].initLot = r.lot;
    if(r.positionId > 0 && g_auto[i].diaryPositionId == 0)
@@ -4037,8 +3756,8 @@ bool DiaryPositionStillOpen(ulong positionId)
 //+------------------------------------------------------------------+
 //  The one place an open slot becomes diary history.  ResetAutoSlot()
 //  calls this before it wipes the slot, so every terminal path -
-//  TP3, broker SL/TP, signal close, manual close noticed by sync, or
-//  a pending cancelled for any reason - lands in exactly one row.
+//  TP3, broker SL/TP, manual close noticed by sync, or a pending
+//  cancelled for any reason - lands in exactly one row.
 //+------------------------------------------------------------------+
 void DiaryFinalizeSlot(int i)
 {
@@ -4211,9 +3930,8 @@ void DiaryReconcileOpenRecords()
          {
             g_diary[k].positionId = pos;
             // History proves the money result, not the path price took while
-            // this EA was absent. Exclude incomplete peak/trail observations.
+            // this EA was absent. Exclude incomplete peak observations.
             g_diary[k].peakTp1Pct = -1.0;
-            g_diary[k].trailKnown = false;
             DiaryApplyClosedResult(k, net, false, lastDeal,
                                    DiaryLocalFromServer(lastDeal),
                                    "broker-history", lastExitPrice,
@@ -4314,20 +4032,12 @@ void DiaryBeginPlacement(int i, bool market, int planSlPts, double spreadPrice)
    r.riskPct       = InpRiskPct;
    r.useRisk       = InpUseRisk;
    r.useMinLot     = InpUseMinLot;
-   r.useStopLoss   = InpUseStopLoss;
-   r.useTrailStop  = InpUseTrailStop;
+   r.useStopLoss   = true;   // every new order carries its planned broker-side SL
    r.allowChoppy   = InpAllowChoppyTrade;
    r.rangeMode     = InpRangeMode;
    r.pointValue    = PointValuePerLot();
    r.exitReason    = "";
    r.provisional   = false;
-   r.trailPct      = market ? g_auto[i].trailPct : 0;
-   r.trailSteady   = market && g_auto[i].trailSteady;
-   r.trailKnown    = market;
-   r.trailArmed    = market && g_auto[i].trailStarted;
-   r.protectionArmed = market && g_auto[i].trailActive;
-   r.trailLockTp1Pct = -1.0;
-   r.bestLockTp1Pct  = -9999.0;
    r.finalTp1Pct     = -9999.0;
    r.stopExit        = false;
    r.stopKnown       = false;
@@ -4626,19 +4336,16 @@ bool AnyAutoActive()
 }
 
 //+------------------------------------------------------------------+
-bool AnyTrailstopOn()
+bool AllActiveStopsPresent()
 {
+   bool found = false;
    for(int i = 0; i < TF_COUNT; i++)
-      if(g_auto[i].active && g_auto[i].trailActive) return(true);
-   return(false);
-}
-
-//+------------------------------------------------------------------+
-bool AnyStoplossOn()
-{
-   for(int i = 0; i < TF_COUNT; i++)
-      if(g_auto[i].active && g_auto[i].slPrice > 0.0) return(true);
-   return(false);
+   {
+      if(!g_auto[i].active) continue;
+      found = true;
+      if(g_auto[i].slPrice <= 0.0) return(false);
+   }
+   return(found);
 }
 
 //+------------------------------------------------------------------+
@@ -4692,17 +4399,6 @@ void ResetAutoSlot(int i, bool keepSignalBar)
    g_auto[i].tp3Pts        = 0;
    g_auto[i].tp1Hit        = false;
    g_auto[i].tp2Hit        = false;
-   g_auto[i].trailActive   = false;
-   g_auto[i].trailSteady   = false;
-   g_auto[i].trailStarted  = false;
-   g_auto[i].trailPct      = 0;
-   g_auto[i].trailGapPct   = 0.0;
-   g_auto[i].trailRefTp1Pts = 0;
-   g_auto[i].trailPeakPts  = 0.0;
-   g_auto[i].trailAppliedPct = 0.0;
-   g_auto[i].trailTriedPct   = 0.0;
-   g_auto[i].trailLastTry    = 0;
-   g_auto[i].floorLastTry    = 0;
    g_auto[i].isRange       = false;
    g_auto[i].rngTop        = 0.0;
    g_auto[i].rngBot        = 0.0;
@@ -4760,10 +4456,10 @@ bool CanTradeNow()
 //  CanTradeNow() above remains the MANAGEMENT permission: master
 //  switch, supported chart, market open, terminal/account allowed.
 //  The timer is only a PLACEMENT gate on top of it.  That split is
-//  deliberate: while the timer is OFF the EA must keep trailing,
-//  taking TP1/TP2/TP3 and applying its exit rules to trades that are
-//  already open - with InpUseStopLoss=false a hard freeze could
-//  leave a position with no SL at all.  Waiting pendings are the
+//  deliberate: while the timer is OFF the EA must keep taking
+//  TP1/TP2/TP3 on trades that are already open.  Their broker-side SL
+//  remains fixed and needs no timer-driven modification.  Waiting
+//  pendings are the
 //  opposite case: they are unfilled entries resting at the broker,
 //  so the OFF transition cancels them instead of letting them fill
 //  while the user believes autotrading is off.
@@ -5301,329 +4997,6 @@ bool TrendMatchForTF(int i)
 }
 
 //+------------------------------------------------------------------+
-//  Score/direction watcher after TP1 is hit (applies to both minLot and
-//  lot > minLot): holds for TP2/TP3 while direction is unchanged and
-//  score stays strong; closes immediately if score weakens or flips.
-//+------------------------------------------------------------------+
-bool IsScoreStrongForTrade(int i)
-{
-   if(!g_rows[i].ok) return(true);
-   if(g_rows[i].direction != g_auto[i].dir) return(false);
-   int needScore = MathMax(2, MathAbs(g_auto[i].entryScore));
-   if(MathAbs(g_rows[i].score) < needScore) return(false);
-   return(true);
-}
-
-//+------------------------------------------------------------------+
-//  May a direction flip or a range box-break close this open trade
-//  right now?
-//     InpImmediateFlipClose = true  -> original behaviour: close on the
-//                                        flip whatever the P&L is.
-//     InpImmediateFlipClose = false -> the flip is held back while the
-//                                        trade is under water.  The same
-//                                        flip is re-checked on every later
-//                                        closed bar, so it exits once the
-//                                        trade is back in profit instead
-//                                        of crystallising a loss.
-//  "In profit" uses the same test as the HOLD-in-profit rule: either the
-//  broker floating P&L or the raw price progress is strictly positive.
-//+------------------------------------------------------------------+
-bool FlipCloseAllowed(int i, double favPts)
-{
-   if(InpImmediateFlipClose) return(true);
-   return(g_auto[i].profitUSD > 0.0 || favPts > 0.0);
-}
-
-//+------------------------------------------------------------------+
-//  Ensure a candidate SL price respects the broker's minimum stop
-//  distance from the current exit price (Bid for BUY, Ask for SELL).
-//+------------------------------------------------------------------+
-double ClampSLToStopsLevel(int dir, double candSL, double bid, double ask, double point)
-{
-   if(candSL <= 0.0 || point <= 0.0) return(0.0);
-   double minStop = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
-   double pad     = MathMax(point, minStop);
-   if(dir > 0)
-   {
-      double maxSL = bid - pad;
-      if(candSL > maxSL) candSL = maxSL;
-   }
-   else
-   {
-      double minSL = ask + pad;
-      if(candSL < minSL) candSL = minSL;
-   }
-   return(NormPrice(candSL));
-}
-
-//+------------------------------------------------------------------+
-//  Ensure a candidate TP price respects the broker's minimum stop
-//  distance from the current market price.
-//+------------------------------------------------------------------+
-double ClampTPToStopsLevel(int dir, double candTP, double bid, double ask, double point)
-{
-   if(candTP <= 0.0 || point <= 0.0) return(0.0);
-   double minStop = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
-   double pad     = MathMax(point, minStop);
-   if(dir > 0)
-   {
-      double minTP = ask + pad;
-      if(candTP < minTP) candTP = minTP;
-   }
-   else
-   {
-      double maxTP = bid - pad;
-      if(candTP > maxTP) candTP = maxTP;
-   }
-   return(NormPrice(candTP));
-}
-
-//+------------------------------------------------------------------+
-//  True only when candSL is strictly tighter (closer to price / less
-//  risk) than curSL.  Used so open-trade SL updates never widen risk.
-//+------------------------------------------------------------------+
-bool IsSLTighter(int dir, double candSL, double curSL, double point)
-{
-   if(candSL <= 0.0) return(false);
-   if(curSL  <= 0.0) return(true);
-   if(dir > 0) return(candSL > curSL + 0.5 * point);
-   return(candSL < curSL - 0.5 * point);
-}
-
-//+------------------------------------------------------------------+
-//  PRE-TP1 STEPPED TRAILSTOP (Entry -> TP1 only)
-//
-//  One selected percentage P drives the whole trail:
-//     - price covering P% of the Entry->TP1 distance ACTIVATES it;
-//     - the first SL sits P% of the activation->Entry distance back
-//       from the activation price (P=40: activation at +40%, SL at
-//       +24%, so the gap behind price is 16% of Entry->TP1);
-//     - every further +5% of progress jumps the SL another +5%, so
-//       the gap stays constant;
-//     - at TP1 the trail hands off: its last SL simply remains and
-//       the existing TP1 / TP2 / TP3 logic takes over.
-//
-//  SimpleEA picks P itself at fill: InpTrailPctTight when the
-//  regime is not Steady, InpTrailPctSteady in a Steady regime with
-//  a clear trend in the trade's direction.  The gap behind price
-//  is then widened per timeframe (M15 x1.25, M30 x1.50) so the
-//  slower styles get more breathing room at the same activation.
-//  All percentages use the Entry->TP1 distance frozen at fill, so
-//  candle-by-candle plan updates can never shift the steps.
-//+------------------------------------------------------------------+
-int ClampTrailPct(int pct)
-{
-   if(pct < 10) return(10);
-   if(pct > 70) return(70);
-   return(pct);
-}
-
-//+------------------------------------------------------------------+
-double TrailRoomFactor(int i)
-{
-   if(i == 1) return(1.25);   // M15: 25% more breathing room
-   if(i == 2) return(1.50);   // M30: 50% more breathing room
-   return(1.0);               // M5: the tight baseline
-}
-
-//+------------------------------------------------------------------+
-//  Choose and freeze this trade's trailstop settings at fill time.
-//+------------------------------------------------------------------+
-void InitTrailState(int i)
-{
-   if(!InpUseTrailStop)
-   {
-      g_auto[i].trailSteady    = false;
-      g_auto[i].trailPct       = 0;
-      g_auto[i].trailGapPct    = 0.0;
-      g_auto[i].trailRefTp1Pts = 0;
-      g_auto[i].trailStarted   = false;
-      g_auto[i].trailPeakPts   = 0.0;
-      g_auto[i].trailAppliedPct = 0.0;
-      g_auto[i].trailTriedPct   = 0.0;
-      g_auto[i].trailLastTry    = 0;
-      g_auto[i].floorLastTry    = 0;
-      return;
-   }
-
-   //  The EFFECTIVE label (own or borrowed), not the row's raw Hurst -
-   //  an M5 trade borrowing M15's regime must also trail on M15's regime,
-   //  or it would pick its trailstop arm from a different market read
-   //  than the one that shaped its entry.
-   bool steady = (g_rows[i].ok && !g_auto[i].isRange &&
-                  g_rows[i].direction == g_auto[i].dir &&
-                  g_rows[i].regime == 1);
-
-   g_auto[i].trailSteady    = steady;
-   g_auto[i].trailPct       = ClampTrailPct(steady ? InpTrailPctSteady
-                                                   : InpTrailPctTight);
-   g_auto[i].trailGapPct    = (double)g_auto[i].trailPct *
-                              (double)g_auto[i].trailPct / 100.0 *
-                              TrailRoomFactor(i);
-   g_auto[i].trailRefTp1Pts = g_auto[i].tp1Pts;
-   g_auto[i].trailStarted   = false;
-   g_auto[i].trailPeakPts   = 0.0;
-   g_auto[i].trailAppliedPct = 0.0;
-   g_auto[i].trailTriedPct   = 0.0;
-   g_auto[i].trailLastTry    = 0;
-   g_auto[i].floorLastTry    = 0;
-}
-
-#define HALF_TP1_TRIGGER_RATIO 0.50   // 50% of Entry->TP1 triggers the first profit lock
-#define HALF_TP1_LOCK_RATIO    0.25   // at 50% of TP1, lock SL +25% of TP1 ahead of Entry
-#define TP1_LOCK_RATIO         0.50   // at 100% of TP1 (TP1 hit), lock SL +50% of TP1 ahead of Entry
-
-//+------------------------------------------------------------------+
-//  Price at a given positive multiple of the Entry->TP1 distance
-//  ahead of Entry (0.25 = +25% of TP1, 0.50 = +50% of TP1, 1.00 = TP1).
-//  Rounds the point offset symmetrically so BUY and SELL mirror each
-//  other to the point.
-//+------------------------------------------------------------------+
-double MilestoneSLPrice(int dir, double entryPrice, int tp1Pts, double ratio, double point)
-{
-   if(entryPrice <= 0.0 || tp1Pts <= 0 || point <= 0.0 || dir == 0) return(0.0);
-   double offPts = MathMax(1.0, MathFloor(ratio * (double)tp1Pts + 0.5 + 1e-9));
-   return(NormPrice(entryPrice + (double)dir * offPts * point));
-}
-
-//+------------------------------------------------------------------+
-//  Clamp a profit-protection SL to broker stops level, refusing to
-//  place a stop behind Entry if the broker's stops level is wider than
-//  current favorable progress.
-//+------------------------------------------------------------------+
-double ClampProfitFloorSL(int dir, double entryPrice, double wantSL,
-                          double bid, double ask, double point)
-{
-   double sl = ClampSLToStopsLevel(dir, wantSL, bid, ask, point);
-   if(sl <= 0.0) return(0.0);
-   if((double)dir * (sl - entryPrice) < -0.5 * point) return(0.0);
-   return(sl);
-}
-
-//+------------------------------------------------------------------+
-//  Universal 3-Step Profit-Protection Stop-Loss Floor.
-//  Operates whether Trailstop is ON or OFF:
-//     - 50% of TP1 reached  -> SL moves to +25% of TP1 ahead of Entry
-//     - 100% of TP1 (TP1)   -> SL moves to +50% of TP1 ahead of Entry
-//     - TP2 (75% of TP3)    -> SL moves to TP1 price (100% of TP1)
-//  Never moves a tighter SL backwards, and retries (throttled) if an
-//  earlier modify was rejected or temporarily clamped by stops level.
-//+------------------------------------------------------------------+
-bool UpdateProfitProtectionFloor(int i, double favPts, double bid, double ask, double point)
-{
-   if(g_auto[i].entryPrice <= 0.0 || point <= 0.0 || g_auto[i].tp1Pts <= 0)
-      return(false);
-
-   int    dir    = g_auto[i].dir;
-   double wantSL = 0.0;
-   if(g_auto[i].tp2Hit)
-      wantSL = NormPrice(g_auto[i].entryPrice + (double)dir * (double)g_auto[i].tp1Pts * point);
-   else if(g_auto[i].tp1Hit)
-      wantSL = MilestoneSLPrice(dir, g_auto[i].entryPrice, g_auto[i].tp1Pts, TP1_LOCK_RATIO, point);
-   else if(favPts >= HALF_TP1_TRIGGER_RATIO * (double)g_auto[i].tp1Pts - 1e-6)
-      wantSL = MilestoneSLPrice(dir, g_auto[i].entryPrice, g_auto[i].tp1Pts, HALF_TP1_LOCK_RATIO, point);
-   else
-      return(false);
-
-   double floorSL = ClampProfitFloorSL(dir, g_auto[i].entryPrice, wantSL, bid, ask, point);
-   if(floorSL <= 0.0) return(false);
-
-   if(!IsSLTighter(dir, floorSL, g_auto[i].slPrice, point))
-      return(false);
-
-   datetime now = TimeCurrent();
-   if(g_auto[i].floorLastTry > 0 && now - g_auto[i].floorLastTry < 3)
-      return(false);
-
-   if(!TradeModifyPosition(g_auto[i].ticket, floorSL, g_auto[i].tpPrice))
-   {
-      g_auto[i].floorLastTry = now;
-      return(false);
-   }
-
-   g_auto[i].floorLastTry = 0;
-   g_auto[i].slPrice      = floorSL;
-   g_auto[i].slPts        = (int)MathRound(MathAbs(g_auto[i].entryPrice - floorSL) / point);
-   g_auto[i].trailActive  = true;
-   SaveAutoSlotState(i);
-   return(true);
-}
-
-//+------------------------------------------------------------------+
-//  Tick-level pre-TP1 trailstop.  Returns true when the trail state
-//  changed (activation or a step applied), so the caller can flag a
-//  panel redraw.  Never moves an SL backwards, respects the universal
-//  +25%-of-TP1 profit floor once 50% of TP1 has been covered, and
-//  places the first SL itself when the order was opened without one
-//  (InpUseStopLoss=false).
-//+------------------------------------------------------------------+
-bool UpdatePreTP1Trail(int i, double favPts, double bid, double ask, double point)
-{
-   if(!InpUseTrailStop || g_auto[i].tp1Hit) return(false);
-   if(g_auto[i].trailRefTp1Pts <= 0 || g_auto[i].trailPct <= 0) return(false);
-   if(g_auto[i].entryPrice <= 0.0 || point <= 0.0) return(false);
-
-   if(favPts > g_auto[i].trailPeakPts)
-      g_auto[i].trailPeakPts = favPts;
-
-   double peakPct = g_auto[i].trailPeakPts / (double)g_auto[i].trailRefTp1Pts * 100.0;
-   if(peakPct < (double)g_auto[i].trailPct) return(false);
-
-   // Highest completed 5% step (capped at TP1 = 100% for the handoff)
-   double cappedPct = MathMin(peakPct, 100.0);
-   double steps     = MathFloor((cappedPct - (double)g_auto[i].trailPct) /
-                                TRAIL_STEP_PCT + 1e-9);
-   double levelPct  = (double)g_auto[i].trailPct + steps * TRAIL_STEP_PCT;
-   if(levelPct <= g_auto[i].trailAppliedPct + 1e-9) return(false);
-
-   // A failed modify for this step is retried, but not on every tick
-   datetime now = TimeCurrent();
-   if(MathAbs(levelPct - g_auto[i].trailTriedPct) < 1e-9 &&
-      g_auto[i].trailLastTry > 0 && now - g_auto[i].trailLastTry < 5)
-      return(false);
-
-   int    dir        = g_auto[i].dir;
-   double slProgPct  = levelPct - g_auto[i].trailGapPct;
-   double candSL     = NormPrice(g_auto[i].entryPrice +
-                                 (double)dir * slProgPct / 100.0 *
-                                 (double)g_auto[i].trailRefTp1Pts * point);
-   if(g_auto[i].tp1Pts > 0 &&
-      favPts >= HALF_TP1_TRIGGER_RATIO * (double)g_auto[i].tp1Pts - 1e-6)
-   {
-      double floorWant = MilestoneSLPrice(dir, g_auto[i].entryPrice,
-                                          g_auto[i].tp1Pts, HALF_TP1_LOCK_RATIO, point);
-      if(IsSLTighter(dir, floorWant, candSL, point))
-         candSL = floorWant;
-   }
-   candSL            = ClampSLToStopsLevel(dir, candSL, bid, ask, point);
-   if(candSL <= 0.0) return(false);
-
-   if(!IsSLTighter(dir, candSL, g_auto[i].slPrice, point))
-   {
-      // The SL already in place protects at least this much: count
-      // the step as applied and never pull the SL back to the trail.
-      g_auto[i].trailAppliedPct = levelPct;
-      g_auto[i].trailStarted    = true;
-      g_auto[i].trailActive     = true;
-      SaveAutoSlotState(i);
-      return(true);
-   }
-
-   g_auto[i].trailTriedPct = levelPct;
-   g_auto[i].trailLastTry  = now;
-   if(!TradeModifyPosition(g_auto[i].ticket, candSL, g_auto[i].tpPrice))
-      return(false);
-
-   g_auto[i].slPrice         = candSL;
-   g_auto[i].slPts           = (int)MathRound(MathAbs(g_auto[i].entryPrice - candSL) / point);
-   g_auto[i].trailAppliedPct = levelPct;
-   g_auto[i].trailStarted    = true;
-   g_auto[i].trailActive     = true;
-   SaveAutoSlotState(i);
-   return(true);
-}
-
-//+------------------------------------------------------------------+
 //  Ensure a pending limit entry price sits on the valid side of the
 //  current market (below Ask for BUY LIMIT, above Bid for SELL LIMIT).
 //+------------------------------------------------------------------+
@@ -5737,50 +5110,6 @@ bool TradePlaceLimit(int i, int dir, double lot, double price, double sl, double
       return(false);
    outTicket = res.order;
    return(true);
-}
-
-//+------------------------------------------------------------------+
-bool TradeModifyPosition(ulong posTicket, double newSL, double newTP)
-{
-   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   if(point <= 0.0) point = 0.00001;
-
-   double normSL = (newSL > 0.0) ? NormPrice(newSL) : 0.0;
-   double normTP = (newTP > 0.0) ? NormPrice(newTP) : 0.0;
-
-   if(PositionSelectByTicket(posTicket))
-   {
-      double curSL = PositionGetDouble(POSITION_SL);
-      double curTP = PositionGetDouble(POSITION_TP);
-      if(MathAbs(normSL - curSL) < 0.5 * point &&
-         MathAbs(normTP - curTP) < 0.5 * point)
-         return(true);
-   }
-
-   MqlTradeRequest req;
-   MqlTradeResult  res;
-   ZeroMemory(req);
-   ZeroMemory(res);
-
-   req.action   = TRADE_ACTION_SLTP;
-   req.position = posTicket;
-   req.symbol   = _Symbol;
-   req.sl       = normSL;
-   req.tp       = normTP;
-
-   if(!OrderSend(req, res))
-   {
-      NoteMarketClosedRetcode(res.retcode);
-      if(res.retcode == TRADE_RETCODE_NO_CHANGES) return(true);
-      int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-      PrintFormat("SimpleEA: TradeModifyPosition(#%I64u) failed retcode=%u sl=%.*f tp=%.*f",
-                  posTicket, res.retcode, dg, normSL, dg, normTP);
-      return(false);
-   }
-   return(res.retcode == TRADE_RETCODE_DONE ||
-          res.retcode == TRADE_RETCODE_DONE_PARTIAL ||
-          res.retcode == TRADE_RETCODE_PLACED ||
-          res.retcode == TRADE_RETCODE_NO_CHANGES);
 }
 
 //+------------------------------------------------------------------+
@@ -5956,83 +5285,10 @@ void SyncAutoState()
                g_auto[i].tp3Pts = recTp3;
             }
 
-            // A freshly filled pending (or a position found after a
-            // restart) gets its pre-TP1 trailstop settings frozen now,
-            // against the TP1 distance recovered / carried above.
-            double savedTapp = (!wasActive) ? g_auto[i].trailAppliedPct : 0.0;
-            if(InpUseTrailStop && g_auto[i].trailRefTp1Pts <= 0)
-               InitTrailState(i);
-            if(savedTapp > 0.0)
-               g_auto[i].trailAppliedPct = savedTapp;
+            // Fixed exits do not derive TP1/TP2 state from the broker SL.
+            // Persisted slot flags and the diary retain partial-close state;
+            // a fixed SL must never be mistaken for a TP milestone lock.
 
-            // Recover the trail / TP milestone state from persisted slot
-            // flags and where the broker SL sits:
-            //   SL at / beyond TP1    -> TP1 & TP2 were hit (SL locked to TP1)
-            //   SL at +50%..TP1 (off) -> TP1 was hit (+50% of TP1 lock)
-            //   SL at +25% (off)      -> 50%-of-TP1 floor active, TP1 NOT yet hit
-            //   SL in profit (on)     -> trail / floor active; restore applied step
-            if(g_auto[i].slPrice > 0.0)
-            {
-               double slFavPts    = (g_auto[i].dir > 0)
-                                    ? (g_auto[i].slPrice - g_auto[i].entryPrice) / point
-                                    : (g_auto[i].entryPrice - g_auto[i].slPrice) / point;
-               double halfLockPts = MathMax(1.0, MathFloor(HALF_TP1_LOCK_RATIO * (double)g_auto[i].tp1Pts + 0.5 + 1e-9));
-               double tp1LockPts  = MathMax(1.0, MathFloor(TP1_LOCK_RATIO * (double)g_auto[i].tp1Pts + 0.5 + 1e-9));
-
-               if(g_auto[i].tp1Pts > 0 && slFavPts >= (double)g_auto[i].tp1Pts - 0.5)
-               {
-                  g_auto[i].tp1Hit      = true;
-                  g_auto[i].tp2Hit      = true;
-                  g_auto[i].trailActive = true;
-                  if(InpUseTrailStop)
-                     g_auto[i].trailStarted = true;
-               }
-               else if(!InpUseTrailStop)
-               {
-                  if(g_auto[i].tp1Pts > 0 && slFavPts >= tp1LockPts - 0.5)
-                  {
-                     g_auto[i].tp1Hit      = true;
-                     g_auto[i].trailActive = true;
-                  }
-                  else if(slFavPts >= -0.5)
-                  {
-                     g_auto[i].trailActive = true;
-                  }
-               }
-               else
-               {
-                  if(g_auto[i].trailAppliedPct > 0.0)
-                  {
-                     g_auto[i].trailStarted = true;
-                     g_auto[i].trailActive  = true;
-                     if(g_auto[i].trailRefTp1Pts > 0)
-                        g_auto[i].trailPeakPts = g_auto[i].trailAppliedPct / 100.0 *
-                                                 (double)g_auto[i].trailRefTp1Pts;
-                  }
-                  else if(MathAbs(slFavPts) <= 0.5)
-                  {
-                     g_auto[i].tp1Hit       = true;
-                     g_auto[i].trailStarted = true;
-                     g_auto[i].trailActive  = true;
-                  }
-                  else if(slFavPts > 0.5)
-                  {
-                     g_auto[i].trailActive = true;
-                     if(g_auto[i].trailRefTp1Pts > 0 &&
-                        MathAbs(slFavPts - halfLockPts) > 0.5)
-                     {
-                        double slPct = slFavPts / (double)g_auto[i].trailRefTp1Pts * 100.0;
-                        if(slPct + g_auto[i].trailGapPct >= (double)g_auto[i].trailPct - 0.5)
-                        {
-                           g_auto[i].trailStarted    = true;
-                           g_auto[i].trailAppliedPct = MathMin(100.0, slPct + g_auto[i].trailGapPct);
-                           g_auto[i].trailPeakPts    = g_auto[i].trailAppliedPct / 100.0 *
-                                                       (double)g_auto[i].trailRefTp1Pts;
-                        }
-                     }
-                  }
-               }
-            }
             if(g_auto[i].lastSignalBar == 0)
                g_auto[i].lastSignalBar = g_rows[i].lastBar;
             DiaryAttachSlotRecord(i);
@@ -6106,8 +5362,8 @@ bool PlacePlanOrder(int i)
    //  supported chart, a timer/schedule resume, or a pass triggered by
    //  another timeframe's close - reaches this function with the row
    //  unmarked and is refused here, so no caller can place mid-bar.
-   //  Managing what already exists (closes, cancels, SL/TP modifies)
-   //  never comes through this function and is unaffected.
+   //  Managing existing positions/pendings never comes through this
+   //  function and is unaffected.
    if(i < 0 || i >= TF_COUNT || !g_freshBar[i]) return(false);
    if(!CanPlaceAutoOrders()) return(false);
    if(g_plans[i].state != 2 || g_plans[i].dir == 0) return(false);
@@ -6149,7 +5405,7 @@ bool PlacePlanOrder(int i)
    if(market)
    {
       double execP = (dir > 0) ? ask : bid;
-      double slP   = InpUseStopLoss ? NormPrice(execP - (double)dir * (double)slPts * point) : 0.0;
+      double slP   = NormPrice(execP - (double)dir * (double)slPts * point);
       double tpP   = NormPrice(execP + (double)dir * (double)tp3Pts * point);
 
       if(!TradeOpenMarket(i, dir, lot, slP, tpP, ticket))
@@ -6166,13 +5422,12 @@ bool PlacePlanOrder(int i)
       g_auto[i].slPrice       = slP;
       g_auto[i].tpPrice       = tpP;
       g_auto[i].profitUSD     = 0.0;
-      g_auto[i].slPts         = InpUseStopLoss ? slPts : 0;
+      g_auto[i].slPts         = slPts;
       g_auto[i].tp1Pts        = tp1Pts;
       g_auto[i].tp2Pts        = tp2Pts;
       g_auto[i].tp3Pts        = tp3Pts;
       g_auto[i].tp1Hit        = false;
       g_auto[i].tp2Hit        = false;
-      g_auto[i].trailActive   = false;
       g_auto[i].isRange       = false;               // market orders are never range fades
       g_auto[i].rngTop        = 0.0;
       g_auto[i].rngBot        = 0.0;
@@ -6180,7 +5435,6 @@ bool PlacePlanOrder(int i)
       g_auto[i].fillBar       = g_rows[i].lastBar;
       g_auto[i].lastEvalBar   = g_rows[i].lastBar;
       g_auto[i].lastSignalBar = g_rows[i].lastBar;
-      InitTrailState(i);          // market fill: freeze the trailstop % now
       SaveAutoSlotState(i);
       DiaryBeginPlacement(i, true, slPts, ask - bid);
       return(true);
@@ -6188,7 +5442,7 @@ bool PlacePlanOrder(int i)
    else
    {
       double pendP = ValidLimitPrice(dir, g_plans[i].entryPrice, bid, ask, point);
-      double slP   = InpUseStopLoss ? NormPrice(pendP - (double)dir * (double)slPts * point) : 0.0;
+      double slP   = NormPrice(pendP - (double)dir * (double)slPts * point);
       double tpP   = NormPrice(pendP + (double)dir * (double)tp3Pts * point);
 
       if(!TradePlaceLimit(i, dir, lot, pendP, slP, tpP, ticket))
@@ -6205,27 +5459,14 @@ bool PlacePlanOrder(int i)
       g_auto[i].slPrice       = slP;
       g_auto[i].tpPrice       = tpP;
       g_auto[i].profitUSD     = 0.0;
-      g_auto[i].slPts         = InpUseStopLoss ? slPts : 0;
+      g_auto[i].slPts         = slPts;
       g_auto[i].tp1Pts        = tp1Pts;
       g_auto[i].tp2Pts        = tp2Pts;
       g_auto[i].tp3Pts        = tp3Pts;
       g_auto[i].tp1Hit        = false;
       g_auto[i].tp2Hit        = false;
-      g_auto[i].trailActive   = false;
-      //  The trailstop is initialised when this pending fills (see
-      //  SyncAutoState), so its % and TP1 reference match the fill.
-      g_auto[i].trailSteady    = false;
-      g_auto[i].trailStarted   = false;
-      g_auto[i].trailPct       = 0;
-      g_auto[i].trailGapPct    = 0.0;
-      g_auto[i].trailRefTp1Pts = 0;
-      g_auto[i].trailPeakPts   = 0.0;
-      g_auto[i].trailAppliedPct = 0.0;
-      g_auto[i].trailTriedPct   = 0.0;
-      g_auto[i].trailLastTry    = 0;
-      g_auto[i].floorLastTry    = 0;
-      //  Range fades carry their box: a close outside it kills the trade
-      //  (checked on every new closed bar, before the other rules).
+      //  A range box is used only to manage this unfilled entry.  Once
+      //  filled, a box break cannot close the position.
       g_auto[i].isRange       = (g_rows[i].mode == 2);
       g_auto[i].rngTop        = (g_rows[i].mode == 2) ? g_rows[i].rngTop : 0.0;
       g_auto[i].rngBot        = (g_rows[i].mode == 2) ? g_rows[i].rngBot : 0.0;
@@ -6240,13 +5481,12 @@ bool PlacePlanOrder(int i)
 
 //+------------------------------------------------------------------+
 //  Bar-close autotrading logic:
-//    - Manages open positions on signal/score changes and updates
-//      TP1/TP2/TP3 + tightens SL when a new candle closes.
-//    - Manages waiting pending limit orders (updates Entry/SL/TP,
-//      upgrades 2/3 -> 3/3 to Market, or cancels on flip/HOLD, a
-//      Choppy-permission veto, or expiry).
-//    - Opens new Market/Limit orders for flat timeframes with a valid
-//      plan (independent rows; M15 & M30 tied only if that input is on).
+//    - Open positions keep their original SL/TP and are NOT closed by
+//      direction flips, HOLD, score weakening or range-box breaks.
+//      TP1/TP2/TP3 handling is performed once per tick in ManageAutoTick().
+//    - Waiting pending limits still update, upgrade or cancel as entry
+//      management.  These rules never apply to an already-filled trade.
+//    - Flat timeframes retain the existing score-to-order mapping.
 //+------------------------------------------------------------------+
 void ManageAutoBar()
 {
@@ -6268,188 +5508,14 @@ void ManageAutoBar()
       // ---- CASE A: Open Market Position -----------------------------
       if(g_auto[i].active && g_auto[i].isOpen)
       {
-         int    dir   = g_auto[i].dir;
-         double exitP = (dir > 0) ? bid : ask;
-         double favPts = (dir > 0) ? (exitP - g_auto[i].entryPrice) / point
-                                   : (g_auto[i].entryPrice - exitP) / point;
+         double exitP = (g_auto[i].dir > 0) ? bid : ask;
+         double favPts = (g_auto[i].dir > 0)
+                         ? (exitP - g_auto[i].entryPrice) / point
+                         : (g_auto[i].entryPrice - exitP) / point;
          DiaryUpdateOpenSlot(i, favPts, true);
 
-         // Track peak score strength in the trade's direction
-         if(g_rows[i].ok && g_rows[i].direction == dir &&
-            MathAbs(g_rows[i].score) > MathAbs(g_auto[i].entryScore))
-         {
-            g_auto[i].entryScore = g_rows[i].score;
-            SaveAutoSlotState(i);
-         }
-
-         // 0) BOX TRADE: a closed bar outside the trade's box kills it.
-         //    The box captured at placement is the thesis; the market just broke it.
-         //    With InpImmediateFlipClose=false (default) a box-break is not allowed
-         //    to bank a loss: while the trade is under water it is held and the same
-         //    break is re-tested on every later closed bar until it is in profit.
-         //    The remaining management rules below keep running meanwhile.
-         if(g_auto[i].isRange && g_rows[i].ok &&
-            (g_rows[i].lastClose > g_auto[i].rngTop || g_rows[i].lastClose < g_auto[i].rngBot))
-         {
-            if(FlipCloseAllowed(i, favPts))
-            {
-               if(TradeClosePosition(g_auto[i].ticket, dir, g_auto[i].curLot, MagicForTF(i)))
-               {
-                  g_auto[i].lastSignalBar = g_rows[i].lastBar;
-                  ResetAutoSlot(i, true);
-               }
-               continue;
-            }
-         }
-
-         // 1) Opposite direction signal -> close (and allow reversing into the new signal).
-         //    With InpImmediateFlipClose=false (default) the flip only closes while the
-         //    trade is in profit; under water it is held and re-checked on every later
-         //    closed bar, so a reversal never crystallises a loss.  No reverse order is
-         //    placed while the old trade is kept.
-         if(g_rows[i].ok && g_rows[i].direction != 0 && g_rows[i].direction != dir)
-         {
-            if(FlipCloseAllowed(i, favPts))
-            {
-               if(TradeClosePosition(g_auto[i].ticket, dir, g_auto[i].curLot, MagicForTF(i)))
-               {
-                  ResetAutoSlot(i, false);
-                  if(g_plans[i].state == 2 && TrendMatchForTF(i))
-                     PlacePlanOrder(i);
-               }
-            }
-            continue;
-         }
-
-         // Candle Wick Check: if finished closed bar reached TP1, confirm hit
-         if(!g_auto[i].tp1Hit && g_auto[i].tp1Pts > 0 && point > 0.0)
-         {
-            double ch[], cl[];
-            ArraySetAsSeries(ch, true);
-            ArraySetAsSeries(cl, true);
-            if(CopyHigh(_Symbol, g_rows[i].tf, 1, 1, ch) == 1 &&
-               CopyLow (_Symbol, g_rows[i].tf, 1, 1, cl) == 1)
-            {
-               double barFav = (dir > 0) ? (ch[0] - g_auto[i].entryPrice) / point
-                                         : (g_auto[i].entryPrice - cl[0]) / point;
-               if(barFav >= (double)g_auto[i].tp1Pts - 1e-6)
-               {
-                  g_auto[i].tp1Hit      = true;
-                  g_auto[i].trailActive = true;
-                  SaveAutoSlotState(i);
-                  double wantSL = MilestoneSLPrice(dir, g_auto[i].entryPrice,
-                                                   g_auto[i].tp1Pts, TP1_LOCK_RATIO, point);
-                  double tp1SL  = ClampProfitFloorSL(dir, g_auto[i].entryPrice,
-                                                     wantSL, bid, ask, point);
-                  if(tp1SL > 0.0 && IsSLTighter(dir, tp1SL, g_auto[i].slPrice, point))
-                  {
-                     if(TradeModifyPosition(g_auto[i].ticket, tp1SL, g_auto[i].tpPrice))
-                     {
-                        g_auto[i].slPrice = tp1SL;
-                        g_auto[i].slPts   = (int)MathRound(MathAbs(g_auto[i].entryPrice - tp1SL) / point);
-                     }
-                  }
-               }
-            }
-         }
-
-         // 2) After TP1 is hit -> close if score weakened or direction dropped to HOLD.
-         //    Range fades are exempt: their ENTRY was gated by the score, but once
-         //    filled their exits are the box midpoint, the stop and the box-kill -
-         //    the post-TP1 score watcher has no jurisdiction over them.
-         if(g_auto[i].tp1Hit && !g_auto[i].isRange && !IsScoreStrongForTrade(i))
-         {
-            if(TradeClosePosition(g_auto[i].ticket, dir, g_auto[i].curLot, MagicForTF(i)))
-            {
-               g_auto[i].lastSignalBar = g_rows[i].lastBar;
-               ResetAutoSlot(i, true);
-            }
-            continue;
-         }
-
-         // 3) Before TP1 is hit -> if timeframe drops to HOLD while trade is in profit, close
-         if(!g_auto[i].tp1Hit && g_rows[i].ok && g_rows[i].direction == 0)
-         {
-            if(g_auto[i].profitUSD > 0.0 || favPts > 0.0)
-            {
-               if(TradeClosePosition(g_auto[i].ticket, dir, g_auto[i].curLot, MagicForTF(i)))
-               {
-                  g_auto[i].lastSignalBar = g_rows[i].lastBar;
-                  ResetAutoSlot(i, true);
-               }
-            }
-            continue;
-         }
-
-         // 4) Closed bar in the SAME direction -> SL may only TIGHTEN;
-         //    TP targets (TP1/TP2/TP3) are frozen at entry and do not walk with ATR.
-         if(g_rows[i].ok && g_rows[i].direction == dir && g_plans[i].state == 2)
-         {
-            double candSL = NormPrice(g_auto[i].entryPrice - (double)dir * (double)g_plans[i].slPts * point);
-            candSL        = ClampSLToStopsLevel(dir, candSL, bid, ask, point);
-
-            double useSL = g_auto[i].slPrice;
-            if(!g_auto[i].tp1Hit && !g_auto[i].trailActive)
-            {
-               //  The stop may only ever TIGHTEN (README rule 6): the new
-               //  plan's stop is taken only when it is closer to the entry
-               //  than the one already in place, so a wider ATR on a new
-               //  bar can never push an open trade's stop further away.
-               //  With InpUseStopLoss=false and no SL yet there is nothing
-               //  to keep, and the first stop stays the trailstop's job.
-               double cand2 = InpUseStopLoss ? candSL : 0.0;
-               if(cand2 > 0.0 && IsSLTighter(dir, cand2, g_auto[i].slPrice, point))
-                  useSL = cand2;
-            }
-            else if(candSL > 0.0 && IsSLTighter(dir, candSL, g_auto[i].slPrice, point))
-            {
-               useSL = candSL;
-            }
-
-            // ---- Post-TP1 Runner Trailing: Trail stop behind recent 2-bar swing extrema ----
-            if(InpUseTrailStop && g_auto[i].tp1Hit && point > 0.0)
-            {
-               double bh[], bl[];
-               ArraySetAsSeries(bh, true);
-               ArraySetAsSeries(bl, true);
-               if(CopyHigh(_Symbol, g_rows[i].tf, 1, 2, bh) == 2 &&
-                  CopyLow (_Symbol, g_rows[i].tf, 1, 2, bl) == 2)
-               {
-                  double atrVal = ATRClosed(g_rows[i].tf, ATR_PERIOD);
-                  double cushion = (atrVal > 0.0) ? 0.10 * atrVal : point;
-                  double runnerSL = 0.0;
-                  if(dir > 0)
-                  {
-                     double minL = MathMin(bl[0], bl[1]);
-                     runnerSL = NormPrice(minL - cushion);
-                  }
-                  else
-                  {
-                     double maxH = MathMax(bh[0], bh[1]);
-                     runnerSL = NormPrice(maxH + cushion);
-                  }
-                  runnerSL = ClampSLToStopsLevel(dir, runnerSL, bid, ask, point);
-                  if(runnerSL > 0.0 && IsSLTighter(dir, runnerSL, useSL, point))
-                     useSL = runnerSL;
-               }
-            }
-
-            if(MathAbs(useSL - g_auto[i].slPrice) >= 0.5 * point)
-            {
-               if(TradeModifyPosition(g_auto[i].ticket, useSL, g_auto[i].tpPrice))
-               {
-                  g_auto[i].slPrice       = useSL;
-                  g_auto[i].lastEvalBar   = g_rows[i].lastBar;
-                  g_auto[i].slPts         = (useSL > 0.0)
-                                            ? (int)MathRound(MathAbs(g_auto[i].entryPrice - useSL) / point)
-                                            : 0;
-               }
-            }
-            else
-            {
-               g_auto[i].lastEvalBar = g_rows[i].lastBar;
-            }
-         }
+         // Deliberately no open-position order request here.  The entry
+         // signal may change freely without moving SL or closing the trade.
          continue;
       }
 
@@ -6547,10 +5613,10 @@ void ManageAutoBar()
          // 3) Closed candle in the same direction (still Pending 2/3) ->
          //    update Entry, SL and TP1/TP2/TP3 as per SimpleEA's new plan
          double newEntry = ValidLimitPrice(dir, g_plans[i].entryPrice, bid, ask, point);
-         double newSL    = InpUseStopLoss ? NormPrice(newEntry - (double)dir * (double)g_plans[i].slPts * point) : 0.0;
+         double newSL    = NormPrice(newEntry - (double)dir * (double)g_plans[i].slPts * point);
          double newTP    = NormPrice(newEntry + (double)dir * (double)g_plans[i].tp3Pts * point);
 
-         g_auto[i].slPts  = InpUseStopLoss ? g_plans[i].slPts : 0;
+         g_auto[i].slPts  = g_plans[i].slPts;
          g_auto[i].tp1Pts = g_plans[i].tp1Pts;
          g_auto[i].tp2Pts = g_plans[i].tp2Pts;
          g_auto[i].tp3Pts = g_plans[i].tp3Pts;
@@ -6594,8 +5660,12 @@ void ManageAutoBar()
 }
 
 //+------------------------------------------------------------------+
-//  Tick-level monitoring for TP1, TP2, TP3 hits and live 2nd-panel
-//  updates.
+//  Tick-level fixed-exit management.
+//
+//  TP1 closes 70% when that leaves a valid remainder; TP2 reduces the
+//  remainder to the broker minimum lot when possible; TP3 closes all.
+//  These are the only software-initiated open-position closes.  SL is
+//  placed with the order and is never modified by this function.
 //+------------------------------------------------------------------+
 void ManageAutoTick()
 {
@@ -6616,10 +5686,8 @@ void ManageAutoTick()
 
    bool stateChanged = (hadActive != nowActive);
    for(int i = 0; i < TF_COUNT; i++)
-   {
       if(prevAct[i] != g_auto[i].active || prevOpen[i] != g_auto[i].isOpen)
          stateChanged = true;
-   }
 
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -6637,127 +5705,51 @@ void ManageAutoTick()
                                    : (g_auto[i].entryPrice - exitP) / point;
          DiaryUpdateOpenSlot(i, favPts, false);
 
-         // ---- TP3 hit: close order in full --------------------------
+         // A tick can cross several levels.  Handle them in order so a
+         // small position cannot be reduced to an invalid non-minimum lot.
          if(g_auto[i].tp3Pts > 0 && favPts >= (double)g_auto[i].tp3Pts - 1e-6)
          {
             if(TradeClosePosition(g_auto[i].ticket, dir, g_auto[i].curLot, MagicForTF(i)))
             {
                ResetAutoSlot(i, true);
                stateChanged = true;
-               continue;
             }
+            continue;
          }
 
-         // ---- Pre-TP1 stepped trailstop: ratchet the SL in 5% steps
-         //      on the way to TP1.  Runs before the milestone floor and
-         //      TP1 check so a tick that lands on a trail step or TP1
-         //      sends one clean modify directly to the tightest SL.
-         if(UpdatePreTP1Trail(i, favPts, bid, ask, point))
-            stateChanged = true;
-
-         // ---- Universal 3-Step Profit-Protection Floor (Trailstop ON or OFF):
-         //      50% of TP1 -> +25% of TP1 ahead of Entry; 100% -> +50% of TP1;
-         //      TP2 -> TP1 price (100% of TP1).  Also retries if an earlier
-         //      milestone modify was rejected or clamped by stops level.
-         if(UpdateProfitProtectionFloor(i, favPts, bid, ask, point))
-            stateChanged = true;
-
-         // ---- TP1 hit: move SL up to +50% of TP1 ahead of Entry (only
-         //      if tighter than any trailed SL) and partial-close 70% if
-         //      lot > minLot -------------------------------------------
          double grossPts = (dir > 0) ? (ask - g_auto[i].entryPrice) / point
                                      : (g_auto[i].entryPrice - bid) / point;
          if(!g_auto[i].tp1Hit && g_auto[i].tp1Pts > 0 &&
             (favPts >= (double)g_auto[i].tp1Pts - 1e-6 ||
              (grossPts >= (double)g_auto[i].tp1Pts - 1e-6 && favPts > 0.0)))
          {
-            g_auto[i].tp1Hit      = true;
-            g_auto[i].trailActive = true;
+            g_auto[i].tp1Hit = true;
             SaveAutoSlotState(i);
-            stateChanged          = true;
-
-            double wantTp1SL = MilestoneSLPrice(dir, g_auto[i].entryPrice,
-                                                g_auto[i].tp1Pts, TP1_LOCK_RATIO, point);
-            double tp1SL     = ClampProfitFloorSL(dir, g_auto[i].entryPrice,
-                                                  wantTp1SL, bid, ask, point);
-            if(tp1SL > 0.0 && IsSLTighter(dir, tp1SL, g_auto[i].slPrice, point))
-            {
-               if(TradeModifyPosition(g_auto[i].ticket, tp1SL, g_auto[i].tpPrice))
-               {
-                  g_auto[i].slPrice = tp1SL;
-                  g_auto[i].slPts   = (int)MathRound(MathAbs(g_auto[i].entryPrice - tp1SL) / point);
-               }
-            }
+            stateChanged = true;
 
             double close70 = CalcTP1CloseLot(g_auto[i].curLot);
-            if(close70 > 0.0)
-            {
-               if(TradeClosePosition(g_auto[i].ticket, dir, close70, MagicForTF(i)))
-                  g_auto[i].curLot = FloorLotStep(g_auto[i].curLot - close70);
-            }
-
-            // Watch score at TP1: if score already weakened or changed direction,
-            // close remaining.  Range fades are exempt (box/stop/box-kill govern them).
-            if(!g_auto[i].isRange && !IsScoreStrongForTrade(i))
-            {
-               SyncAutoState();
-               if(g_auto[i].active && g_auto[i].isOpen)
-               {
-                  if(TradeClosePosition(g_auto[i].ticket, dir, g_auto[i].curLot, MagicForTF(i)))
-                     ResetAutoSlot(i, true);
-               }
-               continue;
-            }
+            if(close70 > 0.0 &&
+               TradeClosePosition(g_auto[i].ticket, dir, close70, MagicForTF(i)))
+               g_auto[i].curLot = FloorLotStep(g_auto[i].curLot - close70);
          }
 
-         // ---- TP2 hit: reduce remaining lot to minimum lot and lock
-         //      SL to TP1 (100% of TP1) --------------------------------
          if(g_auto[i].tp1Hit && !g_auto[i].tp2Hit && g_auto[i].tp2Pts > 0 &&
             favPts >= (double)g_auto[i].tp2Pts - 1e-6)
          {
-            g_auto[i].tp2Hit      = true;
-            g_auto[i].trailActive = true;
+            g_auto[i].tp2Hit = true;
             SaveAutoSlotState(i);
-            stateChanged          = true;
-
-            double tp1P   = g_auto[i].entryPrice + (double)dir * (double)g_auto[i].tp1Pts * point;
-            double lockSL = ClampProfitFloorSL(dir, g_auto[i].entryPrice,
-                                               tp1P, bid, ask, point);
-            if(lockSL > 0.0 && IsSLTighter(dir, lockSL, g_auto[i].slPrice, point))
-            {
-               if(TradeModifyPosition(g_auto[i].ticket, lockSL, g_auto[i].tpPrice))
-               {
-                  g_auto[i].slPrice = lockSL;
-                  g_auto[i].slPts   = (int)MathRound(MathAbs(g_auto[i].entryPrice - lockSL) / point);
-               }
-            }
+            stateChanged = true;
 
             double closeToMin = CalcTP2CloseLot(g_auto[i].curLot);
-            if(closeToMin > 0.0)
-            {
-               if(TradeClosePosition(g_auto[i].ticket, dir, closeToMin, MagicForTF(i)))
-                  g_auto[i].curLot = SymbolMinLot();
-            }
-
-            //  Box trades are exempt from the score watcher too.
-            if(!g_auto[i].isRange && !IsScoreStrongForTrade(i))
-            {
-               SyncAutoState();
-               if(g_auto[i].active && g_auto[i].isOpen)
-               {
-                  if(TradeClosePosition(g_auto[i].ticket, dir, g_auto[i].curLot, MagicForTF(i)))
-                     ResetAutoSlot(i, true);
-               }
-               continue;
-            }
+            if(closeToMin > 0.0 &&
+               TradeClosePosition(g_auto[i].ticket, dir, closeToMin, MagicForTF(i)))
+               g_auto[i].curLot = SymbolMinLot();
          }
       }
       SyncAutoState();
       for(int i = 0; i < TF_COUNT; i++)
-      {
          if(prevAct[i] != g_auto[i].active || prevOpen[i] != g_auto[i].isOpen)
             stateChanged = true;
-      }
    }
 
    if(stateChanged)
@@ -6855,20 +5847,18 @@ void UpdateAutoPanel()
       {
          int    slPtsNow    = (int)MathRound(MathAbs(g_auto[i].entryPrice - g_auto[i].slPrice) / point);
          double slUSD       = (pv > 0.0) ? lot * (double)slPtsNow * pv : 0.0;
-         bool   isBE        = (slPtsNow == 0 || g_auto[i].trailActive);
          bool   slProtected = (g_auto[i].isOpen &&
                                ((double)dir * (g_auto[i].slPrice - g_auto[i].entryPrice) >= -0.5 * point));
-         g_auto[i].val[2][1] = StringFormat("%s (%s %s)%s",
-                                            DoubleToString(g_auto[i].slPrice, dg), DoubleToString(slUSD, 2), cur,
-                                            (slPtsNow == 0 && isBE) ? " [BE]" : "");
+         g_auto[i].val[2][1] = StringFormat("%s (%s %s)",
+                                            DoubleToString(g_auto[i].slPrice, dg), DoubleToString(slUSD, 2), cur);
          g_auto[i].clr[2][1] = slProtected ? InpBuyColor : InpSellColor;
       }
       else
       {
-         // When SL is blank, show "-- (Ask/Bid: xxx.xx)" in realtime
-         g_auto[i].val[2][1] = StringFormat("-- (%s %s)",
-                                            liveL, (liveP > 0.0 ? DoubleToString(liveP, dg) : "--"));
-         g_auto[i].clr[2][1] = clrSilver;
+         // New orders always have an SL; this warns about a legacy or
+         // externally altered position without modifying it after entry.
+         g_auto[i].val[2][1] = "-- (missing)";
+         g_auto[i].clr[2][1] = InpSellColor;
       }
 
       // ---- Line 3: Status / Waiting distance & LIVE gap to TP1/TP2/TP3
@@ -6902,19 +5892,10 @@ void UpdateAutoPanel()
       g_auto[i].val[3][1] = StringFormat("to %s %d pts", nextTpTag, gapPts);
       g_auto[i].clr[3][1] = InpBuyColor;
 
-      // ---- the trailstop % SimpleEA picked for this trade ----------
-      g_auto[i].lbl[3][2] = "TS:";
-      if(!g_auto[i].isOpen || g_auto[i].trailPct <= 0)
-      {
-         g_auto[i].val[3][2] = InpUseTrailStop ? "--" : "Off";
-         g_auto[i].clr[3][2] = clrSilver;
-      }
-      else
-      {
-         g_auto[i].val[3][2] = StringFormat("%d%% %s", g_auto[i].trailPct,
-                                            g_auto[i].trailSteady ? "Steady" : "Tight");
-         g_auto[i].clr[3][2] = g_auto[i].trailStarted ? InpBuyColor : clrSilver;
-      }
+      // ---- fixed exit policy ----------------------------------------
+      g_auto[i].lbl[3][2] = "Exit:";
+      g_auto[i].val[3][2] = "TP/SL";
+      g_auto[i].clr[3][2] = clrSilver;
    }
 }
 
@@ -7875,7 +6856,9 @@ int AutoWidthNeed()
    int titleW = 11 * CharW(InpFontSize + 1);
 
    int headNeed = 10 + titleW + em
-                  + (14 + 6 + 1 + 13 + 3 + 2 + StringLen("|  " + _Symbol)) * em + 10;
+                  + (StringLen("| Exits : TP/SL") + 1
+                     + StringLen("| Stoploss : ") + 7 + 2
+                     + StringLen("|  " + _Symbol)) * em + 10;
    int need = (int)MathMax(AUTO_W_MIN, headNeed);
    for(int i = 0; i < TF_COUNT; i++)
    {
@@ -7922,31 +6905,25 @@ void DrawAutoPanel()
    MakeAutoRect("bg",  x2, y2, g_autoW, g_autoH, InpBgColor, clrDimGray);
    MakeAutoRect("sep", x2 + 4, y2 + HEAD_H - 6, g_autoW - 8, 1, clrDimGray, clrDimGray);
 
-   //  The Trailstop header word has three states, so the switch and the
-   //  trades never lie about each other:
-   //     Off     InpUseTrailStop is false - the feature is disabled
-   //     On      enabled and armed, but no trade is trailing yet
-   //     Active  at least one trade is actually trailing right now
-   bool   tsLive = AnyTrailstopOn();
-   string tsText = !InpUseTrailStop ? "Off" : (tsLive ? "Active" : "On");
-   color  tsClr  = InpUseTrailStop ? InpBuyColor : InpSellColor;
-   bool   slOn   = AnyStoplossOn();
+   bool slOn = AllActiveStopsPresent();
    int  em     = CharW(InpFontSize);
    int  titleW = 11 * CharW(InpFontSize + 1);
 
    MakeAutoLabel("title", x2 + pad, y2 + 7, "Autotrading",
                  InpTitleColor, InpFontSize + 1, false);
-   int tsCapX = x2 + pad + titleW + em;
-   MakeAutoLabel("tsCap", tsCapX, y2 + 8, "| Trailstop : ",
+   int exitCapX = x2 + pad + titleW + em;
+   string exitCap = "| Exits : ";
+   MakeAutoLabel("exitCap", exitCapX, y2 + 8, exitCap,
                  clrSilver, InpFontSize, false);
-   int tsValX = tsCapX + 14 * em;
-   MakeAutoLabel("tsVal", tsValX, y2 + 8, tsText,
-                 tsClr, InpFontSize, false);
-   int slCapX = tsValX + 6 * em + em;   // value slot fits the widest state, "Active"
-   MakeAutoLabel("slCap", slCapX, y2 + 8, "| Stoploss : ",
+   int exitValX = exitCapX + StringLen(exitCap) * em;
+   MakeAutoLabel("exitVal", exitValX, y2 + 8, "TP/SL",
+                 InpTitleColor, InpFontSize, false);
+   int slCapX = exitValX + 6 * em;
+   string slCap = "| Stoploss : ";
+   MakeAutoLabel("slCap", slCapX, y2 + 8, slCap,
                  clrSilver, InpFontSize, false);
-   int slValX = slCapX + 13 * em;
-   MakeAutoLabel("slVal", slValX, y2 + 8, slOn ? "On" : "Off",
+   int slValX = slCapX + StringLen(slCap) * em;
+   MakeAutoLabel("slVal", slValX, y2 + 8, slOn ? "Fixed" : "Missing",
                  slOn ? InpBuyColor : InpSellColor, InpFontSize, false);
    MakeAutoLabel("sym", x2 + g_autoW - pad, y2 + 8, "|  " + _Symbol,
                  InpTitleColor, InpFontSize, true);
@@ -8019,8 +6996,8 @@ void DrawAutoPanel()
 //  The diary records whether this panel is shown or not.  The panel
 //  is the diary opened up: Day and lifetime totals first, then one
 //  block per timeframe with its lifetime record, its 2/3-versus-3/3
-//  split, the health and trailstop performance of its newest closed
-//  trades, and the first fix that health suggests.  It sits opposite
+//  split, the health of its newest closed trades, the fixed-exit
+//  policy, and the first fix that health suggests.  It sits opposite
 //  the Autotrading panel:
 //  Autotrading Right -> History below the Main Panel; Autotrading
 //  Bottom -> History on the right.
@@ -8151,20 +7128,8 @@ void DrawHistoryPanel()
          DiaryRText(lane.recNetR));
       colors[base + 3] = InpTitleColor;
 
-      string trailLockTxt = (lane.recTrailMedianLock < 0.0)
-                            ? "--"
-                            : StringFormat("%.0f%%", lane.recTrailMedianLock);
-      string trailGivebackTxt = (lane.recTrailMedianGiveback < 0.0)
-                                ? "--"
-                                : StringFormat("%.0f%%",
-                                               lane.recTrailMedianGiveback);
-      string trailStopTxt = (lane.recTrailStopKnown > 0)
-                            ? IntegerToString(lane.recTrailStopExits)
-                            : "--";
-      lines[base + 4] = StringFormat(
-         "  Trail %d: Armed %s | Lock %s | Stop exits %s | Giveback %s",
-         lane.recN, DiaryRatePctText(lane.recTrailArmRate), trailLockTxt,
-         trailStopTxt, trailGivebackTxt);
+      lines[base + 4] =
+         "  Exits: TP1 partial | TP2 partial | TP3 full | fixed broker SL";
       colors[base + 4] = clrSilver;
 
       lines[base + 5] = "  First step: " + lane.action;

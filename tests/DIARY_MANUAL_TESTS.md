@@ -19,7 +19,7 @@ Before live use:
 
 ## Remaining observational limits
 
-No offline tick/trailing reconstruction is attempted. This protection applies to
+No offline tick reconstruction is attempted. Obsolete trailing CSV columns are reserved and ignored, not recreated or used in health statistics. This protection applies to
 closes recovered by DiaryReconcileOpenRecords. A position resumed while still
 open, or a connection gap while the EA stays loaded, can still have incomplete
 intratrade observations. Existing historical rows are not retroactively repaired.
