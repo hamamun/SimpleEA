@@ -209,6 +209,35 @@ enum ENUM_AUTO_PANEL_POS
    AUTO_POS_BOTTOM = 1  // Bottom
 };
 
+//  Where the M5 row takes its Steady / Mixed / Choppy label from.
+//
+//  The regime label is a measurement of HOW price has been moving, and
+//  it is only as good as the history behind it.  HURST_WINDOW is counted
+//  in bars, and 256 bars is 21 hours on M5 but 128 hours on M30 - one
+//  sixth of the evidence.  On top of that, every quote bounces between
+//  bid and ask, and that bounce makes short-horizon returns look
+//  mean-reverting, which drags the estimate down.  Both effects are worst
+//  on M5 and mild on M30, so M5 may read its regime from a slower row:
+//
+//     Own  - M5 keeps its own 21-hour label (the original behaviour)
+//     M15  - M5 borrows M15's label (64 hours, 3-bar sampling)
+//     M30  - M5 borrows M30's label (128 hours, 6-bar sampling)
+//
+//  This borrows the LABEL, it does not require the two rows to AGREE.
+//  A "must match" rule would do the opposite of what is wanted: an M5
+//  row that reads Choppy most of the time would only be allowed to trade
+//  when the higher row was Choppy too - blocking every trend.
+//
+//  Direction and score stay M5's own.  Only the regime label - and with
+//  it the entry style (box fade vs pullback), the Choppy permission and
+//  the trailstop arm - comes from the chosen row.
+enum ENUM_M5_REGIME
+{
+   M5_REGIME_OWN = 0, // M5's own
+   M5_REGIME_M15 = 1, // Borrow from M15
+   M5_REGIME_M30 = 2  // Borrow from M30
+};
+
 //==================================================================
 //  INPUTS
 //==================================================================
@@ -229,7 +258,22 @@ input int                 InpTrailPctTight  = 40;            // Trailstop % when
 input int                 InpTrailPctSteady = 55;            // Trailstop % in a Steady, clear trend (10-70)
 input long                InpMagicBase    = 202610;          // Base magic number (+0 M5, +1 M15, +2 M30)
 
-input group "=== Signal, Choppy permission & range mode ==="
+//  WHICH TIMEFRAMES MAY TRADE AT ALL.  Three master switches, all on, so
+//  a row can be taken out of the game without touching the signal engine
+//  or the other two rows.  Switching one off does exactly what the daily
+//  timer and the Choppy veto already do, no more and no less:
+//     - NO NEW order of any kind is sent for that row (market or limit);
+//     - a waiting pending on that row is cancelled - it is an unfilled
+//       entry, and it could fill while the row is switched off;
+//     - an ALREADY OPEN position keeps its normal management (trailstop,
+//       TP1/TP2/TP3, exits).  A switch must never abandon a live trade.
+//  The row keeps reading and keeps drawing its plan, so the panel still
+//  shows what that timeframe would do if it were switched back on.
+input bool                InpAutoTradeM5  = true;            // Autotrade M5  (false = no new M5 orders; open M5 trades stay managed)
+input bool                InpAutoTradeM15 = true;            // Autotrade M15 (false = no new M15 orders; open M15 trades stay managed)
+input bool                InpAutoTradeM30 = true;            // Autotrade M30 (false = no new M30 orders; open M30 trades stay managed)
+
+input group "=== Signal, regime permission & range mode ==="
 input int      InpBuyScore    = 2;           // Score >= this  => BUY
 input int      InpSellScore   = -2;          // Score <= this  => SELL
 
@@ -246,6 +290,13 @@ input int      InpSellScore   = -2;          // Score <= this  => SELL
 //  3/3 -> market, 2/3 -> limit.  The Main Panel's "Choppy Trade" value
 //  mirrors the PERMISSION switch, because that is what its words mean.
 input bool     InpAllowChoppyTrade = true;   // Allow Choppy trade (false = no NEW orders while a row is Choppy)
+//  The Mixed permission works exactly like the Choppy one, one switch for
+//  all three rows.  Mixed is the label between the two thresholds
+//  (HURST_REVERT <= H <= HURST_TREND) - neither trending nor reverting -
+//  and it is the biggest of the three buckets, so switching this off
+//  removes well over half of all entries.  That is a deliberate choice to
+//  make, not a default, so it ships ON.
+input bool     InpAllowMixedTrade  = true;   // Allow Mixed trade (false = no NEW orders while a row is Mixed)
 //  What the regime adds, once permission is given, is where a LIMIT
 //  waits: on a Choppy row (H below the revert threshold - moves genuinely
 //  come back) Range Mode lets the box band price the limit (entry at the
@@ -258,6 +309,18 @@ input bool     InpAllowChoppyTrade = true;   // Allow Choppy trade (false = no N
 //  RANGE PROFILE below, one value for all three timeframes, exactly like
 //  the trade profile.
 input bool     InpRangeMode    = true;       // Range mode: box-band entry for an ALLOWED Choppy 2/3 (default ON)
+
+//  The three rows used to be three sealed rooms: every reading came from
+//  its own bars and no row ever saw another.  These two switches open a
+//  door - M5 may take its regime label from a slower row, and M5 may be
+//  held to the higher row's direction before it places.  Both default to
+//  the SAFE side of their own trade-off:
+//     InpM5RegimeFrom     - ON  (M5's own 21h label is the weak one)
+//     InpM5RequireHigher  - OFF (a direction veto costs 15-30 min, which
+//                                is longer than an M5 reading lives, so
+//                                it would kill the trades it allows)
+input ENUM_M5_REGIME InpM5RegimeFrom    = M5_REGIME_M15; // M5 regime label: M5's own / borrow M15 / borrow M30
+input bool           InpM5RequireHigher = false;         // M5 must match M15's direction to place (false = untied)
 
 //  (No engine-settings group: the Precision Trend periods, the Hurst
 //  window and the efficiency-ratio numbers are STANDARD - they are the
@@ -332,7 +395,16 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 //  ER_DEAD is an absolute dead-market gate, never a relative one.
 #define TREND_L1        150       // Precision Trend long period  (all timeframes)
 #define TREND_L2        24        // Precision Trend short period (all timeframes)
-#define HURST_WINDOW    256       // Hurst estimate window (bars, each timeframe's own)
+//  The regime window used to be ONE number - 256 bars - handed to all
+//  three rows alike.  Counted in bars that is 21 hours of history on M5,
+//  64 on M15 and 128 on M30: the row with the noisiest data got the least
+//  evidence to work with.  It is now expressed as a SPAN, and each row's
+//  bar count falls out of it, so all three judge the regime over the same
+//  stretch of market.  M30 lands on 256, exactly where it always was.
+#define HURST_SPAN_HOURS 128.0                                          // hours of history behind a regime label
+#define HURST_WINDOW_M5  ((int)MathRound(HURST_SPAN_HOURS * 60.0 /  5.0)) // 1536 bars
+#define HURST_WINDOW_M15 ((int)MathRound(HURST_SPAN_HOURS * 60.0 / 15.0)) //  512 bars
+#define HURST_WINDOW_M30 ((int)MathRound(HURST_SPAN_HOURS * 60.0 / 30.0)) //  256 bars
 #define ER_PERIOD       20        // Kaufman efficiency-ratio period (= RANGE_BARS)
 #define ER_DEAD         0.10      // efficiency below this => dead market, force HOLD
 //  ---- THE THIRD VOTE (structure) ----------------------------------
@@ -369,11 +441,11 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 //  the 0.5 coin-flip before it will call a regime at all (SIGNAL_LOGIC.md
 //  section 4).  Nothing about gold, or about M5, moves those numbers -
 //  only a different estimator would - so they are not a dial.  The window
-//  the estimate is taken over (HURST_WINDOW in THE ENGINE PROFILE above)
-//  is standard for the same reason: 256 bars is five days on M30 and two
-//  days on M5, and the estimator needs that many bars to be stable on
-//  every row.  Widen the band here and the panel goes quieter; narrow it
-//  and it trades more - which is exactly why it is not a user input.
+//  the estimate is taken over is now a SPAN (HURST_SPAN_HOURS in THE
+//  ENGINE PROFILE above) rather than one bar count, so every row gets the
+//  same stretch of history instead of M5 getting a sixth of M30's.  Widen
+//  the band here and the panel goes quieter; narrow it and it trades more
+//  - which is exactly why it is not a user input.
 #define HURST_TREND     0.55      // H above this = persistent: Steady
 #define HURST_REVERT    0.45      // H below this = anti-persistent: Choppy (box-priced limits)
 
@@ -470,14 +542,22 @@ struct SRow
    string         style;      // "Scalp"
    int            l1;         // trend filter long period
    int            l2;         // trend filter short period
+   int            hWindow;    // Hurst window in bars (this row's own)
    double         hTrend;     // Hurst persistent threshold
    double         hRevert;    // Hurst anti-persistent threshold
+   //  The regime label this row actually acts on: 0 Mixed, 1 Steady,
+   //  2 Choppy.  It is stored rather than recomputed so the box decision,
+   //  the Choppy veto, the trailstop arm, the diary and the panel all
+   //  read the same number even when M5 is using M15's label.
+   int            regime;     // effective label, -1 until first evaluated
+   int            regimeSrc;  // -1 own, otherwise the row it came from
    double         slAtr;      // stop loss   = this many ATR (per timeframe)
    double         tpAtr;      // take profit = this many ATR (per timeframe)
    // ---- the entry style and the reason, per row -----------------------
    int            mode;       // 0 plain limit/market entry, 2 the box prices the limit
    bool           choppyBlocked;// score direction exists, but InpAllowChoppyTrade=false
                                 // on a Choppy row forbids a NEW entry (open trades stay managed)
+   bool           mixedBlocked; // ...and the same for InpAllowMixedTrade=false on a Mixed row
    string         blockReason;// why this row is not trading ("" = quiet or no reason)
    double         rngTop;     // range box: upper band (valid while mode == 2)
    double         rngBot;     // range box: lower band (valid while mode == 2)
@@ -552,7 +632,12 @@ int BarsNeeded()
    if(l1need > need) need = l1need;
 
    //  Hurst window plus margin for the block averaging (same guard).
-   int hneed = HURST_WINDOW;
+   //  Each row now carries its own window, so the pull has to cover the
+   //  longest of them - one pull size is shared by all three timeframes.
+   //  MathMax keeps this honest if the three constants are ever edited so
+   //  that M5 is no longer the largest.
+   int hneed = (int)MathMax(HURST_WINDOW_M5,
+                            MathMax(HURST_WINDOW_M15, HURST_WINDOW_M30));
    if(hneed < 32)         hneed = 32;
    if(hneed > BARS_MAX)   hneed = BARS_MAX;
    if(hneed + 50 > need)  need = hneed + 50;
@@ -570,7 +655,7 @@ int BarsNeeded()
 //  SETUP
 //==================================================================
 void ConfigureRow(int i, ENUM_TIMEFRAMES tf, string tag, string style,
-                  int l1, int l2, double hTrend, double hRevert,
+                  int l1, int l2, int hWindow, double hTrend, double hRevert,
                   double slAtr, double tpAtr)
 {
    g_rows[i].tf      = tf;
@@ -578,6 +663,7 @@ void ConfigureRow(int i, ENUM_TIMEFRAMES tf, string tag, string style,
    g_rows[i].style   = style;
    g_rows[i].l1      = l1;
    g_rows[i].l2      = l2;
+   g_rows[i].hWindow = hWindow;
    g_rows[i].hTrend  = hTrend;
    g_rows[i].hRevert = hRevert;
    g_rows[i].slAtr   = slAtr;
@@ -587,8 +673,11 @@ void ConfigureRow(int i, ENUM_TIMEFRAMES tf, string tag, string style,
    g_rows[i].trendDir   = 0;
    g_rows[i].hurst      = 0.5;
    g_rows[i].er         = 0.0;
+   g_rows[i].regime     = -1;      // nothing measured yet
+   g_rows[i].regimeSrc  = -1;      // and so nothing borrowed yet
    g_rows[i].mode       = 0;
    g_rows[i].choppyBlocked = false;
+   g_rows[i].mixedBlocked  = false;
    g_rows[i].blockReason = "";
    g_rows[i].rngTop     = 0.0;
    g_rows[i].rngBot     = 0.0;
@@ -604,11 +693,11 @@ int OnInit()
    //  One filter, one regime test, three timeframes: each row gets the
    //  shared numbers and applies them to its own closed bars.  (Give a
    //  row different numbers here and only that row changes.)
-   ConfigureRow(0, PERIOD_M5,  "M5",  "Scalp",      TREND_L1, TREND_L2,
+   ConfigureRow(0, PERIOD_M5,  "M5",  "Scalp",      TREND_L1, TREND_L2, HURST_WINDOW_M5,
                 HURST_TREND,    HURST_REVERT,    SL_ATR_M5,  TP_ATR_M5);
-   ConfigureRow(1, PERIOD_M15, "M15", "Short-term", TREND_L1, TREND_L2,
+   ConfigureRow(1, PERIOD_M15, "M15", "Short-term", TREND_L1, TREND_L2, HURST_WINDOW_M15,
                 HURST_TREND,    HURST_REVERT,    SL_ATR_M15, TP_ATR_M15);
-   ConfigureRow(2, PERIOD_M30, "M30", "Intraday",   TREND_L1, TREND_L2,
+   ConfigureRow(2, PERIOD_M30, "M30", "Intraday",   TREND_L1, TREND_L2, HURST_WINDOW_M30,
                 HURST_TREND,    HURST_REVERT,    SL_ATR_M30, TP_ATR_M30);
 
    //  The trend periods are baked in (THE ENGINE PROFILE), so this can
@@ -670,9 +759,27 @@ int OnInit()
 
    //  The standard engine, stated once so the log always records which
    //  calibration produced the reads (these are not inputs any more).
-   PrintFormat("SimpleEA: standard engine - Precision Trend %d/%d, Hurst window %d bars, "
+   PrintFormat("SimpleEA: standard engine - Precision Trend %d/%d, "
                "E/R %d with dead-market gate %.2f (all three timeframes).",
-               TREND_L1, TREND_L2, HURST_WINDOW, ER_PERIOD, ER_DEAD);
+               TREND_L1, TREND_L2, ER_PERIOD, ER_DEAD);
+   //  State the calibration the reads came from, including the two things
+   //  that used to be invisible: that the regime window is now a span
+   //  rather than one bar count, and whose label M5 is actually acting on.
+   PrintFormat("SimpleEA: regime window %.0f h = %d bars M5 / %d M15 / %d M30; "
+               "M5 regime label from %s; M5 higher-TF direction gate %s.",
+               HURST_SPAN_HOURS, g_rows[0].hWindow, g_rows[1].hWindow, g_rows[2].hWindow,
+               (InpM5RegimeFrom == M5_REGIME_OWN) ? "M5 (own)"
+                  : ((InpM5RegimeFrom == M5_REGIME_M30) ? "M30" : "M15"),
+               InpM5RequireHigher ? "On" : "Off");
+   //  Say plainly which rows may trade and which regimes may be traded,
+   //  so a quiet chart is never mistaken for a broken one.
+   PrintFormat("SimpleEA: autotrading per timeframe - M5 %s / M15 %s / M30 %s; "
+               "regime permission - Choppy %s, Mixed %s.",
+               InpAutoTradeM5 ? "On" : "Off",
+               InpAutoTradeM15 ? "On" : "Off",
+               InpAutoTradeM30 ? "On" : "Off",
+               InpAllowChoppyTrade ? "allowed" : "vetoed",
+               InpAllowMixedTrade  ? "allowed" : "vetoed");
 
    g_rowH   = InpFontSize + 11;
    // Each timeframe takes TWO lines: Trend/Regime on the first,
@@ -1134,7 +1241,14 @@ int StructureVote(const double &close[], int i, int period, double atr)
 //+------------------------------------------------------------------+
 double HurstExponent(const double &close[], int i, int window)
 {
-   if(i + 1 < window || window < 32) return(0.5);
+   //  The guard used to be "i + 1 < window", which let i == window - 1
+   //  through.  That makes start == 0, and the innermost read
+   //  p0 = close[start - 1] then reaches close[-1].  With the shipped
+   //  numbers (i = last bar of a 700+ pull, window = 256) start is far
+   //  from 0 so it never fired, but raising HURST_* or shrinking the
+   //  pull turns this into an out-of-bounds read.  Requiring i >= window
+   //  keeps start >= 1, so the smallest index ever touched is 0.
+   if(i < window || window < 32) return(0.5);
 
    int    scales[5] = {1, 2, 4, 8, 16};
    double lx[5], ly[5];
@@ -1210,10 +1324,16 @@ bool IsVolumeConfirmed(ENUM_TIMEFRAMES tf, int period = 20)
    if(CopyTickVolume(_Symbol, tf, 0, period + 2, vol) < period + 2)
       return(true); // Insufficient data, do not block
 
+   //  vol[0] is the still-forming bar, vol[1] is the bar under test, so
+   //  the baseline starts at vol[2].  The bar being judged used to sit
+   //  INSIDE its own average (the loop began at k = 1), which let a thin
+   //  bar drag down the very number it was compared against and quietly
+   //  pass the gate.  Excluding it is what makes the confirmation a test
+   //  rather than a tautology.
    long lastVol = vol[1]; // Most recently finished closed bar
    long sumVol  = 0;
    int  valid   = 0;
-   for(int k = 1; k <= period; k++)
+   for(int k = 2; k <= period + 1; k++)
    {
       if(vol[k] > 0)
       {
@@ -1249,6 +1369,33 @@ bool ScoreAllowsTrade(int dir, int score)
 }
 
 //==================================================================
+//  THE TWO NEW GATES
+//==================================================================
+//  Both answer the same question the Choppy veto always did - "may a NEW
+//  order leave the terminal for this row" - and both deliberately say
+//  nothing about what already exists.  Managing an open trade (trailstop,
+//  TP1/TP2/TP3, flip and box exits) never consults either one.
+//+------------------------------------------------------------------+
+//  The per-timeframe master switch: is this row in the game at all?
+bool AutoTradingAllowed(int i)
+{
+   if(i == 0) return(InpAutoTradeM5);
+   if(i == 1) return(InpAutoTradeM15);
+   if(i == 2) return(InpAutoTradeM30);
+   return(false);
+}
+
+//+------------------------------------------------------------------+
+//  The regime permission: Choppy veto, Mixed veto, or neither.
+//  Kept as one function so a new entry has a single place to ask, and so
+//  the panel, the plan, the placer and the pending manager cannot drift
+//  apart about which regimes are tradeable this session.
+bool RegimeBlocksEntry(int i)
+{
+   return(g_rows[i].choppyBlocked || g_rows[i].mixedBlocked);
+}
+
+//==================================================================
 //  EVALUATION
 //==================================================================
 void EvaluateAll()
@@ -1266,17 +1413,24 @@ void EvaluateAll()
          g_rows[r].trendDir     = 0;
          g_rows[r].mode         = 0;
          g_rows[r].choppyBlocked = false;
+         g_rows[r].mixedBlocked  = false;
          g_rows[r].blockReason  = "";
          g_rows[r].rngTop       = 0.0;
          g_rows[r].rngBot       = 0.0;
          g_rows[r].lastClose    = 0.0;
          g_rows[r].lastBar      = 0;
          g_rows[r].sigBirth     = 0;
+         g_rows[r].regime       = -1;
+         g_rows[r].regimeSrc    = -1;
       }
       return;
    }
 
-   for(int r = 0; r < TF_COUNT; r++)
+   //  SLOWEST FIRST.  M5 may now read its regime label off M15 or M30,
+   //  so those have to be measured before M5 asks.  Descending order
+   //  (M30, M15, M5) guarantees any row can borrow from a slower one and
+   //  still see a number computed on this very pass - not last bar's.
+   for(int r = TF_COUNT - 1; r >= 0; r--)
       EvaluateRow(r);
 }
 
@@ -1285,21 +1439,35 @@ void EvaluateRow(int idx)
 {
    double c[], h[], l[];
 
-   int want = BarsNeeded();   // 700 minimum, raised automatically by the periods above
+   //  Nothing may leak from the previous bar - including the label.
+   g_rows[idx].regime    = -1;
+   g_rows[idx].regimeSrc = -1;
+
+   int want = BarsNeeded();   // raised automatically by the periods / windows above
    if(!LoadClosed(_Symbol, g_rows[idx].tf, want, c, h, l))
    {
-      g_rows[idx].ok           = false;
-      g_rows[idx].score        = 0;
-      g_rows[idx].direction    = 0;
-      g_rows[idx].trendDir     = 0;
-      g_rows[idx].mode         = 0;
-      g_rows[idx].choppyBlocked = false;
-      g_rows[idx].blockReason  = "";
-      g_rows[idx].rngTop       = 0.0;
-      g_rows[idx].rngBot       = 0.0;
-      g_rows[idx].lastClose    = 0.0;
-      g_rows[idx].sigBirth     = 0;
-      return;
+      //  The long regime window made the pull much larger.  A broker with
+      //  shallow history must not lose the whole row over it, so fall
+      //  back to the shorter pull: the signal still works, and a Hurst
+      //  window that cannot be filled simply returns its neutral 0.5
+      //  (Mixed) instead of killing the row.
+      if(!LoadClosed(_Symbol, g_rows[idx].tf, BARS_BASE, c, h, l))
+      {
+         g_rows[idx].ok           = false;
+         g_rows[idx].score        = 0;
+         g_rows[idx].direction    = 0;
+         g_rows[idx].trendDir     = 0;
+         g_rows[idx].mode         = 0;
+         g_rows[idx].choppyBlocked = false;
+         g_rows[idx].mixedBlocked  = false;
+         g_rows[idx].blockReason  = "";
+         g_rows[idx].rngTop       = 0.0;
+         g_rows[idx].rngBot       = 0.0;
+         g_rows[idx].lastClose    = 0.0;
+         g_rows[idx].lastBar      = 0;
+         g_rows[idx].sigBirth     = 0;
+         return;
+      }
    }
 
    int n    = ArraySize(c);
@@ -1312,6 +1480,7 @@ void EvaluateRow(int idx)
    // ---- fresh state: nothing may leak from the previous bar --------
    g_rows[idx].mode          = 0;
    g_rows[idx].choppyBlocked = false;
+   g_rows[idx].mixedBlocked  = false;
    g_rows[idx].blockReason   = "";
    g_rows[idx].rngTop      = 0.0;
    g_rows[idx].rngBot      = 0.0;
@@ -1356,11 +1525,39 @@ void EvaluateRow(int idx)
    //                           off / the box is unusable; permission
    //                           Off places nothing at 2/3 or 3/3
    //     Mixed  (in between) : a limit entry waits half an ATR back
-   double H    = HurstExponent(c, last, HURST_WINDOW);
+   //  This row's OWN Hurst, over its own (now time-equalised) window.
+   //  It is always measured - the panel shows it, and it is the fallback
+   //  whenever there is nothing to borrow from - but it is only the label
+   //  the row ACTS on when no source is being used.
+   double H    = HurstExponent(c, last, g_rows[idx].hWindow);
    double ER   = EfficiencyRatio(c, last, ER_PERIOD);
-   int    game = 0;                       // 0 mixed | 1 steady | 2 choppy
-   if(H > g_rows[idx].hTrend)       game = 1;
-   else if(H < g_rows[idx].hRevert) game = 2;
+
+   //  Whose label decides the regime?  Borrowing needs a source that
+   //  measured successfully on THIS pass: EvaluateAll() runs slowest
+   //  first, so M15 and M30 are finished before M5 asks.  If the source
+   //  has no data, or has not run yet, M5 quietly keeps its own label
+   //  rather than trading on a stale one.
+   int regimeSrc = -1;
+   if(idx == 0 && InpM5RegimeFrom != M5_REGIME_OWN)
+   {
+      int src = (InpM5RegimeFrom == M5_REGIME_M30) ? 2 : 1;
+      if(g_rows[src].ok && g_rows[src].regime >= 0)
+         regimeSrc = src;
+   }
+
+   int game = 0;                       // 0 mixed | 1 steady | 2 choppy
+   if(regimeSrc >= 0)
+      game = g_rows[regimeSrc].regime;
+   else
+   {
+      if(H > g_rows[idx].hTrend)       game = 1;
+      else if(H < g_rows[idx].hRevert) game = 2;
+   }
+   //  One stored label, so the box decision, the Choppy veto, the
+   //  trailstop arm, the diary and the panel can never disagree about
+   //  which regime this row is in.
+   g_rows[idx].regime    = game;
+   g_rows[idx].regimeSrc = regimeSrc;
 
    string emDash = ShortToString((ushort)0x2014); // U+2014 em dash without non-ASCII source bytes
 
@@ -1387,6 +1584,14 @@ void EvaluateRow(int idx)
    bool choppyBlocked = (!InpAllowChoppyTrade && game == 2 && dir != 0);
    if(choppyBlocked)
       g_rows[idx].blockReason = "choppy " + emDash + " Choppy Trade is Off";
+
+   //  The Mixed permission, the same shape as the Choppy one: it vetoes
+   //  NEW entries only, never closes or abandons anything already open,
+   //  and leaves the would-be direction on the panel (greyed) so the row
+   //  still says what it would do if the switch were on.
+   bool mixedBlocked = (!InpAllowMixedTrade && game == 0 && dir != 0);
+   if(mixedBlocked)
+      g_rows[idx].blockReason = "mixed " + emDash + " Mixed Trade is Off";
 
    // ---- the entry style: an allowed Choppy 2/3 may use the box ----
    //  mode 2 means "this limit's price comes from the box".  A 3/3 order
@@ -1429,6 +1634,7 @@ void EvaluateRow(int idx)
    g_rows[idx].direction = dir;
    g_rows[idx].trendDir  = v1;            // the TREND line: vote 1, not the trade
    g_rows[idx].choppyBlocked = choppyBlocked;
+   g_rows[idx].mixedBlocked  = mixedBlocked;
    g_rows[idx].mode      = (dir != 0) ? mode : 0;
    g_rows[idx].hurst     = H;
    g_rows[idx].er        = ER;
@@ -1689,14 +1895,24 @@ void UpdatePlanRow(int i)
    bool openSameDirForPlan = (g_auto[i].active && g_auto[i].isOpen &&
                               g_auto[i].dir == g_rows[i].direction &&
                               g_auto[i].entryPrice > 0.0);
-   if(g_rows[i].choppyBlocked && !openSameDirForPlan)
+   //  A row that may not open anything publishes no executable plan:
+   //  either it is switched off by InpAutoTradeM5/M15/M30, or the Choppy
+   //  / Mixed permission vetoes new entries.  Either way the plan carries
+   //  the reason in words, and an already-open same-direction trade keeps
+   //  its plan (openSameDirForPlan) because that trade is only being
+   //  MANAGED - a veto must never abandon it.
+   if(!openSameDirForPlan && (!AutoTradingAllowed(i) || RegimeBlocksEntry(i)))
    {
       g_plans[i].state = 0;
       g_plans[i].kind  = "HOLD";
       string emDash = ShortToString((ushort)0x2014); // U+2014 em dash
-      g_plans[i].note  = (g_rows[i].blockReason != "")
-                         ? g_rows[i].blockReason
-                         : ("choppy " + emDash + " Choppy Trade is Off");
+      if(!AutoTradingAllowed(i))
+         g_plans[i].note = "autotrading off " + emDash + " " + g_rows[i].tag +
+                           " is switched off";
+      else
+         g_plans[i].note = (g_rows[i].blockReason != "")
+                           ? g_rows[i].blockReason
+                           : ("regime " + emDash + " new entries are off");
       return;
    }
 
@@ -3405,9 +3621,15 @@ string HealthNoteText()
 //+------------------------------------------------------------------+
 int DiaryRegimeCode(int i)
 {
-   if(g_rows[i].hurst > g_rows[i].hTrend)  return(1);
-   if(g_rows[i].hurst < g_rows[i].hRevert) return(2);
-   return(0);
+   //  The regime the trade actually acted on, so the diary can be read
+   //  against what the EA did rather than against a number it ignored.
+   if(g_rows[i].regime < 0)
+   {
+      if(g_rows[i].hurst > g_rows[i].hTrend)  return(1);
+      if(g_rows[i].hurst < g_rows[i].hRevert) return(2);
+      return(0);
+   }
+   return(g_rows[i].regime);
 }
 
 //+------------------------------------------------------------------+
@@ -5054,8 +5276,23 @@ double CalcTP2CloseLot(double curLot)
 //+------------------------------------------------------------------+
 bool TrendMatchForTF(int i)
 {
-   if(i == 0 || !InpRequireM15M30SameTrend)
-      return(g_rows[i].ok && g_rows[i].direction != 0);
+   //  M5 used to be excluded by NAME - "if(i == 0 ...)" returned true
+   //  before anything else, so no setting anywhere could ever give the
+   //  fastest row any higher-timeframe context.  It is now a switch like
+   //  any other: off by default, because a direction veto costs 15-30
+   //  minutes and an M5 reading only lives 10-15, so turning it on stops
+   //  most of the trades it would allow.  The door exists now; whether to
+   //  walk through it is the operator's call.
+   if(i == 0)
+   {
+      if(!g_rows[0].ok || g_rows[0].direction == 0) return(false);
+      if(!InpM5RequireHigher)                        return(true);
+      if(!g_rows[1].ok || g_rows[1].direction == 0)  return(false);
+      return(g_rows[1].direction == g_rows[0].direction);
+   }
+
+   if(!g_rows[i].ok || g_rows[i].direction == 0) return(false);
+   if(!InpRequireM15M30SameTrend)                return(true);
    if(!g_rows[1].ok || !g_rows[2].ok)
       return(false);
    if(g_rows[1].direction == 0 || g_rows[2].direction == 0)
@@ -5209,9 +5446,13 @@ void InitTrailState(int i)
       return;
    }
 
+   //  The EFFECTIVE label (own or borrowed), not the row's raw Hurst -
+   //  an M5 trade borrowing M15's regime must also trail on M15's regime,
+   //  or it would pick its trailstop arm from a different market read
+   //  than the one that shaped its entry.
    bool steady = (g_rows[i].ok && !g_auto[i].isRange &&
                   g_rows[i].direction == g_auto[i].dir &&
-                  g_rows[i].hurst > g_rows[i].hTrend);
+                  g_rows[i].regime == 1);
 
    g_auto[i].trailSteady    = steady;
    g_auto[i].trailPct       = ClampTrailPct(steady ? InpTrailPctSteady
@@ -5399,11 +5640,24 @@ double ValidLimitPrice(int dir, double wantPrice, double bid, double ask, double
 //+------------------------------------------------------------------+
 //  Has a deal for timeframe `i` already entered on `barTime`?
 //+------------------------------------------------------------------+
+//  A pure question: "has this row already opened a trade on this bar?"
+//
+//  Two things were wrong here.  First, it WROTE to g_auto[].lastSignalBar
+//  while answering - a side effect inside a predicate, and the only place
+//  a freshly placed order was ever stamped with its bar, so the answer
+//  could not be asked twice without changing it.  PlacePlanOrder() now
+//  stamps the bar itself and this function only reads.
+//
+//  Second, it failed OPEN: when HistorySelect() failed it returned false
+//  ("no trade on this bar"), which is exactly the answer that lets a
+//  second order go out on a bar that already has one.  An unknown history
+//  must block a new order, not authorise it, so every doubt now returns
+//  true.
 bool HasTradedOnBar(int i, datetime barTime)
 {
-   if(barTime <= 0) return(false);
-   if(g_auto[i].lastSignalBar == barTime) return(true);
-   if(!HistorySelect(barTime, TimeCurrent() + 60)) return(false);
+   if(barTime <= 0)                              return(true);  // unknown -> block
+   if(g_auto[i].lastSignalBar == barTime)        return(true);
+   if(!HistorySelect(barTime, TimeCurrent() + 60)) return(true);  // history unavailable -> block
    long magic = MagicForTF(i);
    int  total = HistoryDealsTotal();
    for(int d = 0; d < total; d++)
@@ -5413,10 +5667,7 @@ bool HasTradedOnBar(int i, datetime barTime)
       if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol) continue;
       if(HistoryDealGetInteger(deal, DEAL_MAGIC) != magic)   continue;
       if(HistoryDealGetInteger(deal, DEAL_ENTRY) == DEAL_ENTRY_IN)
-      {
-         g_auto[i].lastSignalBar = barTime;
          return(true);
-      }
    }
    return(false);
 }
@@ -5866,7 +6117,12 @@ bool PlacePlanOrder(int i)
    //  open when its row turned Choppy; that plan must never be sent as
    //  a new order.  Choppy Trade Off means no market and no limit order
    //  leaves the terminal from this row, whatever a caller requests.
-   if(g_rows[i].choppyBlocked) return(false);
+   //  The per-timeframe master switch: a row switched off sends nothing,
+   //  whatever its score or regime.  (An open trade on that row is still
+   //  managed - this function only ever gates NEW orders.)
+   if(!AutoTradingAllowed(i)) return(false);
+   //  The regime permission, Choppy and Mixed alike.
+   if(RegimeBlocksEntry(i))   return(false);
    //  THE SCORE GATE, second key on the same door.  EvaluateRow() already
    //  refuses to publish a row whose score does not support its
    //  direction, so this can only fire if that were ever bypassed - but
@@ -6202,12 +6458,13 @@ void ManageAutoBar()
       {
          int  dir     = g_auto[i].dir;
 
-         // Choppy Trade OFF: if this row has turned Choppy, its waiting
-         // order is still an unfilled NEW entry.  Cancel it on this
-         // closed-bar pass instead of refreshing or upgrading it.  An
-         // already-open position is handled in CASE A and is untouched
-         // by this veto.
-         if(g_rows[i].choppyBlocked)
+         // A row that may not open anything cannot keep a waiting order:
+         // a pending is still an unfilled NEW entry, whether the row was
+         // switched off (InpAutoTradeM5/M15/M30) or vetoed by the Choppy
+         // / Mixed permission.  Cancel it on this closed-bar pass instead
+         // of refreshing or upgrading it.  An already-open position is
+         // handled in CASE A and is untouched by either veto.
+         if(!AutoTradingAllowed(i) || RegimeBlocksEntry(i))
          {
             if(TradeDeleteOrder(g_auto[i].ticket))
             {
@@ -6322,7 +6579,8 @@ void ManageAutoBar()
       // ---- CASE C: Flat on this timeframe -> check new placement ----
       if(!g_auto[i].active)
       {
-         if(timerAllowsPlacement && g_rows[i].ok && !g_rows[i].choppyBlocked &&
+         if(timerAllowsPlacement && AutoTradingAllowed(i) &&
+            g_rows[i].ok && !RegimeBlocksEntry(i) &&
             g_rows[i].direction != 0 && g_plans[i].state == 2 &&
             TrendMatchForTF(i) && !HasTradedOnBar(i, g_rows[i].lastBar))
          {
@@ -6668,20 +6926,39 @@ void UpdateAutoPanel()
 //     Mixed   - no clear habit, nothing to trust either way
 //     Choppy  - moves tend to turn back on themselves
 //+------------------------------------------------------------------+
+//  The label the row is acting on, with its source named.  A borrowed
+//  label must never be mistaken for the row's own reading - "Choppy<-M15"
+//  says both things at once, so the panel can never overstate what M5
+//  measured for itself.
 string RegimeText(int idx)
 {
-   double H = g_rows[idx].hurst;
-   if(H > g_rows[idx].hTrend)  return("Steady");
-   if(H < g_rows[idx].hRevert) return("Choppy");
-   return("Mixed");
+   string base = "Mixed";
+   if(g_rows[idx].regime == 1)            base = "Steady";
+   else if(g_rows[idx].regime == 2)       base = "Choppy";
+   else if(g_rows[idx].regime < 0)
+   {
+      //  Not evaluated yet - fall back to the raw Hurst so the very first
+      //  paint still shows something meaningful.
+      if(g_rows[idx].hurst > g_rows[idx].hTrend)       base = "Steady";
+      else if(g_rows[idx].hurst < g_rows[idx].hRevert) base = "Choppy";
+   }
+   if(g_rows[idx].regimeSrc >= 0)
+      return(base + "<-" + g_rows[g_rows[idx].regimeSrc].tag);
+   return(base);
 }
 
 //+------------------------------------------------------------------+
 color RegimeColor(int idx)
 {
-   double H = g_rows[idx].hurst;
-   if(H > g_rows[idx].hTrend)  return(clrDeepSkyBlue);
-   if(H < g_rows[idx].hRevert) return(clrOrange);
+   int g = g_rows[idx].regime;
+   if(g < 0)
+   {
+      if(g_rows[idx].hurst > g_rows[idx].hTrend)       g = 1;
+      else if(g_rows[idx].hurst < g_rows[idx].hRevert) g = 2;
+      else                                             g = 0;
+   }
+   if(g == 1) return(clrDeepSkyBlue);
+   if(g == 2) return(clrOrange);
    return(clrSilver);
 }
 
@@ -7187,7 +7464,11 @@ void DrawSupportedPanel()
          //  A Choppy-vetoed row keeps its would-be BUY/SELL word (that is
          //  useful information, and an open trade still needs the same
          //  direction for management), but grey says no NEW order may use it.
-         bool greyed = g_rows[i].choppyBlocked;
+         //  Greyed out for any reason a new order would be refused: the
+         //  row is switched off, or the regime permission vetoes it.  The
+         //  would-be direction stays on screen either way - that is useful
+         //  information, and an open trade still needs it for management.
+         bool greyed = (!AutoTradingAllowed(i) || RegimeBlocksEntry(i));
          if(sigDir == 0)
          {
             if(g_rows[i].score >= InpBuyScore)       { sigDir = 1;  greyed = true; }
@@ -7290,7 +7571,12 @@ void PlanColumns(int &cA, int &vA, int &cB, int &vB, int &cC, int &vC)
    cB = (int)MathMax(ColX(PLAN_COL_B), vA + wA + em * 2);
    vB = cB + em * PLAN_LBL_C;
 
-   int wB = 6 * em;                  // "Choppy" / "+3 / 3" from the rows
+   //  "Choppy" (6 chars) used to be the widest thing a regime cell could
+   //  hold; a borrowed label now reads "Choppy<-M15" (11), so the width is
+   //  measured from what is actually on screen instead of assumed.
+   int wB = 6 * em;
+   for(int i = 0; i < TF_COUNT; i++)
+      wB = (int)MathMax(wB, StringLen(RegimeText(i)) * em);
    for(int i = 0; i < TF_COUNT; i++)
       for(int l = 0; l < g_plans[i].lines; l++)
          if(g_plans[i].lbl[l][1] != "")
