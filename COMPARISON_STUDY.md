@@ -1,5 +1,7 @@
 # SimpleEA Compared with Predict_X, Emtt and Autotrader
 
+> **Implementation amendment (28 October 2026):** SimpleEA now attaches a planned SL and TP3 to every new order, keeps SL unchanged after entry, and uses only TP1/TP2 partials, TP3 final close and SL. References below to optional initial stops, breakeven, trailing, score/flip/box exits describe the version reviewed on 25 October, not the current build.
+
 **Date:** 25 October 2026
 **Type:** Study only — no code was changed for this document.
 **Scope:** Static review of the public repositories `hamamun/Predict_X`, `hamamun/Emtt`, `hamamun/Autotrader` and `hamamun/SimpleEA`.
