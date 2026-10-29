@@ -39,7 +39,7 @@ using ENUM_SYMBOL_CHART_MODE = int;
 const color clrGray=1, clrSilver=2, InpTitleColor=3, InpBuyColor=4, InpSellColor=5, clrOrange=6;
 
 struct MqlRates { double close=0; };
-struct SStructureGeometry { double entry=0,stop=0,cap[3]={}; };
+struct SStructureGeometry { double entry=0,stop=0,cap[3]={},nearBarrier=0; int issue=0; };
 struct SObservationCache { int filled=40,eligible=50; double q1=.5,q2=1,q3=1.5; };
 struct Row {
     bool ok=true;
@@ -61,8 +61,9 @@ bool InpAutoTrading=true,InpUseRisk=true,InpUseMinLot=false;
 double InpRiskPct=.5;
 bool laneEnabled=true,regimeBlocked=false,trendMatch=true,timerAllowed=true;
 bool terminalAllowed=true,openPosition=false,uncertainOrder=false,hasHistory=true,geometryOK=true,hasCaps=true;
-int accountMode=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING;
+int accountMode=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING,symbolDigits=2,stopLevel=1;
 double point=.01,tick=.01,bid=99.99,ask=100,balance=10000,pv=1,minLot=.01;
+double geometryRisk=.5, testBarrier=0, cap0=.30, cap1=.60, cap2=.90;
 
 const char *format_arg(const string &v) { return v.c_str(); }
 template<class T> T format_arg(T v) { return v; }
@@ -82,9 +83,9 @@ double SymbolInfoDouble(const string&,int field) {
     }
 }
 long SymbolInfoInteger(const string&,int field) {
-    if(field==SYMBOL_DIGITS)return 2;
+    if(field==SYMBOL_DIGITS)return symbolDigits;
     if(field==SYMBOL_CHART_MODE)return SYMBOL_CHART_MODE_BID;
-    if(field==SYMBOL_TRADE_STOPS_LEVEL)return 1;
+    if(field==SYMBOL_TRADE_STOPS_LEVEL)return stopLevel;
     return 0;
 }
 long AccountInfoInteger(int) { return accountMode; }
@@ -111,9 +112,10 @@ bool StructureGeometry(const std::vector<MqlRates>&,int,int,int dir,bool market,
                        double bidNow,double askNow,double,double,double,SStructureGeometry &out) {
     out = {};
     out.entry=market ? (dir>0 ? askNow : bidNow) : (dir>0 ? 99.70 : 100.30);
-    if(!geometryOK)return false;
-    out.stop=out.entry-dir*.5;
-    if(hasCaps) {out.cap[0]=.30;out.cap[1]=.60;out.cap[2]=.90;}
+    if(!geometryOK){out.issue=4;return false;} // no stop swing
+    out.stop=out.entry-dir*geometryRisk;
+    out.nearBarrier=testBarrier;
+    if(hasCaps) {out.cap[0]=cap0;out.cap[1]=cap1;out.cap[2]=cap2;}
     return true;
 }
 void ObserveLane(int i,int,int,bool,bool,double,double,double,double) { g_observations[i]=testObs; }
@@ -135,6 +137,7 @@ void reset() {
     openPosition=false;uncertainOrder=false;hasHistory=true;geometryOK=true;hasCaps=true;
     accountMode=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING;point=.01;tick=.01;bid=99.99;ask=100;
     balance=10000;pv=1;minLot=.01;testObs=SObservationCache{};
+    symbolDigits=2;stopLevel=1;geometryRisk=.5;testBarrier=0;cap0=.30;cap1=.60;cap2=.90;
     for(int i=0;i<3;i++){g_rows[i]=Row{};g_plans[i]=SPlanRow{};g_observations[i]=SObservationCache{};}
 }
 void check_veto(const string &reason) {
@@ -162,7 +165,7 @@ int main() {
     reset();testObs.filled=29;UpdatePlanRow(0);
     check(g_rows[0].direction==1 && g_plans[0].state==0 && g_plans[0].kind=="HOLD","insufficient history keeps BUY but blocks trading");
     check(g_plans[0].val[0][0]=="100.00" && g_plans[0].val[0][1]=="99.50","held candidate entry and stop visible");
-    check(g_plans[0].lbl[1][0]=="TP1~:" && g_plans[0].val[1][0]=="100.30", "actual swing barrier is indicative only");
+    check(g_plans[0].lbl[1][0]=="TP1~:" && g_plans[0].val[1][0]=="100.30 30.0pts", "actual swing barrier and directed distance are indicative only");
     check(g_plans[0].val[2][0]=="swing-only" && g_plans[0].val[2][1]=="NO ORDER", "no unsupported executable TP");
     check(g_plans[0].entryPrice==0 && g_plans[0].tp1Price==0,"preview does not populate executable prices");
     check(g_plans[0].val[0][2]=="29/50 analogs", "insufficient analog count is honest");
@@ -171,12 +174,42 @@ int main() {
     check(g_plans[0].val[1][0]=="--" && g_plans[0].val[1][2]=="--", "missing swings do not invent targets");
     reset();geometryOK=false;UpdatePlanRow(0);
     check(g_plans[0].state==0 && g_plans[0].val[0][1]=="--" && g_plans[0].val[1][0]=="--", "missing structure does not invent stop or targets");
+    check(g_plans[0].val[3][0]=="no stop swing" && g_plans[0].val[2][2]=="1.0 pts", "geometry failure and spread are specific");
     reset();hasHistory=false;UpdatePlanRow(0);
     check(g_plans[0].state==0 && g_plans[0].lines==1 && g_plans[0].note=="closed-bar structure still loading", "short structure history holds");
     reset();testObs.q1=0;UpdatePlanRow(0);
     check(g_plans[0].state==0 && g_plans[0].val[3][0]=="weak follow-through", "weak observations hold");
     reset();testObs.q1=.01;UpdatePlanRow(0);
-    check(g_plans[0].state==0 && g_plans[0].val[3][0]=="cost/broker/order", "collapsed or spread-dominated target holds");
+    check(g_plans[0].state==0 && g_plans[0].val[3][0]=="TP1 order/tick", "collapsed TP1 gets exact reason");
+    check(g_plans[0].lbl[2][2]=="Spread:" && g_plans[0].val[2][2]=="1.0 pts", "held plan shows spread at evaluation");
+    check(g_plans[0].lbl[3][1]=="RawTP1:" && g_plans[0].val[3][1]=="0.5 pts", "uncapped observed distance visible");
+    check(g_plans[0].lbl[3][2]=="Broker:" && g_plans[0].val[3][2]=="min 1.0 / tick 1.0 pts", "broker stop level and tick visible");
+    reset();testObs.q1=.02;UpdatePlanRow(0);
+    check(g_plans[0].state==0 && g_plans[0].val[3][0]=="TP1 <= spread", "equal-to-spread TP1 gets exact reason");
+    check(g_plans[0].val[2][0]=="observed" && g_plans[0].val[3][1]=="1.0 pts", "historical, not capped, target identified");
+    reset();cap0=.01;UpdatePlanRow(0);
+    check(g_plans[0].state==0 && g_plans[0].val[3][0]=="TP1 <= spread", "capped TP1 does not bypass spread");
+    check(g_plans[0].val[2][0]=="observed + swing" && g_plans[0].val[3][1]=="25.0 pts", "swing cap distinguished from observed distance");
+    reset();testBarrier=99.99;UpdatePlanRow(0);
+    check(g_plans[0].state==0 && g_plans[0].val[3][0]=="swing in spread", "confirmed near barrier holds");
+    check(g_plans[0].lbl[3][1]=="Swing:" && g_plans[0].val[3][1]=="99.99", "actual near barrier displayed");
+    reset();testBarrier=99.99;testObs.q1=.01;UpdatePlanRow(0);
+    check(g_plans[0].val[3][0]=="swing in spread", "structural barrier is checked before target grid");
+
+    // Reproduce the reported SELL price geometry without claiming the
+    // broker's unseen spread or raw percentile values are known.
+    reset();symbolDigits=5;point=tick=.00001;bid=1.11365;ask=1.11369;geometryRisk=.00067;
+    g_rows[0].direction=-1;g_rows[0].score=-3;testObs.filled=207;testObs.eligible=207;
+    testObs.q1=.00003/.00067;testObs.q2=.00018/.00067;testObs.q3=.00038/.00067;UpdatePlanRow(0);
+    check(g_rows[0].direction==-1 && g_plans[0].state==0, "screenshot-like bearish signal remains while entry is held");
+    check(g_plans[0].val[0][0]=="1.11365" && g_plans[0].val[0][1]=="1.11432" && g_plans[0].val[1][0]=="1.11362 3.0pts", "screenshot-like M5 prices and distance");
+    check(g_plans[0].val[3][0]=="TP1 <= spread" && g_plans[0].val[2][2]=="4.0 pts" && g_plans[0].val[3][1]=="3.0 pts", "diagnose screenshot-like spread failure");
+    reset();symbolDigits=5;point=tick=.00001;bid=1.11365;ask=1.11369;geometryRisk=.00025;
+    g_rows[2].direction=-1;g_rows[2].score=-3;g_rows[2].tag="M30";g_rows[2].tf=1800;
+    testObs.filled=78;testObs.eligible=78;testObs.q1=.00002/.00025;testObs.q2=.00007/.00025;testObs.q3=.00021/.00025;UpdatePlanRow(2);
+    check(g_plans[2].val[0][1]=="1.11390" && g_plans[2].val[1][0]=="1.11363 2.0pts", "screenshot-like M30 prices and distance");
+    check(g_plans[2].val[3][0]=="TP1 <= spread" && g_plans[2].val[2][2]=="4.0 pts" && g_plans[2].val[3][1]=="2.0 pts", "M30 reports its own spread failure");
+
     reset();balance=10;UpdatePlanRow(0);
     check(g_plans[0].state==0 && g_plans[0].val[3][0]=="risk exceeds budget", "minimum lot over budget holds");
 
@@ -193,6 +226,8 @@ int main() {
     check(g_plans[0].state==2 && g_plans[0].slPrice>g_plans[0].entryPrice && g_plans[0].tp3Price<g_plans[0].tp2Price && g_plans[0].tp2Price<g_plans[0].tp1Price,"SELL exits ordered around entry");
     reset();g_rows[0].score=2;UpdatePlanRow(0);
     check(g_plans[0].state==2 && !g_plans[0].market && eq(g_plans[0].entryPrice,99.7),"eligible pending plan also enabled");
+    reset();g_rows[0].direction=-1;g_rows[0].score=-2;UpdatePlanRow(0);
+    check(g_plans[0].state==2 && !g_plans[0].market && eq(g_plans[0].entryPrice,100.3),"eligible SELL pending plan also enabled");
     reset();g_rows[0].direction=0;UpdatePlanRow(0);
     check(g_plans[0].state==0 && g_plans[0].lines==1,"signal HOLD has no fabricated plan");
     reset();openPosition=true;UpdatePlanRow(0);

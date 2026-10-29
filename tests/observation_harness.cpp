@@ -49,14 +49,14 @@ template<class T> void ArraySetAsSeries(std::vector<T>&, bool) {}
 #define STRUCT_PERIOD 20
 #define STRUCT_DEAD_ATR .25
 struct MqlRates { datetime time=0; double open=0,high=0,low=0,close=0; int spread=0; long tick_volume=0; };
-struct SStructureGeometry { double entry=0,stop=0,cap[3]={}; };
+struct SStructureGeometry { double entry=0,stop=0,cap[3]={},nearBarrier=0; int issue=0; };
 struct SObservationCache { datetime bar=0; int dir=0,score=0,regime=0,regimeSrc=0; bool market=false,range=false; int eligible=0,filled=0; double q1=0,q2=0,q3=0; } g_observations[3];
 struct Row { int tf=0,hWindow=0,regime=0,regimeSrc=-1; double hTrend=100,hRevert=-100; datetime lastBar=1; } g_rows[3];
 string _Symbol="SYNTHETIC";
 int InpBuyScore=2, InpSellScore=-2;
 bool InpRangeMode=true;
 std::vector<MqlRates> fixture[3];
-int reads=0;
+int reads=0, nearBarrierRejected=0;
 int PeriodSeconds(int tf) { return tf; }
 int CopyRates(const string&, int tf, int, int n, std::vector<MqlRates> &out) {
     ++reads;
@@ -99,7 +99,7 @@ int main() {
         for(int last=11999;last>11499 && o.q1>0;last--) {
             auto &bars=fixture[i];double bid=bars[last].close,ask=bid+.01;
             SStructureGeometry geo{};
-            if(!StructureGeometry(bars,last,i,1,true,false,bid,ask,.01,.01,.01,geo))continue;
+            if(!StructureGeometry(bars,last,i,1,true,false,bid,ask,.01,.01,.01,geo) || geo.nearBarrier>0)continue;
             double risk=geo.entry-geo.stop;
             double d[3]={risk*o.q1,risk*o.q2,risk*o.q3};
             for(int k=0;k<3;k++)if(geo.cap[k]>0)d[k]=std::min(d[k],geo.cap[k]);
@@ -113,6 +113,12 @@ int main() {
     }
     check(enough>0,"full observation pipeline finds enough synthetic analogs in at least one lane");
     check(validPlans>0,"structure plus observed quantiles can produce a valid synthetic plan");
+    // Wider recorded spreads create some historical in-spread pivots; the
+    // exact production exclusion is instrumented to verify it is exercised.
+    for(auto &b:fixture[0]) b.spread=10;
+    g_rows[0].lastBar++;nearBarrierRejected=0;
+    ObserveLane(0,1,3,true,false,.01,.01,.01,.01);
+    check(nearBarrierRejected>0,"historical near-barrier setups are excluded before counting");
     ObserveLane(1,-1,-3,true,false,.01,.01,.01,.01);
     check(g_observations[1].filled>0 && g_observations[1].dir==-1,"full SELL replay has completed observations");
     ObserveLane(1,1,2,false,false,.01,.01,.01,.01);

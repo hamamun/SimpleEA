@@ -1623,11 +1623,25 @@ void ClearPlanRow(int i)
 // no favorable extreme. Samples end at the fixed horizon even if an
 // actual trade would have closed earlier. No unfinished window is used.
 
+enum ENUM_STRUCTURE_ISSUE
+{
+   STRUCTURE_OK = 0,
+   STRUCTURE_INPUT,
+   STRUCTURE_NO_ENTRY,
+   STRUCTURE_ENTRY_DISTANCE,
+   STRUCTURE_NO_STOP,
+   STRUCTURE_STOP_PRICE,
+   STRUCTURE_STOP_DISTANCE,
+   STRUCTURE_STOP_GRID
+};
+
 struct SStructureGeometry
 {
    double entry;
    double stop;
-   double cap[3];             // distance to the first three opposing swings
+   double cap[3];             // executable-side distances to confirmed opposing swings
+   double nearBarrier;        // confirmed opposing swing inside spread; 0 if absent
+   int issue;                 // first entry/stop geometry failure
 };
 
 struct SObservationCache
@@ -1722,9 +1736,15 @@ bool StructureGeometry(const MqlRates &bars[], int last, int i, int dir,
 {
    out.entry = 0.0;
    out.stop = 0.0;
+   out.nearBarrier = 0.0;
+   out.issue = STRUCTURE_OK;
    for(int j = 0; j < 3; j++) out.cap[j] = 0.0;
    if(last < 2 || dir == 0 || point <= 0.0 || tick <= 0.0 ||
-      bid <= 0.0 || ask < bid) return(false);
+      bid <= 0.0 || ask < bid)
+   {
+      out.issue = STRUCTURE_INPUT;
+      return(false);
+   }
 
    int first = (int)MathMax(1, last - StructureWindow(i) + 1);
    double offset = MathMax(tick, minStop);
@@ -1755,10 +1775,13 @@ bool StructureGeometry(const MqlRates &bars[], int last, int i, int dir,
          }
       }
    }
-   if(out.entry <= 0.0) return(false);
+   if(out.entry <= 0.0) { out.issue = STRUCTURE_NO_ENTRY; return(false); }
    if(!market && ((dir > 0 && out.entry > ask - offset + 1e-9 * tick) ||
                   (dir < 0 && out.entry < bid + offset - 1e-9 * tick)))
+   {
+      out.issue = STRUCTURE_ENTRY_DISTANCE;
       return(false); // never move a structure entry to an invented broker price
+   }
 
    // A limit's own entry pivot cannot also be its invalidation pivot.
    // Search a separate, confirmed level beyond entry and add one live
@@ -1773,31 +1796,68 @@ bool StructureGeometry(const MqlRates &bars[], int last, int i, int dir,
          bars[k].high > out.entry + 0.5 * tick &&
          (support <= 0.0 || bars[k].high < support)) support = bars[k].high;
    }
-   if(support <= 0.0) return(false);
+   if(support <= 0.0) { out.issue = STRUCTURE_NO_STOP; return(false); }
    double buffer = MathMax(tick, ask - bid);
    out.stop = (dir > 0) ? PriceDown(support - buffer, tick)
                         : PriceUp(support + buffer, tick);
    double stopBase = market ? (dir > 0 ? bid : ask) : out.entry;
-   if(out.stop <= 0.0 || (double)dir * (stopBase - out.stop) < minStop - 1e-9 * tick ||
-      (double)dir * (out.entry - out.stop) < tick - 1e-9 * tick)
+   if(out.stop <= 0.0) { out.issue = STRUCTURE_STOP_PRICE; return(false); }
+   if((double)dir * (stopBase - out.stop) < minStop - 1e-9 * tick)
+   {
+      out.issue = STRUCTURE_STOP_DISTANCE;
       return(false);
+   }
+   if((double)dir * (out.entry - out.stop) < tick - 1e-9 * tick)
+   {
+      out.issue = STRUCTURE_STOP_GRID;
+      return(false);
+   }
 
    double caps[3] = {0.0, 0.0, 0.0};
+   double spread = ask - bid;
+   double eps = 1e-7 * tick;
    for(int k = first; k < last; k++)
    {
       if(dir > 0 && ConfirmedSwingHigh(bars, k, last))
       {
-         double p = PriceDown(bars[k].high, tick);
-         InsertStructureCap(p - out.entry, tick, caps);
+         // Bid bars already describe the BUY's executable exit side.
+         double exitPrice = PriceDown(bars[k].high, tick);
+         if(exitPrice > out.entry + eps)
+            InsertStructureCap(exitPrice - out.entry, tick, caps);
+         else if(exitPrice >= out.entry - spread - eps && exitPrice > 0.0 &&
+                 (out.nearBarrier <= 0.0 || exitPrice < out.nearBarrier))
+            out.nearBarrier = exitPrice;
       }
       if(dir < 0 && ConfirmedSwingLow(bars, k, last))
       {
-         double p = PriceUp(bars[k].low, tick);
-         InsertStructureCap(out.entry - p, tick, caps);
+         // The bars are Bid, but SELL exits execute on Ask. Approximate
+         // the Ask at this support with the current spread, not Bid alone.
+         double bidBarrier = PriceUp(bars[k].low, tick);
+         double exitPrice = PriceUp(bidBarrier + spread, tick);
+         if(bidBarrier <= out.entry + eps && exitPrice >= out.entry - eps && exitPrice > 0.0)
+         {
+            if(out.nearBarrier <= 0.0 || exitPrice > out.nearBarrier)
+               out.nearBarrier = exitPrice;
+         }
+         else if(bidBarrier < out.entry - eps)
+            InsertStructureCap(out.entry - exitPrice, tick, caps);
       }
    }
    for(int j = 0; j < 3; j++) out.cap[j] = caps[j];
    return(true);
+}
+
+// Human-readable first failure from the same geometry used by replay and plans.
+string StructureIssueText(const int issue)
+{
+   if(issue == STRUCTURE_INPUT) return("structure data");
+   if(issue == STRUCTURE_NO_ENTRY) return("no valid entry swing");
+   if(issue == STRUCTURE_ENTRY_DISTANCE) return("limit broker/tick");
+   if(issue == STRUCTURE_NO_STOP) return("no stop swing");
+   if(issue == STRUCTURE_STOP_PRICE) return("invalid stop price");
+   if(issue == STRUCTURE_STOP_DISTANCE) return("SL broker minimum");
+   if(issue == STRUCTURE_STOP_GRID) return("SL order/tick");
+   return("no structure");
 }
 
 // Same zero-crossing procedure as AdaptiveCyclePeriod(), but explicitly
@@ -2086,7 +2146,10 @@ void ObserveLane(int i, int dir, int score, bool market, bool range,
       int pastRegime = H > g_rows[i].hTrend ? 1 : (H < g_rows[i].hRevert ? 2 : 0);
       if(pastRegime != obs.regime) continue;
 
-      double spread = ObservationSpread(bars[t + 1], point, currentSpread);
+      // Decide using the last completed bar's spread as a proxy, not a
+      // later bar's recorded spread. Missing spreads use today's fallback;
+      // neither proxy reconstructs the true opening tick.
+      double spread = ObservationSpread(bars[t], point, currentSpread);
       double bid = bars[t + 1].open;
       double ask = bid + spread;
       double top, bot;
@@ -2098,6 +2161,9 @@ void ObserveLane(int i, int dir, int score, bool market, bool range,
       SStructureGeometry geometry;
       if(!StructureGeometry(bars, t, i, dir, pastMarket, pastRange,
                             bid, ask, point, tick, minStop, geometry)) continue;
+      // Match the live structural veto using the closed-bar spread proxy.
+      // This still cannot reconstruct the true opening tick or later spread.
+      if(geometry.nearBarrier > 0.0) continue;
       obs.eligible++;
       double mfeR = 0.0;
       if(!ReplayObservation(bars, t, horizon, dir, pastMarket, geometry,
@@ -2148,6 +2214,10 @@ void ShowHeldPlan(int i, string why, string basis, double entry, double stop,
    g_plans[i].val[0][2] = filled >= 0 ? StringFormat("%d/%d analogs", filled, eligible) : "--";
    g_plans[i].lbl[1][0] = "TP1~:";
    g_plans[i].val[1][0] = tp1 > 0.0 ? DoubleToString(tp1, dg) : "--";
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(tp1 > 0.0 && entry > 0.0 && point > 0.0 && g_rows[i].direction != 0)
+      g_plans[i].val[1][0] = StringFormat("%s %.1fpts", DoubleToString(tp1, dg),
+                                         (double)g_rows[i].direction * (tp1 - entry) / point);
    g_plans[i].lbl[1][1] = "TP2~:";
    g_plans[i].val[1][1] = tp2 > 0.0 ? DoubleToString(tp2, dg) : "--";
    g_plans[i].lbl[1][2] = "TP3~:";
@@ -2164,37 +2234,73 @@ void ShowHeldPlan(int i, string why, string basis, double entry, double stop,
    g_plans[i].clr[3][0] = clrOrange; // HOLD reason
 }
 
-// Check the actual executable sides and broker distances rather than
-// forcing an observed/structural target farther out to satisfy a minimum.
+// Display the first failed pre-check together with the values used at
+// plan evaluation. RawTP1 is the observed distance BEFORE swing capping
+// and tick rounding; it is not an executable order or a forecast.
+void ShowPlanPriceDetails(int i, double bid, double ask, double point, double tick,
+                          double minStop, double rawDistance, double nearBarrier)
+{
+   if(point <= 0.0) return;
+   g_plans[i].lbl[2][2] = "Spread:";
+   g_plans[i].val[2][2] = StringFormat("%.1f pts", (ask - bid) / point);
+   g_plans[i].clr[2][2] = clrSilver;
+   if(nearBarrier > 0.0)
+   {
+      g_plans[i].lbl[3][1] = "Swing:";
+      g_plans[i].val[3][1] = DoubleToString(nearBarrier, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+   }
+   else if(rawDistance >= 0.0)
+   {
+      g_plans[i].lbl[3][1] = "RawTP1:";
+      g_plans[i].val[3][1] = StringFormat("%.1f pts", rawDistance / point);
+   }
+   g_plans[i].clr[3][1] = clrSilver;
+   g_plans[i].lbl[3][2] = "Broker:";
+   g_plans[i].val[3][2] = StringFormat("min %.1f / tick %.1f pts", minStop / point, tick / point);
+   g_plans[i].clr[3][2] = clrSilver;
+}
+
+// Return the FIRST failing price pre-check, rather than a combined
+// cost/broker/order label. The broker may still reject a valid request.
+string PlanPriceIssue(int dir, bool market, double entry, double stop,
+                      double tp1, double tp2, double tp3,
+                      double bid, double ask, double point, double tick,
+                      double minStop, double pv)
+{
+   if(dir == 0 || entry <= 0.0 || stop <= 0.0 || bid <= 0.0 || ask < bid ||
+      point <= 0.0 || tick <= 0.0 || pv <= 0.0) return("missing price/data");
+   if(tp1 <= 0.0 || tp2 <= 0.0 || tp3 <= 0.0) return("invalid TP price");
+   double eps = 1e-7 * tick;
+   if((double)dir * (entry - stop) < tick - eps) return("SL order/tick");
+   if((double)dir * (tp1 - entry) < tick - eps) return("TP1 order/tick");
+   if((double)dir * (tp2 - tp1) < tick - eps) return("TP2 order/tick");
+   if((double)dir * (tp3 - tp2) < tick - eps) return("TP3 order/tick");
+   double base = market ? (dir > 0 ? bid : ask) : entry;
+   if((double)dir * (base - stop) < minStop - eps) return("SL broker minimum");
+   if((double)dir * (tp3 - base) < minStop - eps) return("TP3 broker minimum");
+   if(!market)
+   {
+      double offset = MathMax(tick, minStop);
+      if(dir > 0 && entry > ask - offset + eps) return("buy limit too close");
+      if(dir < 0 && entry < bid + offset - eps) return("sell limit too close");
+   }
+   // Conservative spread-only cost screen; the entry/exit prices already
+   // use executable sides. This is an EXTRA filter, not a second charge.
+   // Unknown commissions, swaps and slippage remain excluded.
+   if((double)dir * (tp1 - entry) <= (ask - bid) + eps)
+      return("TP1 <= spread");
+   return("");
+}
+
+// The same first-failure checks are used for plan, placement and pending
+// modification. Diagnostics never relax broker or cost requirements.
 bool PlanPricesValid(int dir, bool market, double entry, double stop,
                      double tp1, double tp2, double tp3,
                      double bid, double ask, double point, double tick,
                      double minStop, double pv)
 {
-   if(dir == 0 || entry <= 0.0 || stop <= 0.0 || bid <= 0.0 || ask < bid ||
-      point <= 0.0 || tick <= 0.0 || pv <= 0.0) return(false);
-   double eps = 1e-7 * tick;
-   if((double)dir * (entry - stop) < tick - eps ||
-      (double)dir * (tp1 - entry) < tick - eps ||
-      (double)dir * (tp2 - tp1) < tick - eps ||
-      (double)dir * (tp3 - tp2) < tick - eps) return(false);
-   double base = market ? (dir > 0 ? bid : ask) : entry;
-   if((double)dir * (base - stop) < minStop - eps ||
-      (double)dir * (tp3 - base) < minStop - eps) return(false);
-   if(!market)
-   {
-      double offset = MathMax(tick, minStop);
-      if(dir > 0 && entry > ask - offset + eps) return(false);
-      if(dir < 0 && entry < bid + offset - eps) return(false);
-   }
-   // Conservative cost screen within this lane, not against another
-   // timeframe. Distance already starts at the executable entry side;
-   // requiring it to clear the spread too protects very small targets.
-   // Actual broker commissions are not known in advance here; this is a
-   // spread-only screen, not a claim that commissions are zero.
-   if((double)dir * (tp1 - entry) <= (ask - bid) + eps)
-      return(false);
-   return(true);
+   return(PlanPriceIssue(dir, market, entry, stop, tp1, tp2, tp3,
+                         bid, ask, point, tick, minStop, pv) == "");
 }
 
 void UpdatePlanRow(int i)
@@ -2273,8 +2379,9 @@ void UpdatePlanRow(int i)
    if(!StructureGeometry(bars, n - 1, i, dir, market, isRange,
                          bid, ask, point, tick, minStop, geo))
    {
-      ShowHeldPlan(i, "no structure", "unconfirmed", geo.entry, geo.stop,
+      ShowHeldPlan(i, StructureIssueText(geo.issue), "unconfirmed", geo.entry, geo.stop,
                    0.0, 0.0, 0.0, -1, -1);
+      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, -1.0, 0.0);
       return;
    }
 
@@ -2290,22 +2397,25 @@ void UpdatePlanRow(int i)
                              : PriceUp(geo.entry - geo.cap[j], tick);
    }
 
+   double riskDistance = (double)dir * (geo.entry - geo.stop);
    ObserveLane(i, dir, score, market, isRange, point, tick, minStop, ask - bid);
    SObservationCache obs = g_observations[i];
    if(obs.filled < OBS_MIN_CASES)
    {
       ShowHeldPlan(i, StringFormat("need %d analogs", OBS_MIN_CASES), "swing-only", geo.entry, geo.stop,
                    swings[0], swings[1], swings[2], obs.filled, obs.eligible);
+      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, -1.0, geo.nearBarrier);
       return;
    }
    if(obs.q1 <= 0.0 || obs.q2 <= 0.0 || obs.q3 <= 0.0)
    {
       ShowHeldPlan(i, "weak follow-through", "swing-only", geo.entry, geo.stop,
                    swings[0], swings[1], swings[2], obs.filled, obs.eligible);
+      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, riskDistance * obs.q1, geo.nearBarrier);
       return;
    }
 
-   double riskDistance = (double)dir * (geo.entry - geo.stop);
+   double rawTP1Distance = riskDistance * obs.q1;
    double distances[3];
    distances[0] = riskDistance * obs.q1;
    distances[1] = riskDistance * obs.q2;
@@ -2318,11 +2428,20 @@ void UpdatePlanRow(int i)
                         : PriceUp(geo.entry - distances[1], tick);
    double tp3 = dir > 0 ? PriceDown(geo.entry + distances[2], tick)
                         : PriceUp(geo.entry - distances[2], tick);
-   if(!PlanPricesValid(dir, market, geo.entry, geo.stop, tp1, tp2, tp3,
-                       bid, ask, point, tick, minStop, pv))
+   string basis = (geo.cap[0] > 0.0 && geo.cap[0] < rawTP1Distance - 1e-7 * tick)
+                  ? "observed + swing" : "observed";
+   // Check the nearby structural barrier first, then report the first
+   // remaining price-order, broker-distance or spread failure. Do not
+   // trade past a near barrier merely to make a tiny target pass.
+   string priceIssue = "";
+   if(geo.nearBarrier > 0.0) priceIssue = "swing in spread";
+   else priceIssue = PlanPriceIssue(dir, market, geo.entry, geo.stop, tp1, tp2, tp3,
+                                    bid, ask, point, tick, minStop, pv);
+   if(priceIssue != "")
    {
-      ShowHeldPlan(i, "cost/broker/order", "observed", geo.entry, geo.stop,
+      ShowHeldPlan(i, priceIssue, basis, geo.entry, geo.stop,
                    tp1, tp2, tp3, obs.filled, obs.eligible);
+      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, rawTP1Distance, geo.nearBarrier);
       return;
    }
    int slPts = (int)MathRound(riskDistance / point);
@@ -2331,16 +2450,18 @@ void UpdatePlanRow(int i)
    int tp3Pts = (int)MathRound((double)dir * (tp3 - geo.entry) / point);
    if(slPts <= 0 || tp1Pts <= 0 || tp2Pts <= tp1Pts || tp3Pts <= tp2Pts)
    {
-      ShowHeldPlan(i, "target grid", "observed", geo.entry, geo.stop,
+      ShowHeldPlan(i, "target grid", basis, geo.entry, geo.stop,
                    tp1, tp2, tp3, obs.filled, obs.eligible);
+      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, rawTP1Distance, geo.nearBarrier);
       return;
    }
 
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
    if(balance <= 0.0)
    {
-      ShowHeldPlan(i, "no balance", "observed", geo.entry, geo.stop,
+      ShowHeldPlan(i, "no balance", basis, geo.entry, geo.stop,
                    tp1, tp2, tp3, obs.filled, obs.eligible);
+      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, rawTP1Distance, geo.nearBarrier);
       return;
    }
    double perLotRisk = (double)slPts * pv; // excludes unknown commissions/fees
@@ -2367,8 +2488,9 @@ void UpdatePlanRow(int i)
    double riskMoney = lot * perLotRisk;
    if(!InpUseMinLot && InpUseRisk && (wantRisk <= 0.0 || riskMoney > wantRisk * 1.000001))
    {
-      ShowHeldPlan(i, "risk exceeds budget", "observed", geo.entry, geo.stop,
+      ShowHeldPlan(i, "risk exceeds budget", basis, geo.entry, geo.stop,
                    tp1, tp2, tp3, obs.filled, obs.eligible);
+      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, rawTP1Distance, geo.nearBarrier);
       return;
    }
    // A target-ladder payout, not full lot at TP3. This is conditional on
@@ -2380,8 +2502,9 @@ void UpdatePlanRow(int i)
    double reward = (close1 * tp1Pts + close2 * tp2Pts + left2 * tp3Pts) * pv;
    if(reward <= 0.0)
    {
-      ShowHeldPlan(i, "payout not positive", "observed", geo.entry, geo.stop,
+      ShowHeldPlan(i, "payout not positive", basis, geo.entry, geo.stop,
                    tp1, tp2, tp3, obs.filled, obs.eligible);
+      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, rawTP1Distance, geo.nearBarrier);
       return;
    }
 
@@ -5601,6 +5724,8 @@ int TradeOpenMarket(int i, int dir, double lot, double sl, double tp, ulong &out
       inFlight = (res.retcode == TRADE_RETCODE_PLACED); // acceptance is not a confirmed fill
       return(1);
    }
+   PrintFormat("SimpleEA: %s market request not confirmed (sent=%s, retcode=%u, comment=%s).",
+               g_rows[i].tag, sent ? "yes" : "no", res.retcode, res.comment);
    if((!sent && res.retcode == 0) || res.retcode == TRADE_RETCODE_TIMEOUT ||
       res.retcode == TRADE_RETCODE_CONNECTION || res.retcode == TRADE_RETCODE_ERROR ||
       res.retcode == TRADE_RETCODE_LOCKED || res.retcode == TRADE_RETCODE_ORDER_CHANGED) return(-1);
@@ -5637,6 +5762,8 @@ int TradePlaceLimit(int i, int dir, double lot, double price, double sl, double 
       outTicket = res.order;
       return(1);
    }
+   PrintFormat("SimpleEA: %s pending request not confirmed (sent=%s, retcode=%u, comment=%s).",
+               g_rows[i].tag, sent ? "yes" : "no", res.retcode, res.comment);
    if((!sent && res.retcode == 0) || res.retcode == TRADE_RETCODE_TIMEOUT ||
       res.retcode == TRADE_RETCODE_CONNECTION || res.retcode == TRADE_RETCODE_ERROR ||
       res.retcode == TRADE_RETCODE_LOCKED || res.retcode == TRADE_RETCODE_ORDER_CHANGED) return(-1);
@@ -6095,7 +6222,15 @@ bool PlacePlanOrder(int i)
    if(i < 0 || i >= TF_COUNT || !g_freshBar[i]) return(false);
    if(!CanPlaceAutoOrders() || g_auto[i].active || PlanHasUncertainOrder(i)) return(false);
    if(AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING) return(false);
-   if(g_plans[i].state != 2 || g_plans[i].dir == 0) return(false);
+   // Re-evaluate structure and the near-spread barrier just before a new
+   // request; another lane's replay may have made the old snapshot stale.
+   UpdatePlanRow(i);
+   if(g_plans[i].state != 2 || g_plans[i].dir == 0)
+   {
+      PrintFormat("SimpleEA: %s entry preflight HOLD after refresh: %s.",
+                  g_rows[i].tag, g_plans[i].note);
+      return(false);
+   }
    if(!TrendMatchForTF(i)) return(false);
    if(!AutoTradingAllowed(i)) return(false);
    if(RegimeBlocksEntry(i)) return(false);
@@ -6117,7 +6252,15 @@ bool PlacePlanOrder(int i)
    double tp3 = g_plans[i].tp3Price;
    double lot = g_plans[i].lot;
    if(!PlanPricesValid(dir, market, entry, sl, tp1, tp2, tp3,
-                       bid, ask, point, tick, minStop, pv)) return(false);
+                       bid, ask, point, tick, minStop, pv))
+   {
+      string issue = PlanPriceIssue(dir, market, entry, sl, tp1, tp2, tp3,
+                                    bid, ask, point, tick, minStop, pv);
+      double spreadPts = point > 0.0 ? (ask - bid) / point : 0.0;
+      PrintFormat("SimpleEA: %s entry preflight HOLD: %s (spread %.1f pts).",
+                  g_rows[i].tag, issue, spreadPts);
+      return(false);
+   }
    int slPts = (int)MathRound((double)dir * (entry - sl) / point);
    if(slPts <= 0 || lot <= 0.0) return(false);
    if(!InpUseMinLot && InpUseRisk)
@@ -6287,6 +6430,10 @@ void ManageAutoBar()
             continue;
          }
 
+         // Refresh an otherwise-valid near-barrier decision before keeping
+         // or modifying an unfilled order. An existing HOLD should cancel
+         // promptly instead of repeating a potentially expensive replay.
+         if(g_plans[i].state == 2) UpdatePlanRow(i);
          // 1) Direction changed / HOLD / trend gate failed / expired -> cancel pending order
          if(!g_rows[i].ok || g_rows[i].direction != dir || !TrendMatchForTF(i) ||
             expired || g_plans[i].state != 2)
@@ -6318,6 +6465,9 @@ void ManageAutoBar()
          double tick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
          double minStop = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
          double pv = PointValuePerLot();
+         // Use current quotes for the ordinary broker/spread recheck as well.
+         bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
          if(!PlanPricesValid(dir, false, newEntry, newSL, newTP1, newTP2, newTP3,
                              bid, ask, point, tick, minStop, pv))
          {

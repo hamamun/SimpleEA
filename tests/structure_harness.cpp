@@ -84,7 +84,7 @@ using ENUM_ORDER_TYPE = int;
 using ENUM_ORDER_TYPE_TIME = int;
 
 struct MqlRates { double open=0, high=0, low=0, close=0; int spread=0; long tick_volume=0; };
-struct SStructureGeometry { double entry=0, stop=0, cap[3]={}; };
+struct SStructureGeometry { double entry=0,stop=0,cap[3]={},nearBarrier=0; int issue=0; };
 struct SAutoState {
     bool active=false, isOpen=false;
     ulong ticket=0, diaryPositionId=0;
@@ -215,9 +215,18 @@ void test_geometry() {
     double lows[]={100,101,99,101,100,102,101,103,102,104,103,104};
     double highs[]={101,102,101,103,102,104,103,105,104,106,105,107};
     for(int k=0;k<12;k++) b.push_back(bar((highs[k]+lows[k])/2,highs[k],lows[k]));
+    check(ConfirmedSwingHigh(b,9,11) && !ConfirmedSwingHigh(b,9,9),
+          "opposing swing needs its closed confirmation bar");
+    b[9].high=108;
     SStructureGeometry buy{};
     check(StructureGeometry(b,11,0,1,true,false,105,105.05,.01,.01,.02,buy),"buy geometry");
-    check(eq(buy.entry,105.05)&&eq(buy.stop,102.95)&&eq(buy.cap[0],.95),"buy nearest structure");
+    check(eq(buy.entry,105.05)&&eq(buy.stop,102.95)&&eq(buy.cap[0],2.95),"buy confirmed target structure");
+    SStructureGeometry bad{};
+    check(!StructureGeometry(b,11,0,1,true,false,105,105.05,.01,0,.02,bad) && bad.issue==STRUCTURE_INPUT, "invalid structure input is identified");
+    check(!StructureGeometry(b,11,0,1,true,false,90,90.05,.01,.01,.02,bad) && bad.issue==STRUCTURE_NO_STOP, "missing stop swing is identified");
+    check(!StructureGeometry(b,11,0,1,false,false,90,90.05,.01,.01,.02,bad) && bad.issue==STRUCTURE_NO_ENTRY, "missing limit swing is identified");
+    check(!StructureGeometry(b,11,0,1,false,true,90,90.05,.01,.01,.02,bad) && bad.issue==STRUCTURE_ENTRY_DISTANCE, "range limit broker distance is identified");
+    check(!StructureGeometry(b,11,0,1,true,false,105,105.05,.01,.01,5,bad) && bad.issue==STRUCTURE_STOP_DISTANCE, "market stop broker distance is identified");
     SStructureGeometry pending{};
     check(StructureGeometry(b,11,0,1,false,false,105,105.05,.01,.01,.02,pending),"buy limit geometry");
     check(eq(pending.entry,103)&&eq(pending.stop,101.95),"limit stop is beyond a separate pivot");
@@ -229,13 +238,40 @@ void test_geometry() {
     for(int k=0;k<12;k++) mirrored.push_back(bar(210-b[k].open,210-b[k].low,210-b[k].high));
     SStructureGeometry sell{};
     check(StructureGeometry(mirrored,11,0,-1,true,false,104.95,105,.01,.01,.02,sell),"sell geometry");
-    check(eq(sell.entry,210-buy.entry)&&eq(sell.stop,210-buy.stop)&&eq(sell.cap[0],buy.cap[0]),"sell mirrors buy");
+    check(eq(sell.entry,210-buy.entry)&&eq(sell.stop,210-buy.stop),"sell entry and stop mirror buy");
+    check(eq(sell.cap[0],buy.cap[0]-.05),"sell target cap converts Bid support to Ask using spread");
+    SStructureGeometry sellNear{};
+    check(StructureGeometry(mirrored,11,0,-1,true,false,102.02,102.07,.01,.01,.02,sellNear),"sell near-barrier geometry");
+    check(eq(sellNear.nearBarrier,102.05),"SELL confirmed support inside spread is not silently discarded");
+    SStructureGeometry buyNear{};
+    check(StructureGeometry(b,11,0,1,true,false,107.98,108.03,.01,.01,.02,buyNear),"buy near-barrier geometry");
+    check(eq(buyNear.nearBarrier,108),"BUY confirmed resistance inside spread is not silently discarded");
     check(StructureWindow(0)<StructureWindow(1)&&StructureWindow(1)<StructureWindow(2),"separate structure profiles");
     check(ObservationHorizon(0)<ObservationHorizon(1)&&ObservationHorizon(1)<ObservationHorizon(2),"separate observation windows");
     check(PlanPricesValid(1,true,100,99.8,100.03,100.05,100.08,99.99,100,.01,.01,.01,1),"small M5 target clears its own cost");
     check(!PlanPricesValid(1,true,100,99.8,100.01,100.05,100.08,99.99,100,.01,.01,.01,1),"spread dominates TP1");
     check(PlanPricesValid(-1,true,100,100.2,99.97,99.95,99.92,100,100.01,.01,.01,.01,1),"small sell target clears its own spread");
     check(!PlanPricesValid(-1,true,100,100.2,99.99,99.95,99.92,100,100.01,.01,.01,.01,1),"sell spread dominates TP1");
+    check(PlanPriceIssue(-1,true,100,100.2,99.97,99.95,99.92,100,100.03,.01,.01,.01,1)=="TP1 <= spread", "exact SELL spread failure");
+    check(PlanPriceIssue(1,true,100,99.8,100.03,100.03,100.08,99.99,100,.01,.01,.01,1)=="TP2 order/tick", "exact collapsed target failure");
+    check(PlanPriceIssue(1,true,100,99.5,100.03,100.05,100.08,99.99,100,.01,.01,.10,1)=="TP3 broker minimum", "exact broker TP3 failure");
+    check(PlanPriceIssue(1,false,99.99,99.5,100.02,100.05,100.08,99.99,100,.01,.01,.02,1)=="buy limit too close", "exact pending entry failure");
+    check(PlanPriceIssue(-1,true,100,100.2,99.97,99.95,0,100,100.01,.01,.01,.01,1)=="invalid TP price", "non-positive SELL target rejected");
+
+    // A nearby three-bar support is inside the spread. Do not silently
+    // ignore it merely to make a trade or a target appear viable.
+    std::vector<MqlRates> scalp;
+    double slows[]={100.20,100.15,99.97,100.05,99.90,100.10,100.02,100.10,100.02,99.70,100.00,100.10};
+    double shighs[]={100.30,100.40,100.30,100.50,100.30,100.60,100.30,100.70,100.30,100.80,100.30,100.50};
+    for(int k=0;k<12;k++) scalp.push_back(bar((slows[k]+shighs[k])/2,shighs[k],slows[k]));
+    check(ConfirmedSwingLow(scalp,2,11), "nearby support remains a confirmed swing");
+    SStructureGeometry shortPlan{};
+    check(StructureGeometry(scalp,11,0,-1,true,false,100,100.04,.01,.01,.01,shortPlan), "SELL scalp structure");
+    check(eq(shortPlan.cap[0],.06) && eq(shortPlan.cap[1],.26) && eq(shortPlan.nearBarrier,100.01), "nearer support retains HOLD despite farther Ask-side caps");
+    scalp[4].low=99.97; // another confirmed barrier is inside the spread
+    SStructureGeometry blocked{};
+    check(StructureGeometry(scalp,11,0,-1,true,false,100,100.04,.01,.01,.01,blocked), "confirmed near barrier structure");
+    check(eq(blocked.nearBarrier,100.01), "confirmed support inside spread remains a HOLD barrier");
 }
 
 void test_hurst_prefix() {
