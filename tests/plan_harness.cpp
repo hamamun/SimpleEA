@@ -182,33 +182,46 @@ int main() {
     reset();testObs.q1=.01;UpdatePlanRow(0);
     check(g_plans[0].state==0 && g_plans[0].val[3][0]=="TP1 order/tick", "collapsed TP1 gets exact reason");
     check(g_plans[0].lbl[2][2]=="Spread:" && g_plans[0].val[2][2]=="1.0 pts", "held plan shows spread at evaluation");
-    check(g_plans[0].lbl[3][1]=="RawTP1:" && g_plans[0].val[3][1]=="0.5 pts", "uncapped observed distance visible");
+    check(g_plans[0].lbl[3][1]=="RawTP3:" && g_plans[0].val[3][1]=="75.0 pts", "uncapped main target distance visible");
     check(g_plans[0].lbl[3][2]=="Broker:" && g_plans[0].val[3][2]=="min 1.0 / tick 1.0 pts", "broker stop level and tick visible");
     reset();testObs.q1=.02;UpdatePlanRow(0);
-    check(g_plans[0].state==0 && g_plans[0].val[3][0]=="TP1 <= spread", "equal-to-spread TP1 gets exact reason");
-    check(g_plans[0].val[2][0]=="observed" && g_plans[0].val[3][1]=="1.0 pts", "historical, not capped, target identified");
+    check(g_plans[0].state==2 && eq(g_plans[0].tp1Price,100.01), "TP1 equal to spread does not veto a viable TP3");
+    check(g_plans[0].lbl[3][2]=="Fees:" && g_plans[0].val[3][2]=="excluded; TP1 small" && g_plans[0].clr[3][2]==clrOrange,
+          "small TP1 warns about fees without holding the plan");
     reset();cap0=.01;UpdatePlanRow(0);
-    check(g_plans[0].state==0 && g_plans[0].val[3][0]=="TP1 <= spread", "capped TP1 does not bypass spread");
-    check(g_plans[0].val[2][0]=="observed + swing" && g_plans[0].val[3][1]=="25.0 pts", "swing cap distinguished from observed distance");
+    check(g_plans[0].state==2 && eq(g_plans[0].tp1Price,100.01) && eq(g_plans[0].tp3Price,100.75),
+          "a swing-capped TP1 does not veto the main target");
+    check(g_plans[0].val[3][2]=="excluded; TP1 small", "capped TP1 still shows the cost warning");
+    reset();bid=99.96;testObs.q1=.02;testObs.q2=.04;testObs.q3=.06;UpdatePlanRow(0);
+    check(g_plans[0].state==0 && g_plans[0].val[3][0]=="TP3 <= spread", "final target inside spread holds");
+    check(g_plans[0].val[1][2]=="100.03 3.0pts" && g_plans[0].val[2][2]=="4.0 pts" &&
+          g_plans[0].val[3][1]=="3.0 pts" && g_plans[0].val[2][1]=="NO ORDER", "held preview compares TP3 and spread");
+    reset();bid=99.96;testObs.q1=.02;testObs.q2=.04;testObs.q3=.08;UpdatePlanRow(0);
+    check(g_plans[0].state==0 && g_plans[0].val[3][0]=="TP3 <= spread", "final target exactly at spread still holds");
+    reset();bid=99.90;cap0=.03;cap1=.04;cap2=.05;testObs.q1=.06;testObs.q2=.08;UpdatePlanRow(0);
+    check(g_plans[0].state==0 && g_plans[0].val[3][0]=="TP3 <= spread", "capped final target still obeys spread");
+    check(g_plans[0].val[2][0]=="observed + swing" && g_plans[0].val[3][1]=="75.0 pts", "final swing cap distinguished from raw target");
     reset();testBarrier=99.99;UpdatePlanRow(0);
     check(g_plans[0].state==0 && g_plans[0].val[3][0]=="swing in spread", "confirmed near barrier holds");
     check(g_plans[0].lbl[3][1]=="Swing:" && g_plans[0].val[3][1]=="99.99", "actual near barrier displayed");
     reset();testBarrier=99.99;testObs.q1=.01;UpdatePlanRow(0);
     check(g_plans[0].val[3][0]=="swing in spread", "structural barrier is checked before target grid");
 
-    // Reproduce the reported SELL price geometry without claiming the
-    // broker's unseen spread or raw percentile values are known.
+    // The screenshot-like levels are synthetic: the actual broker spread,
+    // original observed quantiles and structure are not known from the image.
     reset();symbolDigits=5;point=tick=.00001;bid=1.11365;ask=1.11369;geometryRisk=.00067;
     g_rows[0].direction=-1;g_rows[0].score=-3;testObs.filled=207;testObs.eligible=207;
     testObs.q1=.00003/.00067;testObs.q2=.00018/.00067;testObs.q3=.00038/.00067;UpdatePlanRow(0);
-    check(g_rows[0].direction==-1 && g_plans[0].state==0, "screenshot-like bearish signal remains while entry is held");
-    check(g_plans[0].val[0][0]=="1.11365" && g_plans[0].val[0][1]=="1.11432" && g_plans[0].val[1][0]=="1.11362 3.0pts", "screenshot-like M5 prices and distance");
-    check(g_plans[0].val[3][0]=="TP1 <= spread" && g_plans[0].val[2][2]=="4.0 pts" && g_plans[0].val[3][1]=="3.0 pts", "diagnose screenshot-like spread failure");
+    check(g_rows[0].direction==-1 && g_plans[0].state==2, "M5 SELL can pass when TP1 is inside spread but TP3 is not");
+    check(g_plans[0].val[0][0]=="1.11365" && g_plans[0].val[1][0]=="1.11432 67pts" &&
+          g_plans[0].val[1][1]=="1.11362 3pts" && g_plans[0].val[2][0]=="1.11327 38pts", "screenshot-like M5 levels retained");
+    check(g_plans[0].val[3][2]=="excluded; TP1 small", "M5 short partial carries a warning");
     reset();symbolDigits=5;point=tick=.00001;bid=1.11365;ask=1.11369;geometryRisk=.00025;
     g_rows[2].direction=-1;g_rows[2].score=-3;g_rows[2].tag="M30";g_rows[2].tf=1800;
     testObs.filled=78;testObs.eligible=78;testObs.q1=.00002/.00025;testObs.q2=.00007/.00025;testObs.q3=.00021/.00025;UpdatePlanRow(2);
-    check(g_plans[2].val[0][1]=="1.11390" && g_plans[2].val[1][0]=="1.11363 2.0pts", "screenshot-like M30 prices and distance");
-    check(g_plans[2].val[3][0]=="TP1 <= spread" && g_plans[2].val[2][2]=="4.0 pts" && g_plans[2].val[3][1]=="2.0 pts", "M30 reports its own spread failure");
+    check(g_plans[2].state==2 && g_plans[2].val[1][0]=="1.11390 25pts" &&
+          g_plans[2].val[1][1]=="1.11363 2pts" && g_plans[2].val[2][0]=="1.11344 21pts", "screenshot-like M30 TP3 governs spread");
+    check(g_plans[2].val[3][2]=="excluded; TP1 small", "M30 short partial carries a warning");
 
     reset();balance=10;UpdatePlanRow(0);
     check(g_plans[0].state==0 && g_plans[0].val[3][0]=="risk exceeds budget", "minimum lot over budget holds");
@@ -228,6 +241,12 @@ int main() {
     check(g_plans[0].state==2 && !g_plans[0].market && eq(g_plans[0].entryPrice,99.7),"eligible pending plan also enabled");
     reset();g_rows[0].direction=-1;g_rows[0].score=-2;UpdatePlanRow(0);
     check(g_plans[0].state==2 && !g_plans[0].market && eq(g_plans[0].entryPrice,100.3),"eligible SELL pending plan also enabled");
+    reset();bid=99.96;testObs.q1=.02;testObs.q2=.08;testObs.q3=.16;g_rows[0].score=2;UpdatePlanRow(0);
+    check(g_plans[0].state==2 && !g_plans[0].market && eq(g_plans[0].tp1Price,99.71) &&
+          eq(g_plans[0].tp3Price,99.78) && g_plans[0].val[3][2]=="excluded; TP1 small", "BUY pending accepts short TP1 when TP3 clears spread");
+    reset();bid=100;ask=100.04;testObs.q1=.02;testObs.q2=.08;testObs.q3=.16;g_rows[0].direction=-1;g_rows[0].score=-2;UpdatePlanRow(0);
+    check(g_plans[0].state==2 && !g_plans[0].market && eq(g_plans[0].tp1Price,100.29) &&
+          eq(g_plans[0].tp3Price,100.22) && g_plans[0].val[3][2]=="excluded; TP1 small", "SELL pending accepts short TP1 when TP3 clears spread");
     reset();g_rows[0].direction=0;UpdatePlanRow(0);
     check(g_plans[0].state==0 && g_plans[0].lines==1,"signal HOLD has no fabricated plan");
     reset();openPosition=true;UpdatePlanRow(0);

@@ -2222,6 +2222,9 @@ void ShowHeldPlan(int i, string why, string basis, double entry, double stop,
    g_plans[i].val[1][1] = tp2 > 0.0 ? DoubleToString(tp2, dg) : "--";
    g_plans[i].lbl[1][2] = "TP3~:";
    g_plans[i].val[1][2] = tp3 > 0.0 ? DoubleToString(tp3, dg) : "--";
+   if(tp3 > 0.0 && entry > 0.0 && point > 0.0 && g_rows[i].direction != 0)
+      g_plans[i].val[1][2] = StringFormat("%s %.1fpts", DoubleToString(tp3, dg),
+                                         (double)g_rows[i].direction * (tp3 - entry) / point);
    g_plans[i].lbl[2][0] = "Basis:";
    g_plans[i].val[2][0] = basis;
    g_plans[i].lbl[2][1] = "Action:";
@@ -2235,7 +2238,7 @@ void ShowHeldPlan(int i, string why, string basis, double entry, double stop,
 }
 
 // Display the first failed pre-check together with the values used at
-// plan evaluation. RawTP1 is the observed distance BEFORE swing capping
+// plan evaluation. RawTP3 is the observed distance BEFORE swing capping
 // and tick rounding; it is not an executable order or a forecast.
 void ShowPlanPriceDetails(int i, double bid, double ask, double point, double tick,
                           double minStop, double rawDistance, double nearBarrier)
@@ -2251,13 +2254,23 @@ void ShowPlanPriceDetails(int i, double bid, double ask, double point, double ti
    }
    else if(rawDistance >= 0.0)
    {
-      g_plans[i].lbl[3][1] = "RawTP1:";
+      g_plans[i].lbl[3][1] = "RawTP3:";
       g_plans[i].val[3][1] = StringFormat("%.1f pts", rawDistance / point);
    }
    g_plans[i].clr[3][1] = clrSilver;
    g_plans[i].lbl[3][2] = "Broker:";
    g_plans[i].val[3][2] = StringFormat("min %.1f / tick %.1f pts", minStop / point, tick / point);
    g_plans[i].clr[3][2] = clrSilver;
+}
+
+// The EXTRA spread screen applies to the final target, not to a partial.
+// Shared by preflight and pending-order safety so they cannot disagree.
+bool TargetClearsSpread(int dir, double entry, double target,
+                        double bid, double ask, double tick)
+{
+   if(dir == 0 || entry <= 0.0 || target <= 0.0 || bid <= 0.0 ||
+      ask < bid || tick <= 0.0) return(false);
+   return((double)dir * (target - entry) > (ask - bid) + 1e-7 * tick);
 }
 
 // Return the FIRST failing price pre-check, rather than a combined
@@ -2284,11 +2297,12 @@ string PlanPriceIssue(int dir, bool market, double entry, double stop,
       if(dir > 0 && entry > ask - offset + eps) return("buy limit too close");
       if(dir < 0 && entry < bid + offset - eps) return("sell limit too close");
    }
-   // Conservative spread-only cost screen; the entry/exit prices already
-   // use executable sides. This is an EXTRA filter, not a second charge.
-   // Unknown commissions, swaps and slippage remain excluded.
-   if((double)dir * (tp1 - entry) <= (ask - bid) + eps)
-      return("TP1 <= spread");
+   // The broker-side final target must clear the spread. TP1/TP2 are
+   // protective partials and may be closer, subject to the ordering above.
+   // This EXTRA screen is not a second spread charge. Fees and slippage
+   // are unknown: clearing it does not guarantee a net-profitable trade.
+   if(!TargetClearsSpread(dir, entry, tp3, bid, ask, tick))
+      return("TP3 <= spread");
    return("");
 }
 
@@ -2411,11 +2425,11 @@ void UpdatePlanRow(int i)
    {
       ShowHeldPlan(i, "weak follow-through", "swing-only", geo.entry, geo.stop,
                    swings[0], swings[1], swings[2], obs.filled, obs.eligible);
-      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, riskDistance * obs.q1, geo.nearBarrier);
+      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, riskDistance * obs.q3, geo.nearBarrier);
       return;
    }
 
-   double rawTP1Distance = riskDistance * obs.q1;
+   double rawTP3Distance = riskDistance * obs.q3;
    double distances[3];
    distances[0] = riskDistance * obs.q1;
    distances[1] = riskDistance * obs.q2;
@@ -2428,7 +2442,7 @@ void UpdatePlanRow(int i)
                         : PriceUp(geo.entry - distances[1], tick);
    double tp3 = dir > 0 ? PriceDown(geo.entry + distances[2], tick)
                         : PriceUp(geo.entry - distances[2], tick);
-   string basis = (geo.cap[0] > 0.0 && geo.cap[0] < rawTP1Distance - 1e-7 * tick)
+   string basis = (geo.cap[2] > 0.0 && geo.cap[2] < rawTP3Distance - 1e-7 * tick)
                   ? "observed + swing" : "observed";
    // Check the nearby structural barrier first, then report the first
    // remaining price-order, broker-distance or spread failure. Do not
@@ -2441,7 +2455,7 @@ void UpdatePlanRow(int i)
    {
       ShowHeldPlan(i, priceIssue, basis, geo.entry, geo.stop,
                    tp1, tp2, tp3, obs.filled, obs.eligible);
-      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, rawTP1Distance, geo.nearBarrier);
+      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, rawTP3Distance, geo.nearBarrier);
       return;
    }
    int slPts = (int)MathRound(riskDistance / point);
@@ -2452,7 +2466,7 @@ void UpdatePlanRow(int i)
    {
       ShowHeldPlan(i, "target grid", basis, geo.entry, geo.stop,
                    tp1, tp2, tp3, obs.filled, obs.eligible);
-      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, rawTP1Distance, geo.nearBarrier);
+      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, rawTP3Distance, geo.nearBarrier);
       return;
    }
 
@@ -2461,7 +2475,7 @@ void UpdatePlanRow(int i)
    {
       ShowHeldPlan(i, "no balance", basis, geo.entry, geo.stop,
                    tp1, tp2, tp3, obs.filled, obs.eligible);
-      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, rawTP1Distance, geo.nearBarrier);
+      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, rawTP3Distance, geo.nearBarrier);
       return;
    }
    double perLotRisk = (double)slPts * pv; // excludes unknown commissions/fees
@@ -2490,7 +2504,7 @@ void UpdatePlanRow(int i)
    {
       ShowHeldPlan(i, "risk exceeds budget", basis, geo.entry, geo.stop,
                    tp1, tp2, tp3, obs.filled, obs.eligible);
-      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, rawTP1Distance, geo.nearBarrier);
+      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, rawTP3Distance, geo.nearBarrier);
       return;
    }
    // A target-ladder payout, not full lot at TP3. This is conditional on
@@ -2504,7 +2518,7 @@ void UpdatePlanRow(int i)
    {
       ShowHeldPlan(i, "payout not positive", basis, geo.entry, geo.stop,
                    tp1, tp2, tp3, obs.filled, obs.eligible);
-      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, rawTP1Distance, geo.nearBarrier);
+      ShowPlanPriceDetails(i, bid, ask, point, tick, minStop, rawTP3Distance, geo.nearBarrier);
       return;
    }
 
@@ -2577,6 +2591,13 @@ void UpdatePlanRow(int i)
    g_plans[i].lbl[3][2] = "Fees:";
    g_plans[i].val[3][2] = "not included";
    g_plans[i].clr[3][2] = clrSilver;
+   // A short TP1 is allowed, but its gross partial proceeds may be eaten
+   // by commissions or slippage; do not present the screen as net profit.
+   if(!TargetClearsSpread(dir, geo.entry, tp1, bid, ask, tick))
+   {
+      g_plans[i].val[3][2] = "excluded; TP1 small";
+      g_plans[i].clr[3][2] = clrOrange;
+   }
    if(entryVeto != "")
    {
       HoldPlan(i, entryVeto); // retain the visible plan, but never execute it
@@ -6686,6 +6707,7 @@ void ManageAutoTick()
          stateChanged = true;
 
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double tick  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
@@ -6723,7 +6745,8 @@ void ManageAutoTick()
                                 !AutoTimerAllowsPlacement() || !TrendMatchForTF(i) ||
                                 g_plans[i].state != 2 || g_plans[i].dir != dir);
             if(g_auto[i].cancelPending || missingLevels || planBlocked ||
-               (double)dir * (g_auto[i].tp1Price - g_auto[i].entryPrice) <= ask - bid)
+               !TargetClearsSpread(dir, g_auto[i].entryPrice, g_auto[i].tpPrice,
+                                   bid, ask, tick))
             {
                ulong nowMs = GetTickCount64();
                if(nowMs - g_lastSafetyCancelMs[i] >= 2000)
