@@ -95,18 +95,23 @@ class SourceContracts(unittest.TestCase):
 
     def test_spread_only_screen_and_fee_disclosure(self):
         prices = function_text("PlanPriceIssue")
-        self.assertIn("(ask - bid) + eps", prices)
+        spread = function_text("TargetClearsSpread")
+        self.assertIn("(target - entry) > (ask - bid)", spread)
+        self.assertIn("TargetClearsSpread(dir, entry, tp3, bid, ask, tick)", prices)
         self.assertNotIn("commissionPrice", prices)
         self.assertIn("PlanPriceIssue(", function_text("PlanPricesValid"))
-        self.assertIn('"TP1 <= spread"', prices)
+        self.assertIn('"TP3 <= spread"', prices)
+        self.assertNotIn('"TP1 <= spread"', prices)
         self.assertIn('"TP3 broker minimum"', prices)
         self.assertIn('"TP2 order/tick"', prices)
         detail = function_text("ShowPlanPriceDetails")
-        for label in ('"Spread:"', '"RawTP1:"', '"Broker:"', '"Swing:"'):
+        for label in ('"Spread:"', '"RawTP3:"', '"Broker:"', '"Swing:"'):
             self.assertIn(label, detail)
         plan = function_text("UpdatePlanRow")
         self.assertIn('g_plans[i].lbl[3][2] = "Fees:"', plan)
         self.assertIn('g_plans[i].val[3][2] = "not included"', plan)
+        self.assertIn('g_plans[i].val[3][2] = "excluded; TP1 small"', plan)
+        self.assertIn('TargetClearsSpread(dir, geo.entry, tp1, bid, ask, tick)', plan)
         self.assertIn('double perLotRisk = (double)slPts * pv;', plan)
         self.assertIn('double actualRisk = lot * (double)slPts * pv;', function_text("PlacePlanOrder"))
         monitor = function_text("UpdateAutoPanel")
@@ -154,6 +159,9 @@ class SourceContracts(unittest.TestCase):
         self.assertNotIn("grossPts", tick)
         self.assertIn("g_auto[i].tp1Skipped", tick)
         self.assertIn("g_auto[i].cancelPending || missingLevels || planBlocked", tick)
+        pending_tick = tick.split("if(!g_auto[i].isOpen)", 1)[1].split("double exitP", 1)[0]
+        self.assertIn("TargetClearsSpread(dir, g_auto[i].entryPrice, g_auto[i].tpPrice", pending_tick)
+        self.assertNotIn("tp1Price - g_auto[i].entryPrice) <= ask - bid", pending_tick)
         self.assertIn("RequestPendingCancellation(i)", tick)
         self.assertNotRegex(tick, re.compile(r"RequestPendingCancellation\(i\).*?ResetAutoSlot", re.S))
         self.assertNotIn("DiaryBeginUpgrade(i)", pending)
@@ -197,7 +205,7 @@ class ExtractedFunctionTests(unittest.TestCase):
             "StructureWindow", "ObservationHorizon", "PriceDown", "PriceUp",
             "ConfirmedSwingLow", "ConfirmedSwingHigh",
             "BoxAt", "InsertStructureCap", "StructureGeometry", "ObservationSpread", "ReplayObservation",
-            "PlanPriceIssue", "PlanPricesValid",
+            "TargetClearsSpread", "PlanPriceIssue", "PlanPricesValid",
             "HurstExponent", "ObservationReturnPrefix", "ObservationHurst",
             "ComputeLegacyTPLevels", "SymbolMinLot", "VolumeStepDigits", "NormalizeLots", "FloorLotStep",
             "CalcTP1CloseLot", "CalcTP2CloseLot", "SetSlotGV", "DeleteTargetIntent", "DeleteTargetUpdate",
@@ -231,7 +239,7 @@ class ExtractedFunctionTests(unittest.TestCase):
 
     def test_plan_defaults_and_held_display(self):
         names = ["ClearPlanRow", "HoldPlan", "ShowHeldPlan", "ShowPlanPriceDetails", "StructureIssueText",
-                 "PlanPriceIssue", "PlanPricesValid", "UpdatePlanRow", "CanPlaceAutoOrders"]
+                 "TargetClearsSpread", "PlanPriceIssue", "PlanPricesValid", "UpdatePlanRow", "CanPlaceAutoOrders"]
         code = STRUCTURE_ISSUES + "\n\n" + "\n\n".join(function_text(name) for name in names)
         code = code.replace("MqlRates bars[];", "std::vector<MqlRates> bars;")
         with tempfile.TemporaryDirectory(prefix="simpleea-plan-") as directory:
@@ -246,13 +254,28 @@ class ExtractedFunctionTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("extracted plan defaults, held previews, spread and permissions passed", result.stdout)
 
+    def test_pending_tick_uses_final_target_spread(self):
+        names = ["TargetClearsSpread", "ManageAutoTick"]
+        code = "\n\n".join(function_text(name) for name in names)
+        with tempfile.TemporaryDirectory(prefix="simpleea-pending-tick-") as directory:
+            d = Path(directory)
+            (d / "extracted.hpp").write_text(code, encoding="utf-8")
+            binary = d / "pending-tick-harness"
+            build = subprocess.run(["g++", "-std=c++17", "-O1", "-Wall", "-Wextra", "-I", str(d),
+                                    str(ROOT / "tests" / "pending_tick_harness.cpp"), "-o", str(binary)],
+                                   text=True, capture_output=True)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            result = subprocess.run([str(binary)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("extracted pending tick spread checks passed", result.stdout)
+
     def test_full_observation_pipeline(self):
         names = ["HighPass3", "EfficiencyRatio", "StructureVote", "ScoreAllowsTrade",
                  "StructureWindow", "ObservationHorizon", "PriceDown", "PriceUp",
                  "ConfirmedSwingLow", "ConfirmedSwingHigh",
                  "BoxAt", "InsertStructureCap", "StructureGeometry", "ObservationCycleAt", "ObservationTrends",
                  "ObservationSignalATR", "ObservationVolumeOK", "ObservationReturnPrefix",
-                 "ObservationHurst", "ObservationSourceIndex", "ObservationSpread", "ReplayObservation", "PlanPriceIssue", "PlanPricesValid", "ObserveLane"]
+                 "ObservationHurst", "ObservationSourceIndex", "ObservationSpread", "ReplayObservation", "TargetClearsSpread", "PlanPriceIssue", "PlanPricesValid", "ObserveLane"]
         code = STRUCTURE_ISSUES + "\n\n" + "\n\n".join(function_text(name) for name in names)
         veto = "if(geometry.nearBarrier > 0.0) continue;"
         self.assertIn(veto, code)
