@@ -1,5 +1,7 @@
 # SimpleEA Compared with Predict_X, Emtt and Autotrader
 
+> **Historical review:** this comparison describes the October 2026 ATR-era strategy, not the current structure/history trade planner. References below to half-ATR entries, ATR-based exits and their former interface are historical. See the [current comparison and interface](README.md#previous-versus-current-trade-plan) and [current specification](documents.md). The replacement is not yet compiled or broker-validated.
+
 > **Implementation amendment (28 October 2026):** SimpleEA now attaches a planned SL and TP3 to every new order, keeps SL unchanged after entry, and uses only TP1/TP2 partials, TP3 final close and SL. References below to optional initial stops, breakeven, trailing, score/flip/box exits describe the version reviewed on 25 October, not the current build.
 
 **Date:** 25 October 2026

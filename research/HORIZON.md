@@ -1,5 +1,7 @@
 # How far ahead is a SimpleEA reading good for?
 
+> **Historical research, not current-plan validation:** this study used an older signal/horizon model and different regime windows; it does not model the new structure/analog planner, staged trade lifecycle, broker fills or costs. Raw source data are not committed. Its numbers are not TP reach rates, performance evidence, or forecasts for the current EA. See [`../documents.md`](../documents.md) for the current implementation and validation requirements.
+
 Short answer: **there is no fixed horizon, and the panel never claimed one.** A SimpleEA
 reading is a *statement about the state of the market at the close of one bar*, and it stays
 on the panel only as long as that state persists — a **median of 2–3 bars** (10–15 min on M5,
@@ -7,7 +9,7 @@ on the panel only as long as that state persists — a **median of 2–3 bars** 
 measurable edge only appears much further out (6–16 bars where it appears at all), which is
 2–5× longer than the reading survives. Both facts are measured below on real bars.
 
-Everything here is causal and uses the EA's own arithmetic: trend vote, ROC vote, Hurst vote
+The historical model was causal and approximated the then-studied signal arithmetic: trend vote, ROC vote, Hurst vote
 (EA estimator, window 256, thresholds 0.55 / 0.45), score ±2 gates, ER dead-market gate at
 0.10. Signals are evaluated on the **last closed bar** and the forward return is measured from
 that same close — so "h = 1" means the move of the bar that opens right after the reading
@@ -16,7 +18,7 @@ appears.
 Data: XAUUSD / EURUSD / GBPUSD / USDJPY, Mar–Sep 2026, third-party feed, plus **EURUSD 2015
 and 2016** (independent era, different feed). Raw CSVs are not committed.
 
-Reproduce everything:
+Reproduction requires the uncommitted source datasets and Python dependencies:
 
 ```bash
 pip install numpy pandas
@@ -36,7 +38,7 @@ finished) and paints the panel during the bar that is currently forming. So:
 * it is actionable from the close of that bar onward — i.e. "h = 0" is that close; h = 1 is
   the next bar's move.
 
-Nothing repaints: a historical reading is the same tomorrow as it is now.
+The historical model used closed bars; real terminal history corrections and different initialization/data pulls can change a reconstructed reading.
 
 ## 2. How long is a reading "valid"?
 
