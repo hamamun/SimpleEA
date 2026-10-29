@@ -213,7 +213,7 @@ def main():
     for tf in range(3):
         ok(auto_allowed(tf), f"M{5 if tf == 0 else (15 if tf == 1 else 30)}: autotrading defaults ON")
     ok(regime_blocks(ch_blocked(True, CHOPPY, 1), mx_blocked(True, MIXED, 1)) is False,
-       "defaults block nothing - Choppy and Mixed both allowed")
+       "lane/regime model allows Choppy and Mixed (plan and broker gates still apply)")
     ok(regime_blocks(ch_blocked(True, MIXED, 1), mx_blocked(True, MIXED, 1)) is False,
        "a Mixed row still trades while Mixed is allowed (unchanged behaviour)")
 
@@ -251,7 +251,7 @@ def main():
     case_a = src2.split("void ManageAutoBar()")[1].split("// ---- CASE B:")[0]
     ok("AutoTradingAllowed" not in case_a and "RegimeBlocksEntry" not in case_a,
        "the OPEN-POSITION branch never consults either gate - a live trade keeps "
-       "its trail / TP / exit management")
+       "its fixed TP / SL management")
     ok(src2.count("if(!AutoTradingAllowed(i)) return(false);") == 1,
        "PlacePlanOrder() refuses any row that is switched off (new orders only)")
 

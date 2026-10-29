@@ -1,149 +1,20 @@
 //+------------------------------------------------------------------+
-//|                                              SimpleAdvisor.mq5   |
-//|                     A very simple multi-timeframe direction panel |
+//| SimpleAdvisor.mq5 - M5/M15/M30 signal, structure plan & executor |
 //|                                                                  |
-//|  Shows in plain words, for M5 (scalping), M15 (short-term) and    |
-//|  M30 (intraday) on ANY symbol:                                   |
-//|     Trend  = which way it is going (Going up / Going down /      |
-//|              Sideways), and                                      |
-//|     Regime = how it is moving (Steady / Mixed / Choppy),         |
-//|  plus the original Signal (BUY / SELL / HOLD) and Score.         |
+//| The original signal engine retains its ATR noise deadbands.       |
+//| New-entry prices, stops and targets do NOT use ATR multiples.    |
+//| They use confirmed swings and conservative, completed historical |
+//| Bid-bar analogs per symbol/timeframe/regime/score/entry style.   |
 //|                                                                  |
-//|  READ-ONLY OR LIVE?  The PANEL itself only reads price history    |
-//|  and draws text.  The EXECUTOR that ships with it DOES send       |
-//|  orders when InpAutoTrading = true - the shipped default.  Set    |
-//|  it to false for advice only, and nothing is ever sent.           |
-//|                                                                   |
-//|  With InpAutoTrading = false this program contains no trade       |
-//|  calls at all: it cannot place, modify or close an order.         |
+//| InpAutoTrading defaults true: eligible new entries are enabled.   |
+//| InpAutoTrading=false is read-only, including for open positions.  |
+//| Spread is checked; broker commissions/fees are not estimated.    |
+//| A plan HOLD does not erase the independent BUY/SELL signal.       |
 //|                                                                  |
-//|  -----------------------------------------------------------------|
-//|  SIGNAL ENGINE                                                    |
-//|  -----------------------------------------------------------------|
-//|  Three low-lag components are scored per timeframe.  Each one     |
-//|  contributes +1 (bullish), -1 (bearish) or 0 (abstain):           |
-//|                                                                  |
-//|   1. TREND      Ehlers Precision Trend (TASC, September 2024)     |
-//|                 Trend = HP3(price,L1) - HP3(price,L2)             |
-//|                 The difference of two highpass filters is a       |
-//|                 bandpass covering the timeframe's cycle band.     |
-//|                 Highpass filters have almost no lag, so this      |
-//|                 tracks turns far sooner than an EMA/SMA of equal  |
-//|                 reach.  Vote = sign(Trend).                       |
-//|                                                                  |
-//|   2. MOMENTUM   Rate of change of the Precision Trend line.       |
-//|                 The ROC is zero at every peak and trough of the   |
-//|                 trend line, so its sign marks the onset or        |
-//|                 continuation of a push.  Vote = sign(ROC).        |
-//|                                                                  |
-//|  3. STRUCTURE  Net move over the last STRUCT_PERIOD closed bars,  |
-//|                silent unless it beats STRUCT_DEAD_ATR of ATR.     |
-//|                Vote = sign(move).  It is deliberately its OWN     |
-//|                measurement: three different measurements are      |
-//|                what make 2/3 a real state - and 2/3 is the        |
-//|                LIMIT order.                                       |
-//|                                                                  |
-//|  4. REGIME     Rolling Hurst exponent (long-memory estimate).     |
-//|                Shown as Steady / Mixed / Choppy.  The score still |
-//|                decides the would-be direction and order type; a   |
-//|                separate operator switch may veto NEW entries      |
-//|                while a row is Choppy:                             |
-//|                  Steady / Mixed : a limit waits half an ATR back  |
-//|                  Choppy, allowed: a limit waits at the box band   |
-//|                                  or, with Range Mode off / a box  |
-//|                                  that is unusable, half an ATR    |
-//|                                  back                             |
-//|                  Choppy, Off    : no new market or limit order    |
-//|                A Choppy veto never closes a trade by itself: an   |
-//|                already-open trade keeps its normal management.    |
-//|                                                                  |
-//|  Score = vote1 + vote2 + vote3      (range -3 .. +3)              |
-//|      BUY  if score >= InpBuyScore     (+2 default)                |
-//|      SELL if score <= InpSellScore    (-2 default)                |
-//|      HOLD otherwise (the plan block says WHY - dead market,      |
-//|                      score under the gate, or Choppy Trade Off)   |
-//|  ORDER TYPE, once the Choppy permission allows the row:           |
-//|      3/3 (all three agree) -> MARKET order, taken now             |
-//|      2/3 (two agree)       -> LIMIT order, waiting for a price    |
-//|      under the gate        -> nothing                             |
-//|      Choppy + permission Off -> nothing, at 2/3 or 3/3            |
-//|                                                                  |
-//|  Kaufman's Efficiency Ratio acts as a dead-market gate: below     |
-//|  ER_DEAD   the market is not travelling anywhere, so any          |
-//|  directional read is meaningless and the row is forced to HOLD    |
-//|  with "quiet - nothing worth trading" on the plan block.          |
-//|                                                                  |
-//|  Every calculation uses CLOSED bars only.  Nothing repaints and   |
-//|  a historical direction never changes after the fact.             |
-//|                                                                  |
-//|  -----------------------------------------------------------------|
-//|  CHART-TIMEFRAME RULE                                             |
-//|  -----------------------------------------------------------------|
-//|  The engine is calibrated for M5, M15 and M30 ONLY.  If the chart |
-//|  is put on any other timeframe, no data is shown: the panel       |
-//|  collapses to a single header line that says so -                 |
-//|                                                                  |
-//|     SimpleEA2.0 | Incompatible chart. Switch to M5/M15/M30.       |
-//|                                                                   |
-//|  -----------------------------------------------------------------|
-//|  TRADE PLAN (levels used by the optional executor)               |
-//|  -----------------------------------------------------------------|
-//|  Under the three timeframe rows, separated by one line, comes a     |
-//|  SECOND GROUP with one block per timeframe - M5, M15, M30 - in the  |
-//|  same two-column style as the first: where to enter (market or      |
-//|  pending, decided by the score), the lot size, the stop and the     |
-//|  target (price, points, money and a rough bar count), and how many  |
-//|  bars the reading is worth acting on - or, once a trade is open,    |
-//|  how long it has run against that Reach estimate. A HOLD or         |
-//|  waiting timeframe takes a single line, so the group is only as     |
-//|  tall as its content.                                               |
-//|                                                                  |
-//|  Nothing is calculated at all while the chart is on a wrong       |
-//|  timeframe, so no stale or out-of-context number can be read off  |
-//|  the screen.  Switching the chart back to M5, M15 or M30 brings   |
-//|  the full panel straight back.                                    |
-//|  -----------------------------------------------------------------|
-//|  AUTOTRADING & SECOND PANEL                                       |
-//|  -----------------------------------------------------------------|
-//|  Controlled by InpAutoTrading (default true; false = advice only). |
-//|                                                                   |
-//|   - Strictly one active position or pending order per timeframe,  |
-//|     isolated by the M5/M15/M30 magic numbers.                     |
-//|   - Score 3/3 -> market; score 2/3 -> pending limit.  Existing    |
-//|     signal, regime, permission and risk settings decide entries.  |
-//|   - New orders are placed only on their own timeframe's closed    |
-//|     bar.  Attaching, restarting or another row's bar cannot enter |
-//|     mid-bar.                                                      |
-//|   - Every new market/pending order carries its planned broker SL  |
-//|     and TP3.  Pending Entry/SL/TP may update BEFORE a fill.       |
-//|   - After a fill, the SL remains at its initial price.  SimpleEA |
-//|     moves it to breakeven, locks TP1/TP2 profit or re-tightens it |
-//|     on later candles.                                             |
-//|   - The only software-initiated open-position exits are:          |
-//|        TP1 -> close 70% when a valid remainder can stay open;     |
-//|        TP2 -> reduce the remainder to broker minimum lot;         |
-//|        TP3 -> close the remainder in full.                        |
-//|     The broker SL can also close the position.  TP1/TP2 partials  |
-//|     need the EA running; SL and TP3 are also sent to the broker.  |
-//|   - Direction flips, HOLD, weakening score, regime changes and    |
-//|     range-box breaks NEVER close an open position.                |
-//|   - Pending-order cancellation/update on flips, HOLD, expiry,     |
-//|     permission/timer changes or box breaks remains ENTRY          |
-//|     management and is unchanged.                                  |
-//|   - The Autotrading panel shows fixed TP/SL exits and Stoploss    |
-//|     Fixed/Missing, plus each card's TP1/TP2/TP3/SL and live gap.  |
-//|   - The calibration diary remains compatible with older records.  |
-//|     New records describe fixed-SL trading; only current fixed-  |
-//|     exit diagnostics are presented.                             |
-//|  -----------------------------------------------------------------|
-//|  HONEST NOTE ON EXPECTATION                                       |
-//|  -----------------------------------------------------------------|
-//|  This panel is a structured, low-lag reading of trend, momentum   |
-//|  and regime.  It is NOT a proven profitable system.  Independent  |
-//|  testing of direction signals on liquid FX shows hit rates close  |
-//|  to 50%, and on M5 the typical edge is smaller than a retail      |
-//|  spread.  The regime column is the part that carries real         |
-//|  information: it tells you when NOT to act.  See README.md.       |
+//| TP1/TP2 are EA-managed; the fixed SL and TP3 are broker-side.     |
+//| Historical touches are not guaranteed fills, bar ordering/spread  |
+//| are approximations, and no performance or profit is guaranteed.  |
+//| Compile in MetaEditor, then test real ticks, forward and demo.    |
 //+------------------------------------------------------------------+
 #property copyright "SimpleEA"
 #property version   "2.0"
@@ -169,8 +40,8 @@ enum ENUM_AUTO_PANEL_POS
 //  mean-reverting, which drags the estimate down.  Both effects are worst
 //  on M5 and mild on M30, so M5 may read its regime from a slower row:
 //
-//     Own  - M5 keeps its own 21-hour label (the original behaviour)
-//     M15  - M5 borrows M15's label (64 hours, 3-bar sampling)
+//     Own  - M5 keeps its own label (128 hours at M5 sampling)
+//     M15  - M5 borrows M15's label (128 hours, 3-bar sampling)
 //     M30  - M5 borrows M30's label (128 hours, 6-bar sampling)
 //
 //  This borrows the LABEL, it does not require the two rows to AGREE.
@@ -192,7 +63,7 @@ enum ENUM_M5_REGIME
 //  INPUTS
 //==================================================================
 input group "=== Autotrading & order management ==="
-input bool                InpAutoTrading  = true;            // Autotrading (true = full auto, false = read-only)
+input bool                InpAutoTrading  = true;            // Master: false is read-only (including existing positions)
 //  Daily timer + one-shot pause, both on PC LOCAL time.  These gate
 //  NEW placements only: while OFF, waiting pendings are cancelled and
 //  already-open trades keep their fixed SL and TP1/TP2/TP3 handling.
@@ -229,7 +100,7 @@ input int      InpSellScore   = -2;          // Score <= this  => SELL
 //     when its row turns Choppy.  It never closes an already-open trade.
 //  2) InpRangeMode is ENTRY STYLE, consulted only after permission is
 //     given: on a Choppy 2/3, true lets a usable box price the limit;
-//     false (or an unusable box) uses the normal half-ATR pullback.
+//     false (or an unusable box) uses a confirmed swing pullback.
 //  InpBuyScore / InpSellScore still gate every order in every regime
 //  (ScoreAllowsTrade()), and the score still picks the order type:
 //  3/3 -> market, 2/3 -> limit.  The Main Panel's "Choppy Trade" value
@@ -242,17 +113,9 @@ input bool     InpAllowChoppyTrade = true;   // Allow Choppy trade (false = no N
 //  removes well over half of all entries.  That is a deliberate choice to
 //  make, not a default, so it ships ON.
 input bool     InpAllowMixedTrade  = true;   // Allow Mixed trade (false = no NEW orders while a row is Mixed)
-//  What the regime adds, once permission is given, is where a LIMIT
-//  waits: on a Choppy row (H below the revert threshold - moves genuinely
-//  come back) Range Mode lets the box band price the limit (entry at the
-//  band, target = the midpoint, stop = band + 1 ATR); on a Steady or
-//  Mixed row it waits half an ATR back from the market.  Every box
-//  number is a gate, not a guess; a box that fails one simply hands the
-//  limit back to the half-ATR pullback.
-//  The six numbers that define the box were inputs too until they stopped
-//  earning a decision - they are calibration, so they now live in THE
-//  RANGE PROFILE below, one value for all three timeframes, exactly like
-//  the trade profile.
+// Choppy range mode can place a limit at a usable 20-bar box band;
+// otherwise a limit uses a confirmed swing. Stops and all targets are
+// determined separately from structure and completed historical analogs.
 input bool     InpRangeMode    = true;       // Range mode: box-band entry for an ALLOWED Choppy 2/3 (default ON)
 
 //  The three rows used to be three sealed rooms: every reading came from
@@ -260,7 +123,7 @@ input bool     InpRangeMode    = true;       // Range mode: box-band entry for a
 //  door - M5 may take its regime label from a slower row, and M5 may be
 //  held to the higher row's direction before it places.  Both default to
 //  the SAFE side of their own trade-off:
-//     InpM5RegimeFrom     - ON  (M5's own 21h label is the weak one)
+//     InpM5RegimeFrom     - M15 (M5 sampling can bias the label)
 //     InpM5RequireHigher  - OFF (a direction veto costs 15-30 min, which
 //                                is longer than an M5 reading lives, so
 //                                it would kill the trades it allows)
@@ -363,20 +226,24 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 #define ROC_DEAD_ATR    0.02      // Vote 2 (ROC) dead-band: must beat 0.02 x ATR to avoid sub-pip flickering
 #define VOL_RATIO_MIN   0.50      // minimum tick volume vs 20-bar avg to permit aggressive 3/3 market orders
 
-//  ---- THE TRADE PROFILE (baked in: this is the tested set) ----------
-//  These were inputs until they stopped earning a decision.  None of
-//  them is a user preference - they are the calibration the engine was
-//  measured with, and a wrong value here silently changes the strategy
-//  rather than a convenience.  Stop and target are still PER TIMEFRAME,
-//  so the three styles keep their aim: a scalp aims near and quick, an
-//  intraday trade aims far and lets the move run.
-#define ATR_PERIOD      14        // ATR period, closed bars, each timeframe's own
-#define SL_ATR_M5       1.0       // M5  scalp:       stop   = this many ATR
-#define TP_ATR_M5       0.9       // M5  scalp:       target = this many ATR (R:R 1:0.9)
-#define SL_ATR_M15      1.2       // M15 short-term:  stop   = this many ATR
-#define TP_ATR_M15      1.8       // M15 short-term:  target = this many ATR (R:R 1:1.5)
-#define SL_ATR_M30      1.5       // M30 intraday:    stop   = this many ATR
-#define TP_ATR_M30      3.0       // M30 intraday:    target = this many ATR (R:R 1:2.0)
+// ATR remains only in the existing signal engine's noise deadbands.
+// Entry, stop and targets below never use ATR or fixed ATR multiples.
+#define ATR_PERIOD      14
+// Closed-bar structure windows and forward observation horizons, per lane.
+// These initial profiles are policy choices, not tested profit guarantees.
+#define STRUCTURE_M5       36
+#define STRUCTURE_M15      48
+#define STRUCTURE_M30      72
+#define OBS_HORIZON_M5      4
+#define OBS_HORIZON_M15     6
+#define OBS_HORIZON_M30     8
+#define OBS_HISTORY_BARS 12000
+#define OBS_MIN_CASES      30
+// Empirical favorable-excursion quantiles: all three come from the
+// lane's own completed, conservatively replayed historical analogs.
+#define OBS_Q1 0.50
+#define OBS_Q2 0.70
+#define OBS_Q3 0.85
 //  ---- THE REGIME PROFILE (baked in: the tested boundaries) -----------
 //  Same reasoning as the block above, and for once the numbers are not
 //  even a calibration: H is a property of the series, not of the symbol.
@@ -393,31 +260,12 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 #define HURST_TREND     0.55      // H above this = persistent: Steady
 #define HURST_REVERT    0.45      // H below this = anti-persistent: Choppy (box-priced limits)
 
-//  ---- THE RANGE PROFILE (baked in: the tested box geometry) ----------
-//  Same reasoning as the two blocks above: these are the calibration the
-//  box trade was measured with, one set for all three timeframes, and
-//  none of them is a preference.  They used to be six inputs; only the
-//  on/off switch is still one.  If your broker's spread is genuinely
-//  not the one this was measured on, the single number worth
-//  re-exposing is RANGE_SPREAD_X - the cost gate is the only one that
-//  is account-specific rather than a property of the price series.
-#define RANGE_BARS      20        // range box = the last N closed bars' highs/lows
-#define RANGE_SL_ATR    1.0       // range stop = opposite band + this many ATR
-#define RANGE_MIN_RR    1.0       // box must be tall enough that half-box >= stop risk
-//  The height gate is DERIVED, never typed twice: half the box is the
-//  target (box/2 ATR) and the stop is RANGE_SL_ATR, so requiring
-//  half-box >= RANGE_MIN_RR x stop is the same as box >= 2 x 1.0 x 1.0
-//  ATR.  Change RANGE_SL_ATR and the height floor follows it; the RR
-//  cannot silently drop because two numbers drifted apart.
-#define RANGE_MIN_ATR   (2.0 * RANGE_SL_ATR * RANGE_MIN_RR)
-#define RANGE_SPREAD_X  3.0       // half-box target must clear at least this many spreads
-#define RANGE_ER_MAX    0.40      // efficiency above this = a walk, not a box
-//  NOT HURST_REVERT on purpose: H reads ~256 bars of memory, the E/R
-//  reads the box's own 20.  Reusing 0.45 here would let 0.40-0.45 walks
-//  in as boxes - a different question, a different window.
-#define RANGE_VALID_BARS 8        // pending range-entry leash; box break cancels only the pending
+// Range mode selects an entry band only; stops and targets are still
+// derived from confirmed structure and observed forward price behavior.
+#define RANGE_BARS       20
+#define RANGE_ER_MAX     0.40
+#define RANGE_VALID_BARS 8
 
-#define PEND_ATR        0.5       // pending entry sits this many ATR from the market
 #define VALID_BARS      3         // trend reading's leash in bars (research/HORIZON.md)
 #define RISK_SCORE3_X   2.0       // score 3 risks this multiple of the score-2 percentage
 #define BAL_PER_001     1000.0    // risk-off mode: balance per 0.01 lot
@@ -425,7 +273,7 @@ input color    InpHoldColor   = clrSilver;   // "Sideways" colour
 #define HEAD_H      34     // height of a ONE-LINE header band (notice + 2nd Panel)
 #define STATUS_LINE_C 71   // widest Main Panel mode-status line, in characters
 #define PLAN_W_MIN  406    // panel width with no plan showing
-#define PLAN_LINES  3      // lines an ACTIVE timeframe uses (1 for HOLD)
+#define PLAN_LINES  4      // lines for a full plan or indicative HOLD; other HOLDs use 1
 //  The three column anchors are the FONT-9 design, not raw pixels: ColX()
 //  scales them by em / em(9), so they are the same columns at every font
 //  size and the two groups keep lining up.  PLAN_LBL_C is what guarantees
@@ -495,8 +343,6 @@ struct SRow
    //  read the same number even when M5 is using M15's label.
    int            regime;     // effective label, -1 until first evaluated
    int            regimeSrc;  // -1 own, otherwise the row it came from
-   double         slAtr;      // stop loss   = this many ATR (per timeframe)
-   double         tpAtr;      // take profit = this many ATR (per timeframe)
    // ---- the entry style and the reason, per row -----------------------
    int            mode;       // 0 plain limit/market entry, 2 the box prices the limit
    bool           choppyBlocked;// score direction exists, but InpAllowChoppyTrade=false
@@ -544,6 +390,8 @@ string   g_pauseGVReq       = "";   // GlobalVariable holding the requested hour
 bool     g_timerStateInit   = false;
 bool     g_timerWasAllowed  = false; // last observed timer placement state
 ulong    g_lastPendCancelTryMs = 0;  // throttled pending-cancel retries while OFF
+ulong    g_lastSafetyCancelMs[TF_COUNT]; // per-lane rejected safety-cancel retries
+ulong    g_lastResidualCancelMs[TF_COUNT]; // partial-fill remainder cancellation
 int      g_resumeMinsShown  = -1;    // "Resume ..." minute currently on the panel
 
 ENUM_TIMEFRAMES g_drawnTf = (ENUM_TIMEFRAMES)0;  // timeframe the header was drawn for
@@ -599,8 +447,7 @@ int BarsNeeded()
 //  SETUP
 //==================================================================
 void ConfigureRow(int i, ENUM_TIMEFRAMES tf, string tag, string style,
-                  int l1, int l2, int hWindow, double hTrend, double hRevert,
-                  double slAtr, double tpAtr)
+                  int l1, int l2, int hWindow, double hTrend, double hRevert)
 {
    g_rows[i].tf      = tf;
    g_rows[i].tag     = tag;
@@ -610,8 +457,6 @@ void ConfigureRow(int i, ENUM_TIMEFRAMES tf, string tag, string style,
    g_rows[i].hWindow = hWindow;
    g_rows[i].hTrend  = hTrend;
    g_rows[i].hRevert = hRevert;
-   g_rows[i].slAtr   = slAtr;
-   g_rows[i].tpAtr   = tpAtr;
    g_rows[i].score      = 0;
    g_rows[i].direction  = 0;
    g_rows[i].trendDir   = 0;
@@ -638,11 +483,11 @@ int OnInit()
    //  shared numbers and applies them to its own closed bars.  (Give a
    //  row different numbers here and only that row changes.)
    ConfigureRow(0, PERIOD_M5,  "M5",  "Scalp",      TREND_L1, TREND_L2, HURST_WINDOW_M5,
-                HURST_TREND,    HURST_REVERT,    SL_ATR_M5,  TP_ATR_M5);
+                HURST_TREND,    HURST_REVERT);
    ConfigureRow(1, PERIOD_M15, "M15", "Short-term", TREND_L1, TREND_L2, HURST_WINDOW_M15,
-                HURST_TREND,    HURST_REVERT,    SL_ATR_M15, TP_ATR_M15);
+                HURST_TREND,    HURST_REVERT);
    ConfigureRow(2, PERIOD_M30, "M30", "Intraday",   TREND_L1, TREND_L2, HURST_WINDOW_M30,
-                HURST_TREND,    HURST_REVERT,    SL_ATR_M30, TP_ATR_M30);
+                HURST_TREND,    HURST_REVERT);
 
    //  The trend periods are baked in (THE ENGINE PROFILE), so this can
    //  only trip for someone who has just edited them the wrong way round.
@@ -772,6 +617,7 @@ int OnInit()
    else
    {
       EvaluateAll();
+      SyncAutoState();
       UpdatePlan();
       ManageAutoBar();
       DiaryReconcileOpenRecords();
@@ -809,27 +655,20 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   //  Goes through CheckNewBars() even on an unsupported chart, so that a
-   //  live timeframe change is caught whether or not MetaTrader re-started
-   //  the EA for it.  On a wrong chart that call costs one comparison.
+   // Protect already-open positions before a new-bar replay can run.
+   if(ChartSupported() && g_panelOK) ManageAutoTick();
    CheckNewBars();
    CheckAutoTimerTransition();
    CheckDiaryDayTransition();
-
-   //  Real-time tick checks for TP1/TP2/TP3 exits and live Ask/Bid/P&L
-   //  updates on the 2nd Panel.  The entry SL is never changed here.
-   if(ChartSupported() && g_panelOK)
-      ManageAutoTick();
 }
 
 //+------------------------------------------------------------------+
 void OnTimer()
 {
+   if(ChartSupported() && g_panelOK) ManageAutoTick();
    CheckNewBars();
    CheckAutoTimerTransition();
    CheckDiaryDayTransition();
-   if(ChartSupported() && g_panelOK)
-      ManageAutoTick();
 }
 
 //==================================================================
@@ -1299,9 +1138,8 @@ bool IsVolumeConfirmed(ENUM_TIMEFRAMES tf, int period = 20)
 //      BUY  only at score >= InpBuyScore
 //      SELL only at score <= InpSellScore
 //  It applies to the TREND game and to the RANGE game alike.  The range
-//  game still takes its entry price, stop and target from the box - the
-//  box decides WHERE the trade is - but it may only trade in a direction
-//  the score actually supports.  Before this gate existed a Choppy row
+//  game may take its entry from the box, but it may only trade in a
+//  direction the score actually supports.  Before this gate existed a Choppy row
 //  could send a box order at a score of 0, which reads on screen as
 //  "autotrading traded while the score said 0".
 //+------------------------------------------------------------------+
@@ -1458,17 +1296,8 @@ void EvaluateRow(int idx)
    int v3    = StructureVote(c, h, l, last, STRUCT_PERIOD, atrNow);
    int score = v1 + v2 + v3;
 
-   //  The regime is a LABEL and an ENTRY STYLE.  The score publishes the
-   //  would-be direction exactly as InpBuyScore / InpSellScore say; the
-   //  operator's separate InpAllowChoppyTrade switch may then veto a
-   //  NEW entry on a Choppy row without erasing that direction, so a
-   //  trade already open keeps its normal score-based management.
-   //     Steady (H > hTrend) : a limit entry waits half an ATR back
-   //     Choppy (H < hRevert): an allowed limit waits at the box band,
-   //                           or half an ATR back when Range Mode is
-   //                           off / the box is unusable; permission
-   //                           Off places nothing at 2/3 or 3/3
-   //     Mixed  (in between) : a limit entry waits half an ATR back
+   // The regime is a label, permission and optional range-entry style;
+   // it does not erase the directional score. It does not set ATR exits.
    //  This row's OWN Hurst, over its own (now time-equalised) window.
    //  It is always measured - the panel shows it, and it is the fallback
    //  whenever there is nothing to borrow from - but it is only the label
@@ -1538,11 +1367,9 @@ void EvaluateRow(int idx)
       g_rows[idx].blockReason = "mixed " + emDash + " Mixed Trade is Off";
 
    // ---- the entry style: an allowed Choppy 2/3 may use the box ----
-   //  mode 2 means "this limit's price comes from the box".  A 3/3 order
-   //  is a market order (the box has no say in a market fill), and if
-   //  the box is not usable an allowed limit falls back to the half-ATR
-   //  pullback.  A blocked row never enters box mode: there is no new
-   //  entry to price.
+   // A usable Choppy box changes the pending entry band only; otherwise
+   // a confirmed swing supplies the pending entry. Stops/targets are
+   // independently checked in the structure plan.
    int mode = 0;
    if(dir != 0 && game == 2 && !choppyBlocked && InpRangeMode && MathAbs(score) < 3)
    {
@@ -1558,13 +1385,11 @@ void EvaluateRow(int idx)
       double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
       double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       double spread = ask - bid;
-      double half   = 0.5 * (top - bot);          // band -> midpoint = the target
+      double half   = 0.5 * (top - bot);          // range-style spread clearance
 
-      bool usable = (atrNow > 0.0 && spread >= 0.0 && n >= nb && top > bot &&
-                     top - bot >= RANGE_MIN_ATR * atrNow &&        // tall enough for the stop
-                     ER < RANGE_ER_MAX &&                          // a box, not a walk
-                     bid <= top && bid >= bot &&                   // price inside the box
-                     half >= RANGE_SPREAD_X * spread);             // the cost gate
+      bool usable = (spread >= 0.0 && n >= nb && top > bot &&
+                     ER < RANGE_ER_MAX && bid <= top && bid >= bot &&
+                     half > spread); // entry style only; final cost/risk gates are in the plan
       if(usable)
       {
          g_rows[idx].rngTop = top;
@@ -1609,40 +1434,14 @@ void EvaluateRow(int idx)
 }
 
 //==================================================================
-//  TRADE PLAN  (ADVICE ONLY - NO ORDER IS EVER SENT)
+//  TRADE PLAN: new entries only, separate from open-position management
 //==================================================================
-//  Everything below is arithmetic that the terminal itself supplies:
-//  the broker's contract size, tick value, lot step and stop level, plus
-//  the account balance.  Nothing here is a prediction, and nothing here
-//  sends, modifies or closes an order - the panel only writes the numbers
-//  on the chart so they can be typed into the trade dialog by hand.
-//
-//  The five questions it answers, per signal:
-//     1. WHERE  - market entry, a pending order if the score is only 2,
-//                 or in range mode the OPPOSITE band of the box
-//     2. HOW MUCH - lot size, from balance and score
-//     3. TARGET - take profit in points and money, plus a rough bar
-//                  count for how long reaching it may take
-//     4. STOP   - stop loss   in points and in account currency
-//     5. UNTIL  - how long the reading is worth acting on
-//
-//  Entry type is decided by the score, once the operator's Choppy
-//  permission allows the row:
-//     score 3/3  -> all three components agree -> MARKET entry
-//     score 2/3  -> two of three agree        -> PENDING (wait for a better price)
-//  WHERE an allowed pending waits is what the regime/Range Mode pair
-//  changes: on a Choppy row with Range Mode on and a usable box it sits
-//  at the box band (target = half the box, band -> midpoint, stop =
-//  band + 1 ATR); otherwise it sits half an ATR back from the market
-//  with the timeframe's ATR stop and target.  With Choppy permission
-//  off, a Choppy row has no executable plan at either score.
-//  (Measured behaviour of both is in research/HORIZON.md; the pending price
-//   is PEND_ATR (half an ATR) beyond the market, pushed out further only
-//   when the spread or the broker's stops level demands it.)
+// Confirmed swings supply entry/invalidation and opposing barriers.
+// Completed, non-overlapping bar analogs supply three empirical
+// favorable-excursion quantiles. Insufficient history, costs, risk or
+// broker restrictions produce HOLD without changing the signal.
+// M5/M15/M30 use separate lookbacks and observation horizons.
 //+------------------------------------------------------------------+
-//  ONE PLAN PER TIMEFRAME.  The second group is three blocks, one for M5,
-//  one for M15, one for M30 - because the executor acts per row and the
-//  panel has to be able to say "buy M5, sell M30".
 struct SPlanRow
 {
    int      state;                // 0 HOLD, 1 waiting for data, 2 active
@@ -1653,13 +1452,17 @@ struct SPlanRow
    string   head;                 // "M5" / "M15" / "M30"
    string   kind;                 // "market -3/3" / "pending +2/3" / "HOLD" / "waiting"
    string   note;                 // one-liners for the inactive states
-   double   entryPrice;           // advised entry price (ask/bid for market, pend for limit)
+   double   entryPrice;           // advised entry price (ask/bid or structural limit)
+   double   slPrice;
+   double   tp1Price;
+   double   tp2Price;
+   double   tp3Price;
    double   lot;                  // normalized lot size
    int      slPts;                // stop distance in points
    int      tpPts;                // target (TP3) distance in points
-   int      tp1Pts;               // TP1 distance in points (25% less than TP2)
-   int      tp2Pts;               // TP2 distance in points (25% less than TP3)
-   int      tp3Pts;               // TP3 distance in points (100% of advised target)
+   int      tp1Pts;               // independently observed/structure-capped targets
+   int      tp2Pts;
+   int      tp3Pts;
    datetime validUntil;           // expiration timestamp
    // ---- ready to draw: label + value per cell -------------------------
    string   lbl[PLAN_LINES][3];
@@ -1670,13 +1473,10 @@ struct SPlanRow
 SPlanRow g_plans[TF_COUNT];
 
 //+------------------------------------------------------------------+
-//  Compute the three take-profit levels in points from SimpleEA's
-//  advised target (TP3):
-//     TP3 = 100% of advised target points
-//     TP2 = 25% less than TP3 (75% of TP3)
-//     TP1 = 25% less than TP2 (75% of TP2 = 56.25% of TP3)
+//  Legacy migration ONLY: pre-upgrade positions used this ladder on
+//  restart. New orders persist their independent absolute TP1/TP2 prices.
 //+------------------------------------------------------------------+
-void ComputeTPLevels(int tp3, int &tp1, int &tp2)
+void ComputeLegacyTPLevels(int tp3, int &tp1, int &tp2)
 {
    if(tp3 < 1) tp3 = 1;
    tp2 = (int)MathMax(1.0, MathRound((double)tp3 * 0.75));
@@ -1709,6 +1509,18 @@ double SymbolMinLot()
 //  Snap a lot size onto the broker's grid: never below the minimum,
 //  never above the maximum, always a whole number of lot steps.
 //+------------------------------------------------------------------+
+int VolumeStepDigits(double step)
+{
+   int digits = 0;
+   double scaled = step;
+   while(digits < 8 && MathAbs(scaled - MathRound(scaled)) > 1e-8)
+   {
+      scaled *= 10.0;
+      digits++;
+   }
+   return(digits);
+}
+
 double NormalizeLots(double lots)
 {
    double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
@@ -1720,12 +1532,8 @@ double NormalizeLots(double lots)
 
    double n = MathFloor(lots / step + 1e-8) * step;
    if(n < mn) n = mn;
-   if(n > mx) n = mx;
-
-   int digits = 0;
-   double probe = step;
-   while(probe < 1.0 && digits < 8) { probe *= 10.0; digits++; }
-   return(NormalizeDouble(n, digits));
+   if(n > mx) n = MathFloor(mx / step + 1e-8) * step;
+   return(NormalizeDouble(n, VolumeStepDigits(step)));
 }
 
 //+------------------------------------------------------------------+
@@ -1783,6 +1591,10 @@ void ClearPlanRow(int i)
    g_plans[i].kind       = "";
    g_plans[i].note       = "";
    g_plans[i].entryPrice = 0.0;
+   g_plans[i].slPrice    = 0.0;
+   g_plans[i].tp1Price   = 0.0;
+   g_plans[i].tp2Price   = 0.0;
+   g_plans[i].tp3Price   = 0.0;
    g_plans[i].lot        = 0.0;
    g_plans[i].slPts      = 0;
    g_plans[i].tpPts      = 0;
@@ -1800,296 +1612,857 @@ void ClearPlanRow(int i)
       }
 }
 
+//==================================================================
+//  STRUCTURE AND COMPLETED HISTORICAL BAR OBSERVATIONS
+//==================================================================
+// The replay is a conservative bar-level ANALOG, not a backtest of fills
+// or a forecast. It reconstructs the closed-bar score/regime and entry
+// style approximately; a pending touch is not proof of execution. Bid
+// bars have no intrabar ordering or intrabar Ask/spread history, so a
+// stop in a bar wins any ambiguity, and a pending fill bar contributes
+// no favorable extreme. Samples end at the fixed horizon even if an
+// actual trade would have closed earlier. No unfinished window is used.
+
+struct SStructureGeometry
+{
+   double entry;
+   double stop;
+   double cap[3];             // distance to the first three opposing swings
+};
+
+struct SObservationCache
+{
+   datetime bar;
+   int dir;
+   int score;
+   int regime;
+   int regimeSrc;
+   bool market;
+   bool range;
+   int eligible;              // non-overlapping matching, valid setups
+   int filled;                // market probes or one-bar pending touches
+   double q1;
+   double q2;
+   double q3;
+};
+
+SObservationCache g_observations[TF_COUNT];
+
+int StructureWindow(int i)
+{
+   return(i == 0 ? STRUCTURE_M5 : (i == 1 ? STRUCTURE_M15 : STRUCTURE_M30));
+}
+
+int ObservationHorizon(int i)
+{
+   return(i == 0 ? OBS_HORIZON_M5 : (i == 1 ? OBS_HORIZON_M15 : OBS_HORIZON_M30));
+}
+
+double PriceDown(double price, double tick)
+{
+   if(tick <= 0.0) return(0.0);
+   return(NormPrice(MathFloor(price / tick + 1e-9) * tick));
+}
+
+double PriceUp(double price, double tick)
+{
+   if(tick <= 0.0) return(0.0);
+   return(NormPrice(MathCeil(price / tick - 1e-9) * tick));
+}
+
+bool ConfirmedSwingLow(const MqlRates &bars[], int k, int last)
+{
+   return(k > 0 && k < last && bars[k].low < bars[k - 1].low &&
+          bars[k].low <= bars[k + 1].low);
+}
+
+bool ConfirmedSwingHigh(const MqlRates &bars[], int k, int last)
+{
+   return(k > 0 && k < last && bars[k].high > bars[k - 1].high &&
+          bars[k].high >= bars[k + 1].high);
+}
+
+void BoxAt(const MqlRates &bars[], int last, double &top, double &bot)
+{
+   top = -DBL_MAX;
+   bot = DBL_MAX;
+   int first = (int)MathMax(0, last - RANGE_BARS + 1);
+   for(int k = first; k <= last; k++)
+   {
+      top = MathMax(top, bars[k].high);
+      bot = MathMin(bot, bars[k].low);
+   }
+}
+
+// Insert a positive distance in the nearest-three ordered set. Prices at
+// the same tick are one level, not three independently supported targets.
+void InsertStructureCap(double distance, double tick, double &caps[])
+{
+   if(distance <= 0.0) return;
+   for(int j = 0; j < 3; j++)
+      if(caps[j] > 0.0 && MathAbs(caps[j] - distance) < 0.5 * tick) return;
+   for(int j = 0; j < 3; j++)
+   {
+      if(caps[j] <= 0.0 || distance < caps[j])
+      {
+         for(int m = 2; m > j; m--) caps[m] = caps[m - 1];
+         caps[j] = distance;
+         return;
+      }
+   }
+}
+
+// All pivots use k+1 <= last, so the right-hand confirmation bar is
+// closed at the decision. Entry, invalidation and opposing barriers are
+// therefore determined without looking into the observation window.
+bool StructureGeometry(const MqlRates &bars[], int last, int i, int dir,
+                       bool market, bool range, double bid, double ask,
+                       double point, double tick, double minStop,
+                       SStructureGeometry &out)
+{
+   out.entry = 0.0;
+   out.stop = 0.0;
+   for(int j = 0; j < 3; j++) out.cap[j] = 0.0;
+   if(last < 2 || dir == 0 || point <= 0.0 || tick <= 0.0 ||
+      bid <= 0.0 || ask < bid) return(false);
+
+   int first = (int)MathMax(1, last - StructureWindow(i) + 1);
+   double offset = MathMax(tick, minStop);
+   if(market)
+      out.entry = dir > 0 ? ask : bid;
+   else if(range)
+   {
+      double top, bot;
+      BoxAt(bars, last, top, bot);
+      out.entry = (dir > 0) ? PriceDown(bot, tick) : PriceUp(top, tick);
+   }
+   else
+   {
+      // Nearest confirmed support/resistance on the valid limit side.
+      for(int k = first; k < last; k++)
+      {
+         if(dir > 0 && ConfirmedSwingLow(bars, k, last))
+         {
+            double p = PriceDown(bars[k].low, tick);
+            if(p > 0.0 && p <= ask - offset + 1e-9 * tick &&
+               (out.entry <= 0.0 || p > out.entry)) out.entry = p;
+         }
+         if(dir < 0 && ConfirmedSwingHigh(bars, k, last))
+         {
+            double p = PriceUp(bars[k].high, tick);
+            if(p >= bid + offset - 1e-9 * tick &&
+               (out.entry <= 0.0 || p < out.entry)) out.entry = p;
+         }
+      }
+   }
+   if(out.entry <= 0.0) return(false);
+   if(!market && ((dir > 0 && out.entry > ask - offset + 1e-9 * tick) ||
+                  (dir < 0 && out.entry < bid + offset - 1e-9 * tick)))
+      return(false); // never move a structure entry to an invented broker price
+
+   // A limit's own entry pivot cannot also be its invalidation pivot.
+   // Search a separate, confirmed level beyond entry and add one live
+   // spread (at least one tick) outside it for quote-side protection.
+   double support = 0.0;
+   for(int k = first; k < last; k++)
+   {
+      if(dir > 0 && ConfirmedSwingLow(bars, k, last) &&
+         bars[k].low < out.entry - 0.5 * tick &&
+         (support <= 0.0 || bars[k].low > support)) support = bars[k].low;
+      if(dir < 0 && ConfirmedSwingHigh(bars, k, last) &&
+         bars[k].high > out.entry + 0.5 * tick &&
+         (support <= 0.0 || bars[k].high < support)) support = bars[k].high;
+   }
+   if(support <= 0.0) return(false);
+   double buffer = MathMax(tick, ask - bid);
+   out.stop = (dir > 0) ? PriceDown(support - buffer, tick)
+                        : PriceUp(support + buffer, tick);
+   double stopBase = market ? (dir > 0 ? bid : ask) : out.entry;
+   if(out.stop <= 0.0 || (double)dir * (stopBase - out.stop) < minStop - 1e-9 * tick ||
+      (double)dir * (out.entry - out.stop) < tick - 1e-9 * tick)
+      return(false);
+
+   double caps[3] = {0.0, 0.0, 0.0};
+   for(int k = first; k < last; k++)
+   {
+      if(dir > 0 && ConfirmedSwingHigh(bars, k, last))
+      {
+         double p = PriceDown(bars[k].high, tick);
+         InsertStructureCap(p - out.entry, tick, caps);
+      }
+      if(dir < 0 && ConfirmedSwingLow(bars, k, last))
+      {
+         double p = PriceUp(bars[k].low, tick);
+         InsertStructureCap(out.entry - p, tick, caps);
+      }
+   }
+   for(int j = 0; j < 3; j++) out.cap[j] = caps[j];
+   return(true);
+}
+
+// Same zero-crossing procedure as AdaptiveCyclePeriod(), but explicitly
+// ending at a historical closed bar. The high-pass filter is causal.
+int ObservationCycleAt(const double &hp[], int last)
+{
+   if(last + 1 < 40) return(TREND_L2);
+   int first = (int)MathMax(2, last + 1 - 120);
+   int cross[];
+   int n = 0;
+   for(int k = first + 1; k <= last; k++)
+   {
+      if((hp[k - 1] <= 0.0 && hp[k] > 0.0) ||
+         (hp[k - 1] >= 0.0 && hp[k] < 0.0))
+      {
+         ArrayResize(cross, n + 1);
+         cross[n++] = k;
+      }
+   }
+   if(n < 3) return(TREND_L2);
+   int diffs[];
+   ArrayResize(diffs, n - 1);
+   for(int j = 0; j < n - 1; j++) diffs[j] = cross[j + 1] - cross[j];
+   ArraySort(diffs);
+   return((int)MathMax(14, MathMin(36, diffs[(n - 1) / 2] * 2)));
+}
+
+// Precompute the same adaptive trend/ROC for past bars. The long filter is
+// warmed up before sampling; its initial state can differ slightly from
+// the EA's rolling live pull, hence these are approximate reconstructions.
+void ObservationTrends(const double &close[], double &trend[], double &roc[])
+{
+   int n = ArraySize(close);
+   ArrayResize(trend, n);
+   ArrayResize(roc, n);
+   ArrayInitialize(trend, 0.0);
+   ArrayInitialize(roc, 0.0);
+   double hp40[];
+   HighPass3(close, 40, hp40);
+   int cycles[];
+   ArrayResize(cycles, n);
+   for(int k = 0; k < n; k++) cycles[k] = ObservationCycleAt(hp40, k);
+   for(int cycle = 14; cycle <= 36; cycle++)
+   {
+      int l1 = (int)MathRound((double)cycle * 6.25);
+      l1 = (int)MathMax(90, MathMin(225, l1));
+      double hp1[], hp2[];
+      HighPass3(close, l1, hp1);
+      HighPass3(close, cycle, hp2);
+      for(int k = 1; k < n; k++)
+      {
+         if(cycles[k] != cycle) continue;
+         trend[k] = hp1[k] - hp2[k];
+         double prior = hp1[k - 1] - hp2[k - 1];
+         roc[k] = ((double)cycle / 6.28) * (trend[k] - prior);
+      }
+   }
+}
+
+// ATR is reproduced here solely to reconstruct the unchanged signal's
+// vote deadbands; it is never used to set an entry, stop or target.
+double ObservationSignalATR(const MqlRates &bars[], int last)
+{
+   if(last < ATR_PERIOD) return(0.0);
+   double sum = 0.0;
+   for(int k = last - ATR_PERIOD + 1; k <= last; k++)
+   {
+      double tr = bars[k].high - bars[k].low;
+      tr = MathMax(tr, MathAbs(bars[k].high - bars[k - 1].close));
+      tr = MathMax(tr, MathAbs(bars[k].low - bars[k - 1].close));
+      sum += tr;
+   }
+   return(sum / (double)ATR_PERIOD);
+}
+
+bool ObservationVolumeOK(const MqlRates &bars[], int last)
+{
+   if(last < 20) return(true);
+   long sum = 0;
+   int valid = 0;
+   for(int k = last - 20; k < last; k++)
+      if(bars[k].tick_volume > 0) { sum += bars[k].tick_volume; valid++; }
+   if(valid < 10 || sum == 0) return(true);
+   return((double)bars[last].tick_volume >= VOL_RATIO_MIN * (double)sum / (double)valid);
+}
+
+// Precompute causal sums of the same log returns used by HurstExponent.
+// Reusing them avoids millions of repeated logarithms while an existing
+// trade is waiting for its next tick to be managed.
+void ObservationReturnPrefix(const double &close[], double &prefix[])
+{
+   int n = ArraySize(close);
+   ArrayResize(prefix, n);
+   if(n == 0) return;
+   prefix[0] = 0.0;
+   for(int k = 1; k < n; k++)
+   {
+      double r = (close[k] > 0.0 && close[k - 1] > 0.0)
+                 ? MathLog(close[k] / close[k - 1]) : 0.0;
+      prefix[k] = prefix[k - 1] + r;
+   }
+}
+
+double ObservationHurst(const double &prefix[], int last, int window)
+{
+   if(last < window || window < 32) return(0.5);
+   int scales[5] = {1, 2, 4, 8, 16};
+   double lx[5], ly[5];
+   int m = 0, start = last - window + 1;
+   for(int s = 0; s < 5; s++)
+   {
+      int scale = scales[s], count = window / scale;
+      if(count < 4) continue;
+      double mean = 0.0;
+      for(int b = 0; b < count; b++)
+      {
+         int first = start + b * scale;
+         mean += prefix[first + scale - 1] - prefix[first - 1];
+      }
+      mean /= (double)count;
+      double variance = 0.0;
+      for(int b = 0; b < count; b++)
+      {
+         int first = start + b * scale;
+         double sum = prefix[first + scale - 1] - prefix[first - 1];
+         variance += (sum - mean) * (sum - mean);
+      }
+      double sd = MathSqrt(variance / (double)(count - 1));
+      if(sd <= 0.0) continue;
+      lx[m] = MathLog((double)scale);
+      ly[m] = MathLog(sd);
+      m++;
+   }
+   if(m < 3) return(0.5);
+   double mx = 0.0, my = 0.0;
+   for(int j = 0; j < m; j++) { mx += lx[j]; my += ly[j]; }
+   mx /= (double)m; my /= (double)m;
+   double sxy = 0.0, sxx = 0.0;
+   for(int j = 0; j < m; j++)
+   {
+      sxy += (lx[j] - mx) * (ly[j] - my);
+      sxx += (lx[j] - mx) * (lx[j] - mx);
+   }
+   return(sxx > 0.0 ? sxy / sxx : 0.5);
+}
+
+// Index the last slower bar that had finished by the historical decision.
+int ObservationSourceIndex(const MqlRates &source[], datetime decision, int seconds)
+{
+   int lo = 0, hi = ArraySize(source) - 1, found = -1;
+   while(lo <= hi)
+   {
+      int mid = (lo + hi) / 2;
+      if(source[mid].time + seconds <= decision) { found = mid; lo = mid + 1; }
+      else hi = mid - 1;
+   }
+   return(found);
+}
+
+double ObservationSpread(const MqlRates &bar, double point, double fallback)
+{
+   // A zero bar spread may be missing data. Use the current spread as a
+   // conservative proxy, not an assertion about the historical tick spread.
+   return(bar.spread > 0 ? (double)bar.spread * point : fallback);
+}
+
+// Return max executable-side favorable travel before the first stop over a
+// COMPLETE horizon. Equal-bar stop/target order is unknown: count the stop
+// first. For a hypothetical limit, a touch only qualifies the sample; its
+// fill bar's favorable extreme is ignored as it may precede the touch.
+bool ReplayObservation(const MqlRates &bars[], int last, int horizon, int dir,
+                       bool market, const SStructureGeometry &g,
+                       double point, double spreadFallback, double &mfeR)
+{
+   mfeR = 0.0;
+   if(last + horizon >= ArraySize(bars)) return(false);
+   double risk = (double)dir * (g.entry - g.stop);
+   if(risk <= 0.0) return(false);
+   int first = last + 1;
+   if(!market)
+   {
+      double fillSpread = ObservationSpread(bars[first], point, spreadFallback);
+      bool touched = (dir > 0) ? (bars[first].low + fillSpread <= g.entry)
+                               : (bars[first].high >= g.entry);
+      if(!touched) return(false); // count in eligible, not in filled
+   }
+   double best = 0.0;
+   for(int k = first; k <= last + horizon; k++)
+   {
+      double spread = ObservationSpread(bars[k], point, spreadFallback);
+      bool stopped = (dir > 0) ? (bars[k].low <= g.stop)
+                               : (bars[k].high + spread >= g.stop);
+      if(stopped) break;       // stop first when both extremes share a bar
+      if(!market && k == first) continue; // high/low may precede the touch
+      double favorable = (dir > 0) ? (bars[k].high - g.entry)
+                                   : (g.entry - (bars[k].low + spread));
+      if(favorable > best) best = favorable;
+   }
+   mfeR = MathMax(0.0, best / risk);
+   return(true);
+}
+
+void ObserveLane(int i, int dir, int score, bool market, bool range,
+                 double point, double tick, double minStop, double currentSpread)
+{
+   SObservationCache cached = g_observations[i];
+   if(cached.bar == g_rows[i].lastBar && cached.bar > 0 && cached.dir == dir &&
+      cached.score == score && cached.regime == g_rows[i].regime &&
+      cached.regimeSrc == g_rows[i].regimeSrc && cached.market == market &&
+      cached.range == range) return;
+
+   SObservationCache obs;
+   ZeroMemory(obs);
+   obs.dir = dir;
+   obs.score = score;
+   obs.regime = g_rows[i].regime;
+   obs.regimeSrc = g_rows[i].regimeSrc;
+   obs.market = market;
+   obs.range = range;
+   MqlRates bars[];
+   ArraySetAsSeries(bars, false);
+   int n = CopyRates(_Symbol, g_rows[i].tf, 1, OBS_HISTORY_BARS, bars);
+   int warmup = 4 * 225;
+   if(g_rows[i].regimeSrc < 0) warmup = (int)MathMax(warmup, g_rows[i].hWindow);
+   int horizon = ObservationHorizon(i);
+   if(n <= warmup + horizon + OBS_MIN_CASES)
+   {
+      // A partial download is not cached; a subsequent refresh may load it.
+      g_observations[i] = obs;
+      return;
+   }
+
+   double c[], h[], l[];
+   ArrayResize(c, n); ArrayResize(h, n); ArrayResize(l, n);
+   for(int k = 0; k < n; k++)
+   {
+      c[k] = bars[k].close; h[k] = bars[k].high; l[k] = bars[k].low;
+   }
+   double trend[], roc[], ownPrefix[];
+   ObservationTrends(c, trend, roc);
+   ObservationReturnPrefix(c, ownPrefix);
+
+   MqlRates source[];
+   double sourceClose[], sourcePrefix[];
+   int src = g_rows[i].regimeSrc;
+   if(src >= 0)
+   {
+      ArraySetAsSeries(source, false);
+      int ns = CopyRates(_Symbol, g_rows[src].tf, 1, OBS_HISTORY_BARS, source);
+      if(ns <= g_rows[src].hWindow + 1)
+      {
+         g_observations[i] = obs;
+         return;
+      }
+      ArrayResize(sourceClose, ns);
+      for(int k = 0; k < ns; k++) sourceClose[k] = source[k].close;
+      ObservationReturnPrefix(sourceClose, sourcePrefix);
+   }
+
+   double samples[];
+   int lastStart = n;
+   for(int t = n - horizon - 1; t >= warmup; t--)
+   {
+      if(t + horizon >= lastStart) continue; // no overlapping replay windows
+      double er = EfficiencyRatio(c, t, ER_PERIOD);
+      if(er < ER_DEAD) continue;
+      double signalAtr = ObservationSignalATR(bars, t);
+      int v1 = trend[t] > 0.0 ? 1 : (trend[t] < 0.0 ? -1 : 0);
+      double dead = ROC_DEAD_ATR * signalAtr;
+      int v2 = roc[t] > dead ? 1 : (roc[t] < -dead ? -1 : 0);
+      int v3 = StructureVote(c, h, l, t, STRUCT_PERIOD, signalAtr);
+      int pastScore = v1 + v2 + v3;
+      if(pastScore != score || !ScoreAllowsTrade(dir, pastScore)) continue;
+      bool pastMarket = (MathAbs(pastScore) >= 3 && ObservationVolumeOK(bars, t));
+      if(pastMarket != market) continue;
+
+      double H;
+      if(src >= 0)
+      {
+         int j = ObservationSourceIndex(source, bars[t + 1].time,
+                                        (int)PeriodSeconds(g_rows[src].tf));
+         if(j < g_rows[src].hWindow) continue;
+         H = ObservationHurst(sourcePrefix, j, g_rows[src].hWindow);
+      }
+      else H = ObservationHurst(ownPrefix, t, g_rows[i].hWindow);
+      int pastRegime = H > g_rows[i].hTrend ? 1 : (H < g_rows[i].hRevert ? 2 : 0);
+      if(pastRegime != obs.regime) continue;
+
+      double spread = ObservationSpread(bars[t + 1], point, currentSpread);
+      double bid = bars[t + 1].open;
+      double ask = bid + spread;
+      double top, bot;
+      BoxAt(bars, t, top, bot);
+      bool pastRange = (!pastMarket && pastRegime == 2 && InpRangeMode &&
+                        MathAbs(pastScore) < 3 && er < RANGE_ER_MAX &&
+                        bid >= bot && bid <= top && 0.5 * (top - bot) > spread);
+      if(pastRange != range) continue;
+      SStructureGeometry geometry;
+      if(!StructureGeometry(bars, t, i, dir, pastMarket, pastRange,
+                            bid, ask, point, tick, minStop, geometry)) continue;
+      obs.eligible++;
+      double mfeR = 0.0;
+      if(!ReplayObservation(bars, t, horizon, dir, pastMarket, geometry,
+                            point, currentSpread, mfeR)) continue;
+      lastStart = t; // filled/probed observations do not overlap
+      int count = ArraySize(samples);
+      ArrayResize(samples, count + 1);
+      samples[count] = mfeR;
+   }
+   obs.filled = ArraySize(samples);
+   if(obs.filled > 0)
+   {
+      ArraySort(samples);
+      obs.q1 = samples[(int)MathFloor((obs.filled - 1) * OBS_Q1)];
+      obs.q2 = samples[(int)MathFloor((obs.filled - 1) * OBS_Q2)];
+      obs.q3 = samples[(int)MathFloor((obs.filled - 1) * OBS_Q3)];
+   }
+   obs.bar = g_rows[i].lastBar;
+   g_observations[i] = obs;
+}
+
+
 //+------------------------------------------------------------------+
-//  Build the plan for ONE timeframe: M5, M15 or M30.  Everything is
-//  read from the terminal (price, contract value, account balance) and
-//  from that timeframe's own ATR, so each block stands alone - which is
-//  what the future executor will need.
+// Build a new-entry plan only. A HOLD here never changes the published
+// direction or an already-open position's broker/EA exit levels.
 //+------------------------------------------------------------------+
+void HoldPlan(int i, string why)
+{
+   g_plans[i].state = 0;
+   g_plans[i].kind = "HOLD";
+   g_plans[i].note = why;
+}
+
+// Show only the prices actually available for a held signal. These cells
+// are informational: state stays HOLD and no executable prices are stored.
+// Swing-only targets are barriers, not historically validated TP forecasts.
+void ShowHeldPlan(int i, string why, string basis, double entry, double stop,
+                  double tp1, double tp2, double tp3, int filled, int eligible)
+{
+   HoldPlan(i, why);
+   g_plans[i].lines = PLAN_LINES;
+   int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   g_plans[i].lbl[0][0] = "Entry:";
+   g_plans[i].val[0][0] = entry > 0.0 ? DoubleToString(entry, dg) : "--";
+   g_plans[i].lbl[0][1] = "Stop:";
+   g_plans[i].val[0][1] = stop > 0.0 ? DoubleToString(stop, dg) : "--";
+   g_plans[i].lbl[0][2] = "Data:";
+   g_plans[i].val[0][2] = filled >= 0 ? StringFormat("%d/%d analogs", filled, eligible) : "--";
+   g_plans[i].lbl[1][0] = "TP1~:";
+   g_plans[i].val[1][0] = tp1 > 0.0 ? DoubleToString(tp1, dg) : "--";
+   g_plans[i].lbl[1][1] = "TP2~:";
+   g_plans[i].val[1][1] = tp2 > 0.0 ? DoubleToString(tp2, dg) : "--";
+   g_plans[i].lbl[1][2] = "TP3~:";
+   g_plans[i].val[1][2] = tp3 > 0.0 ? DoubleToString(tp3, dg) : "--";
+   g_plans[i].lbl[2][0] = "Basis:";
+   g_plans[i].val[2][0] = basis;
+   g_plans[i].lbl[2][1] = "Action:";
+   g_plans[i].val[2][1] = "NO ORDER";
+   g_plans[i].lbl[3][0] = "Reason:";
+   g_plans[i].val[3][0] = why;
+   for(int l = 0; l < PLAN_LINES; l++)
+      for(int c = 0; c < 3; c++) g_plans[i].clr[l][c] = clrSilver;
+   g_plans[i].clr[2][1] = clrOrange; // NO ORDER
+   g_plans[i].clr[3][0] = clrOrange; // HOLD reason
+}
+
+// Check the actual executable sides and broker distances rather than
+// forcing an observed/structural target farther out to satisfy a minimum.
+bool PlanPricesValid(int dir, bool market, double entry, double stop,
+                     double tp1, double tp2, double tp3,
+                     double bid, double ask, double point, double tick,
+                     double minStop, double pv)
+{
+   if(dir == 0 || entry <= 0.0 || stop <= 0.0 || bid <= 0.0 || ask < bid ||
+      point <= 0.0 || tick <= 0.0 || pv <= 0.0) return(false);
+   double eps = 1e-7 * tick;
+   if((double)dir * (entry - stop) < tick - eps ||
+      (double)dir * (tp1 - entry) < tick - eps ||
+      (double)dir * (tp2 - tp1) < tick - eps ||
+      (double)dir * (tp3 - tp2) < tick - eps) return(false);
+   double base = market ? (dir > 0 ? bid : ask) : entry;
+   if((double)dir * (base - stop) < minStop - eps ||
+      (double)dir * (tp3 - base) < minStop - eps) return(false);
+   if(!market)
+   {
+      double offset = MathMax(tick, minStop);
+      if(dir > 0 && entry > ask - offset + eps) return(false);
+      if(dir < 0 && entry < bid + offset - eps) return(false);
+   }
+   // Conservative cost screen within this lane, not against another
+   // timeframe. Distance already starts at the executable entry side;
+   // requiring it to clear the spread too protects very small targets.
+   // Actual broker commissions are not known in advance here; this is a
+   // spread-only screen, not a claim that commissions are zero.
+   if((double)dir * (tp1 - entry) <= (ask - bid) + eps)
+      return(false);
+   return(true);
+}
+
 void UpdatePlanRow(int i)
 {
    ClearPlanRow(i);
-
    if(!g_rows[i].ok)
    {
       g_plans[i].state = 1;
-      g_plans[i].kind  = "waiting";
-      g_plans[i].note  = "history still loading";
+      g_plans[i].kind = "waiting";
+      g_plans[i].note = "signal history still loading";
+      return;
+   }
+   if(PlanHasOpenPosition(i))
+   {
+      HoldPlan(i, "position open; existing exits retained (EA trading required)");
+      return;
+   }
+   if(PlanHasUncertainOrder(i))
+   {
+      HoldPlan(i, "order response uncertain or pending; review broker state");
       return;
    }
    if(g_rows[i].direction == 0)
    {
-      g_plans[i].state = 0;
-      g_plans[i].kind  = "HOLD";
-      //  The row says WHY it stands aside (dead market, or score under the gate);
-      //  the classic "nothing to place".
-      g_plans[i].note  = (g_rows[i].blockReason != "") ? g_rows[i].blockReason
-                                                       : "nothing to place";
+      HoldPlan(i, g_rows[i].blockReason != "" ? g_rows[i].blockReason : "nothing to place");
       return;
    }
+   // Compute visible prices even when a permission vetoes execution.
+   // The plan stays HOLD; PlacePlanOrder requires state 2.
+   string entryVeto = "";
+   if(!AutoTradingAllowed(i)) entryVeto = "lane switched off";
+   else if(RegimeBlocksEntry(i)) entryVeto = "regime blocks entry";
+   // Netting combines positions by symbol and cannot isolate the three lanes.
+   else if(AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+      entryVeto = "hedging required";
+   else if(!TrendMatchForTF(i)) entryVeto = "trend gate mismatch";
+   else if(!AutoTimerAllowsPlacement()) entryVeto = "timer paused";
 
-   //  Choppy Trade Off: publish no executable plan for a flat lane or a
-   //  lane whose order is still only a waiting pending.  The executor
-   //  will cancel that pending below.  The one exception is a position
-   //  ALREADY OPEN in this same direction: this switch is a new-entry
-   //  veto, not an exit rule, so its plan stays available to display
-   //  the original fixed exits after the row turns Choppy.
-   //  PlacePlanOrder() still refuses outright while the flag is set, so
-   //  this management-only plan can never become a second/reverse order.
-   bool openSameDirForPlan = (g_auto[i].active && g_auto[i].isOpen &&
-                              g_auto[i].dir == g_rows[i].direction &&
-                              g_auto[i].entryPrice > 0.0);
-   //  A row that may not open anything publishes no executable plan:
-   //  either it is switched off by InpAutoTradeM5/M15/M30, or the Choppy
-   //  / Mixed permission vetoes new entries.  Either way the plan carries
-   //  the reason in words, and an already-open same-direction trade keeps
-   //  its plan (openSameDirForPlan) because that trade is only being
-   //  MANAGED - a veto must never abandon it.
-   if(!openSameDirForPlan && (!AutoTradingAllowed(i) || RegimeBlocksEntry(i)))
-   {
-      g_plans[i].state = 0;
-      g_plans[i].kind  = "HOLD";
-      string emDash = ShortToString((ushort)0x2014); // U+2014 em dash
-      if(!AutoTradingAllowed(i))
-         g_plans[i].note = "autotrading off " + emDash + " " + g_rows[i].tag +
-                           " is switched off";
-      else
-         g_plans[i].note = (g_rows[i].blockReason != "")
-                           ? g_rows[i].blockReason
-                           : ("regime " + emDash + " new entries are off");
-      return;
-   }
-
-   double atr   = ATRClosed(g_rows[i].tf, ATR_PERIOD);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double pv    = PointValuePerLot();
-   if(atr <= 0.0 || point <= 0.0 || bid <= 0.0 || ask <= 0.0)
+   double tick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double pv = PointValuePerLot();
+   if(point <= 0.0 || tick <= 0.0 || bid <= 0.0 || ask < bid || pv <= 0.0)
    {
-      g_plans[i].state = 1;
-      g_plans[i].kind  = "waiting";
-      g_plans[i].note  = "no price data yet";
+      HoldPlan(i, "price, tick size or point value unavailable");
+      return;
+   }
+   if(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN) <= 0.0 ||
+      SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX) <= 0.0 ||
+      SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP) <= 0.0)
+   {
+      HoldPlan(i, "broker volume limits unavailable");
+      return;
+   }
+   if((ENUM_SYMBOL_CHART_MODE)SymbolInfoInteger(_Symbol, SYMBOL_CHART_MODE) != SYMBOL_CHART_MODE_BID)
+   {
+      HoldPlan(i, "historical Bid bars unavailable for executable-side replay");
+      return;
+   }
+   int dir = g_rows[i].direction;
+   int score = g_rows[i].score;
+   bool market = (MathAbs(score) >= 3 && IsVolumeConfirmed(g_rows[i].tf, 20));
+   bool isRange = (g_rows[i].mode == 2 && !market);
+   double minStop = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+
+   MqlRates bars[];
+   ArraySetAsSeries(bars, false);
+   int n = CopyRates(_Symbol, g_rows[i].tf, 1, StructureWindow(i) + 2, bars);
+   if(n < StructureWindow(i) + 2)
+   {
+      HoldPlan(i, "closed-bar structure still loading");
+      return;
+   }
+   SStructureGeometry geo;
+   if(!StructureGeometry(bars, n - 1, i, dir, market, isRange,
+                         bid, ask, point, tick, minStop, geo))
+   {
+      ShowHeldPlan(i, "no structure", "unconfirmed", geo.entry, geo.stop,
+                   0.0, 0.0, 0.0, -1, -1);
       return;
    }
 
-   int    dir        = g_rows[i].direction;
-   int    score      = g_rows[i].score;
-   //  THE ORDER TYPE IS THE SCORE'S CALL, everywhere:
-   //      3/3 -> MARKET (all three votes agree, take it now)
-   //      2/3 -> LIMIT  (two agree, wait for a better price)
-   //  Volume Confirmation: if score is 3/3 but tick volume has dried up,
-   //  it safely places a Limit order to protect against illiquid slippage.
-   bool   volOK      = IsVolumeConfirmed(g_rows[i].tf, 20);
-   bool   market     = (MathAbs(score) >= 3 && volOK);
-   bool   isRange    = (g_rows[i].mode == 2 && !market);
-   bool   isOpenNow  = (g_auto[i].active && g_auto[i].isOpen && g_auto[i].dir == dir &&
-                        g_auto[i].entryPrice > 0.0);
-   bool   isPendNow  = (g_auto[i].active && !g_auto[i].isOpen && g_auto[i].dir == dir &&
-                        g_auto[i].entryPrice > 0.0);
-   double entry      = (dir > 0) ? ask : bid;
-   //  Pending offset: half an ATR, but never inside the spread and never
-   //  inside the broker's minimum stop distance - on a wide-spread or a
-   //  thin symbol a bare half-ATR would sit where no limit order can
-   //  rest.  On a normal feed this is exactly PEND_ATR * ATR.
-   double offset     = PEND_ATR * atr;
-   double minOff     = MathMax(2.0 * (ask - bid),
-                               (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point);
-   if(offset < minOff) offset = minOff;
-   double pend       = ValidLimitPrice(dir, (dir > 0) ? (entry - offset) : (entry + offset),
-                                       bid, ask, point);
-   double planEntry  = market ? entry : pend;
-
-   // ---- stop and target ---------------------------------------------
-   //  A plain (market or pullback) entry keeps the per-timeframe ATR
-   //  profiles (scalp aims near, intraday aims far).  A BOX entry is pure
-   //  geometry: entry at the band, stop = band + RANGE_SL_ATR ATR,
-   //  target = half the box (band -> midpoint).  Neither is shrunk by hand.
-   int slPts, tpPts;
-   if(isRange)
+   // These are real opposing swing barriers, not a replacement for the
+   // data-derived TP plan. Display them only as non-tradable candidates
+   // when the historical observations cannot support target selection.
+   double swings[3];
+   for(int j = 0; j < 3; j++)
    {
-      planEntry = ValidLimitPrice(dir, (dir > 0) ? g_rows[i].rngBot : g_rows[i].rngTop,
-                                  bid, ask, point);
-      slPts = (int)MathMax(1.0, MathRound(RANGE_SL_ATR * atr / point));
-      tpPts = (int)MathMax(1.0, MathRound(0.5 * (g_rows[i].rngTop - g_rows[i].rngBot) / point));
-   }
-   else
-   {
-      slPts = (int)MathMax(1.0, MathRound(g_rows[i].slAtr * atr / point));
-      tpPts = (int)MathMax(1.0, MathRound(g_rows[i].tpAtr * atr / point));
+      swings[j] = 0.0;
+      if(geo.cap[j] > 0.0)
+         swings[j] = dir > 0 ? PriceDown(geo.entry + geo.cap[j], tick)
+                             : PriceUp(geo.entry - geo.cap[j], tick);
    }
 
-   double minStop = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
-   bool   widened = false;
-   if(minStop > 0.0 && (double)slPts * point < minStop)
+   ObserveLane(i, dir, score, market, isRange, point, tick, minStop, ask - bid);
+   SObservationCache obs = g_observations[i];
+   if(obs.filled < OBS_MIN_CASES)
    {
-      slPts   = (int)MathCeil(minStop / point);
-      widened = true;
+      ShowHeldPlan(i, StringFormat("need %d analogs", OBS_MIN_CASES), "swing-only", geo.entry, geo.stop,
+                   swings[0], swings[1], swings[2], obs.filled, obs.eligible);
+      return;
    }
-   if(minStop > 0.0 && (double)tpPts * point < minStop)
-      tpPts = (int)MathCeil(minStop / point);
+   if(obs.q1 <= 0.0 || obs.q2 <= 0.0 || obs.q3 <= 0.0)
+   {
+      ShowHeldPlan(i, "weak follow-through", "swing-only", geo.entry, geo.stop,
+                   swings[0], swings[1], swings[2], obs.filled, obs.eligible);
+      return;
+   }
 
-   double dispEntry = isOpenNow ? g_auto[i].entryPrice
-                                : (isPendNow ? g_auto[i].entryPrice : planEntry);
-   int    dispSlPts = ((isOpenNow || isPendNow) && g_auto[i].slPrice > 0.0) ? g_auto[i].slPts : slPts;
-   int    dispTpPts = (isOpenNow && g_auto[i].tp3Pts > 0)  ? g_auto[i].tp3Pts
-                    : ((isPendNow && g_auto[i].tp3Pts > 0) ? g_auto[i].tp3Pts : tpPts);
+   double riskDistance = (double)dir * (geo.entry - geo.stop);
+   double distances[3];
+   distances[0] = riskDistance * obs.q1;
+   distances[1] = riskDistance * obs.q2;
+   distances[2] = riskDistance * obs.q3;
+   for(int j = 0; j < 3; j++)
+      if(geo.cap[j] > 0.0) distances[j] = MathMin(distances[j], geo.cap[j]);
+   double tp1 = dir > 0 ? PriceDown(geo.entry + distances[0], tick)
+                        : PriceUp(geo.entry - distances[0], tick);
+   double tp2 = dir > 0 ? PriceDown(geo.entry + distances[1], tick)
+                        : PriceUp(geo.entry - distances[1], tick);
+   double tp3 = dir > 0 ? PriceDown(geo.entry + distances[2], tick)
+                        : PriceUp(geo.entry - distances[2], tick);
+   if(!PlanPricesValid(dir, market, geo.entry, geo.stop, tp1, tp2, tp3,
+                       bid, ask, point, tick, minStop, pv))
+   {
+      ShowHeldPlan(i, "cost/broker/order", "observed", geo.entry, geo.stop,
+                   tp1, tp2, tp3, obs.filled, obs.eligible);
+      return;
+   }
+   int slPts = (int)MathRound(riskDistance / point);
+   int tp1Pts = (int)MathRound((double)dir * (tp1 - geo.entry) / point);
+   int tp2Pts = (int)MathRound((double)dir * (tp2 - geo.entry) / point);
+   int tp3Pts = (int)MathRound((double)dir * (tp3 - geo.entry) / point);
+   if(slPts <= 0 || tp1Pts <= 0 || tp2Pts <= tp1Pts || tp3Pts <= tp2Pts)
+   {
+      ShowHeldPlan(i, "target grid", "observed", geo.entry, geo.stop,
+                   tp1, tp2, tp3, obs.filled, obs.eligible);
+      return;
+   }
 
-   double slPrice = (dir > 0) ? (dispEntry - (double)dispSlPts * point)
-                              : (dispEntry + (double)dispSlPts * point);
-   if((isOpenNow || isPendNow) && g_auto[i].slPrice > 0.0)
-      slPrice = g_auto[i].slPrice;
-
-   double tpPrice = (dir > 0) ? (dispEntry + (double)dispTpPts * point)
-                              : (dispEntry - (double)dispTpPts * point);
-   if((isOpenNow || isPendNow) && g_auto[i].tpPrice > 0.0)
-      tpPrice = g_auto[i].tpPrice;
-
-   // ---- lot size ---------------------------------------------------
-   double balance  = AccountInfoDouble(ACCOUNT_BALANCE);
-   double lots     = SymbolMinLot();
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   if(balance <= 0.0)
+   {
+      ShowHeldPlan(i, "no balance", "observed", geo.entry, geo.stop,
+                   tp1, tp2, tp3, obs.filled, obs.eligible);
+      return;
+   }
+   double perLotRisk = (double)slPts * pv; // excludes unknown commissions/fees
    double wantRisk = 0.0;
-   bool   minLot   = false;
-
+   double lots = SymbolMinLot();
    if(InpUseMinLot)
-   {
-      minLot = true;
-      lots   = SymbolMinLot();
-   }
+      lots = SymbolMinLot();
    else if(InpUseRisk)
    {
-      double pct = InpRiskPct;
-      if(MathAbs(score) >= 3) pct *= RISK_SCORE3_X;   // all three agree: double
-      wantRisk   = balance * pct / 100.0;
-      if(pv > 0.0 && slPts > 0)
-         lots = wantRisk / ((double)slPts * pv);
+      double pct = InpRiskPct * (MathAbs(score) >= 3 ? RISK_SCORE3_X : 1.0);
+      wantRisk = balance * pct / 100.0;
+      lots = wantRisk / perLotRisk;
    }
    else
    {
-      lots = (balance / BAL_PER_001) * 0.01;
+      lots = balance / BAL_PER_001 * 0.01;
       if(MathAbs(score) >= 3) lots *= SCORE3_FACTOR;
    }
+   double lot = NormalizeLots(lots);
+   // A pending order cannot change volume via a price modification. Size
+   // and risk its refreshed plan using the lot already at the broker.
+   double pendingLot = market ? 0.0 : ExistingPendingVolume(i, dir);
+   if(pendingLot > 0.0) lot = pendingLot;
+   double riskMoney = lot * perLotRisk;
+   if(!InpUseMinLot && InpUseRisk && (wantRisk <= 0.0 || riskMoney > wantRisk * 1.000001))
+   {
+      ShowHeldPlan(i, "risk exceeds budget", "observed", geo.entry, geo.stop,
+                   tp1, tp2, tp3, obs.filled, obs.eligible);
+      return;
+   }
+   // A target-ladder payout, not full lot at TP3. This is conditional on
+   // every close being filled at its target; slippage/unknown fees omitted.
+   double close1 = CalcTP1CloseLot(lot);
+   double left1 = FloorLotStep(lot - close1);
+   double close2 = CalcTP2CloseLot(left1);
+   double left2 = FloorLotStep(left1 - close2);
+   double reward = (close1 * tp1Pts + close2 * tp2Pts + left2 * tp3Pts) * pv;
+   if(reward <= 0.0)
+   {
+      ShowHeldPlan(i, "payout not positive", "observed", geo.entry, geo.stop,
+                   tp1, tp2, tp3, obs.filled, obs.eligible);
+      return;
+   }
 
-   double lot       = NormalizeLots(lots);
-   double dispLot   = ((isOpenNow || isPendNow) && g_auto[i].curLot > 0.0) ? g_auto[i].curLot : lot;
-   double riskUSD   = (pv > 0.0) ? dispLot * (double)dispSlPts * pv : 0.0;
-   double rewardUSD = (pv > 0.0) ? dispLot * (double)dispTpPts * pv : 0.0;
-   bool   riskOver  = (!InpUseMinLot && InpUseRisk && wantRisk > 0.0 &&
-                       riskUSD > wantRisk * 1.05);
+   int vBars = isRange ? MathMax(1, RANGE_VALID_BARS) : VALID_BARS;
+   datetime until = g_rows[i].lastBar + (datetime)((vBars + 1) * PeriodSeconds(g_rows[i].tf));
+   int tfSec = (int)PeriodSeconds(g_rows[i].tf);
+   long age = 0;
+   if(g_rows[i].sigBirth > 0 && tfSec > 0 && g_rows[i].lastBar > g_rows[i].sigBirth)
+      age = (long)((g_rows[i].lastBar - g_rows[i].sigBirth) / tfSec);
+   int left = (int)MathMax(0, MathMin(vBars, vBars - (int)age));
+   int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   string currency = AccountInfoString(ACCOUNT_CURRENCY);
+   color dirColor = dir > 0 ? InpBuyColor : InpSellColor;
 
-   // ---- how long this reading is worth acting on -------------------
-   //  Trend readings live VALID_BARS closed bars (the measured median
-   //  life, research/HORIZON.md).  Range fades get RANGE_VALID_BARS:
-   //  the box is re-measured every bar and a close outside it already
-   //  kills both the pending and the position, so a longer leash costs
-   //  nothing - it only stops the cancel / re-place churn every 3 bars
-   //  and the one-bar gap at the band that churn leaves behind.
-   int vBars = (g_rows[i].mode == 2) ? MathMax(1, RANGE_VALID_BARS)
-                                     : VALID_BARS;
-   datetime until  = 0;
-   datetime sigBar = LastClosedBarTime(_Symbol, g_rows[i].tf);
-   if(sigBar > 0)
-      until = sigBar + (datetime)((vBars + 1) * PeriodSeconds(g_rows[i].tf));
-
-   // ---- fill the cells ---------------------------------------------
-   string cur  = AccountInfoString(ACCOUNT_CURRENCY);
-   int    dg   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   color  dirC = (dir > 0) ? InpBuyColor : InpSellColor;
-
-   int tp1Pts = 1, tp2Pts = 1;
-   ComputeTPLevels(tpPts, tp1Pts, tp2Pts);
-
-   string kindWord = isOpenNow ? ((dir > 0) ? "buy" : "sell")
-                               : (market ? "market" : "pending");
-
-   g_plans[i].state      = 2;
-   g_plans[i].dir        = dir;
-   g_plans[i].score      = score;
-   g_plans[i].market     = market;
-   g_plans[i].lines      = PLAN_LINES;
-   g_plans[i].kind       = isRange ? "range fade"
-                                   : StringFormat("%s %+d/%d", kindWord, score, 3);
-   g_plans[i].entryPrice = planEntry;
-   g_plans[i].lot        = lot;
-   g_plans[i].slPts      = slPts;
-   g_plans[i].tpPts      = tpPts;
-   g_plans[i].tp1Pts     = tp1Pts;
-   g_plans[i].tp2Pts     = tp2Pts;
-   g_plans[i].tp3Pts     = tpPts;
+   g_plans[i].state = 2;
+   g_plans[i].dir = dir;
+   g_plans[i].score = score;
+   g_plans[i].market = market;
+   g_plans[i].lines = PLAN_LINES;
+   g_plans[i].kind = isRange ? "range fade" : StringFormat("%s %+d/3", market ? "market" : "pending", score);
+   g_plans[i].entryPrice = geo.entry;
+   g_plans[i].slPrice = geo.stop;
+   g_plans[i].tp1Price = tp1;
+   g_plans[i].tp2Price = tp2;
+   g_plans[i].tp3Price = tp3;
+   g_plans[i].lot = lot;
+   g_plans[i].slPts = slPts;
+   g_plans[i].tpPts = tp3Pts;
+   g_plans[i].tp1Pts = tp1Pts;
+   g_plans[i].tp2Pts = tp2Pts;
+   g_plans[i].tp3Pts = tp3Pts;
    g_plans[i].validUntil = until;
 
    g_plans[i].lbl[0][0] = "Entry:";
-   g_plans[i].val[0][0] = DoubleToString(dispEntry, dg);
-   g_plans[i].clr[0][0] = dirC;
-
-   string lotTxt = DoubleToString(dispLot, 2);
-   if(minLot)        lotTxt += " (min)";
-   else if(riskOver) lotTxt += StringFormat(" (min, %s %s)",
-                                            DoubleToString(riskUSD, 2), cur);
+   g_plans[i].val[0][0] = DoubleToString(geo.entry, dg);
+   g_plans[i].clr[0][0] = dirColor;
    g_plans[i].lbl[0][1] = "Lot:";
-   g_plans[i].val[0][1] = lotTxt;
+   g_plans[i].val[0][1] = DoubleToString(lot, 2) + (InpUseMinLot ? " (min)" : "");
    g_plans[i].clr[0][1] = InpTitleColor;
+   g_plans[i].lbl[0][2] = "Data:";
+   g_plans[i].val[0][2] = StringFormat("%d/%d analogs", obs.filled, obs.eligible);
+   g_plans[i].clr[0][2] = clrSilver;
 
    g_plans[i].lbl[1][0] = "Stop:";
-   g_plans[i].val[1][0] = StringFormat("%s %dpts%s", DoubleToString(slPrice, dg), dispSlPts,
-                                       widened ? " (min)" : "");
+   g_plans[i].val[1][0] = StringFormat("%s %dpts", DoubleToString(geo.stop, dg), slPts);
    g_plans[i].clr[1][0] = InpSellColor;
-
-   g_plans[i].lbl[1][1] = "Target:";
-   g_plans[i].val[1][1] = StringFormat("%s %dpts", DoubleToString(tpPrice, dg), dispTpPts);
+   g_plans[i].lbl[1][1] = "TP1:";
+   g_plans[i].val[1][1] = StringFormat("%s %dpts", DoubleToString(tp1, dg), tp1Pts);
    g_plans[i].clr[1][1] = InpBuyColor;
+   g_plans[i].lbl[1][2] = "TP2:";
+   g_plans[i].val[1][2] = StringFormat("%s %dpts", DoubleToString(tp2, dg), tp2Pts);
+   g_plans[i].clr[1][2] = InpBuyColor;
 
-   // ---- roughly how long the target may take -----------------------
-   //  A driftless walk covers ~1 ATR per sqrt(bar) of bars, so the
-   //  target's own distance says how many bars it typically needs:
-   //  bars ~ (target / ATR)^2.  A rough guide printed with a "~", not
-   //  a forecast - it is what makes scalp / short-term / intraday
-   //  visibly different in TIME, not only in points.
-   int etaBars = (int)MathMax(1.0, MathRound(MathPow((double)dispTpPts * point / atr, 2.0)));
-   g_plans[i].lbl[1][2] = "Reach:";
-   g_plans[i].val[1][2] = StringFormat("~%d bar%s", etaBars, (etaBars == 1) ? "" : "s");
-   g_plans[i].clr[1][2] = clrSilver;
+   g_plans[i].lbl[2][0] = "TP3:";
+   g_plans[i].val[2][0] = StringFormat("%s %dpts", DoubleToString(tp3, dg), tp3Pts);
+   g_plans[i].clr[2][0] = InpBuyColor;
+   g_plans[i].lbl[2][1] = "Risk:";
+   g_plans[i].val[2][1] = StringFormat("%s %s (est)", DoubleToString(riskMoney, 2), currency);
+   g_plans[i].clr[2][1] = InpSellColor;
+   g_plans[i].lbl[2][2] = "Reward:";
+   g_plans[i].val[2][2] = StringFormat("%s %s (est)", DoubleToString(reward, 2), currency);
+   g_plans[i].clr[2][2] = InpBuyColor;
 
-   g_plans[i].lbl[2][0] = "Risk:";
-   g_plans[i].val[2][0] = StringFormat("%s %s", DoubleToString(riskUSD, 2), cur);
-   g_plans[i].clr[2][0] = InpSellColor;
-
-   g_plans[i].lbl[2][1] = "Reward:";
-   g_plans[i].val[2][1] = StringFormat("%s %s", DoubleToString(rewardUSD, 2), cur);
-   g_plans[i].clr[2][1] = InpBuyColor;
-
-   // ---- the time cell: idea leash (Valid) or hold time (Hold) --------
-   //  A live position has no signal leash - its exits are SL, TP or the
-   //  box - so the time question flips to "how long has it run against
-   //  the Reach estimate above": Hold: N bars (est ~M).  Everything else
-   //  (advice plan, waiting pending) shows the idea's own leash counting
-   //  down: Valid: left/total bars, from the bar the idea was born - the
-   //  same bars the auto-trader expires and re-places a waiting order
-   //  on.  0/total is the rethink bar and shows for exactly one bar.
-   int  tfSec = (int)PeriodSeconds(g_rows[i].tf);
-   long age   = 0;
-   if(g_rows[i].sigBirth > 0 && tfSec > 0 && g_rows[i].lastBar > g_rows[i].sigBirth)
-      age = (long)((g_rows[i].lastBar - g_rows[i].sigBirth) / tfSec);
-
-   if(isOpenNow)
+   g_plans[i].lbl[3][0] = "Valid:";
+   g_plans[i].val[3][0] = StringFormat("%d/%d bars", left, vBars);
+   g_plans[i].clr[3][0] = clrSilver;
+   g_plans[i].lbl[3][1] = "Window:";
+   g_plans[i].val[3][1] = StringFormat("%d bars", ObservationHorizon(i));
+   g_plans[i].clr[3][1] = clrSilver;
+   g_plans[i].lbl[3][2] = "Fees:";
+   g_plans[i].val[3][2] = "not included";
+   g_plans[i].clr[3][2] = clrSilver;
+   if(entryVeto != "")
    {
-      long held = 0;
-      datetime fillBar = (g_auto[i].fillBar > 0) ? g_auto[i].fillBar : g_auto[i].placedBar;
-      if(fillBar > 0 && tfSec > 0 && g_rows[i].lastBar > fillBar)
-         held = (long)((g_rows[i].lastBar - fillBar) / tfSec);
-      g_plans[i].lbl[2][2] = "Hold:";
-      g_plans[i].val[2][2] = StringFormat("%d bar%s (est ~%d)", (int)held,
-                                          (held == 1) ? "" : "s", etaBars);
-      g_plans[i].clr[2][2] = clrSilver;
-   }
-   else
-   {
-      int left = (int)MathMax(0, MathMin(vBars, vBars - (int)age));
-      g_plans[i].lbl[2][2] = "Valid:";
-      g_plans[i].val[2][2] = StringFormat("%d/%d bars", left, vBars);
-      g_plans[i].clr[2][2] = clrSilver;
+      HoldPlan(i, entryVeto); // retain the visible plan, but never execute it
+      g_plans[i].lbl[3][0] = "Block:";
+      g_plans[i].val[3][0] = entryVeto;
+      g_plans[i].clr[3][0] = clrOrange;
    }
 }
+
 
 //+------------------------------------------------------------------+
 //  Rebuild all three plan blocks.  Called whenever the panel is
@@ -2115,7 +2488,10 @@ void UpdatePlan()
 struct SAutoState
 {
    bool     active;        // true if an open position or pending order exists
-   bool     isOpen;        // true = open market position, false = pending limit order
+   bool     isOpen;        // true = open position, false = broker order
+   bool     marketInFlight; // an accepted market request not yet resolved
+   bool     residualOrder; // remaining entry order while a position is open
+   bool     multiplePositions; // ambiguous same-magic positions require review
    ulong    ticket;        // position or order ticket
    int      dir;           // +1 buy, -1 sell
    int      entryScore;    // score when placed/opened
@@ -2124,11 +2500,30 @@ struct SAutoState
    double   entryPrice;    // position open price or pending limit price
    double   slPrice;       // current broker SL price (0.0 if none)
    double   tpPrice;       // current broker TP price (TP3)
+   double   tp1Price;      // absolute target: frozen at placement/repricing
+   double   tp2Price;
+   bool     modernTargets; // recoverable absolute-level persistence
+   bool     legacyRecovery; // one-time migration of a pre-upgrade trade
+   bool     newTradeMarker; // broker comment identifies a new structure plan
+   bool     legacyTradeMarker; // old SimpleEA_ comment proves legacy fallback is applicable
+   bool     tp1Skipped;    // target no longer profitable after slippage
+   bool     tp2Skipped;
+   bool     tp1Short;      // broker partial left an untradeable residual
+   bool     tp2Short;
+   bool     cancelPending; // a rejected cancel must be retried, never refreshed
+   double   tp1StartLot;
+   double   tp1GoalLot;
+   double   tp1DoneLot;
+   bool     tp1Awaiting;   // accepted but execution volume not yet known
+   double   tp2StartLot;
+   double   tp2GoalLot;
+   double   tp2DoneLot;
+   bool     tp2Awaiting;
    double   profitUSD;     // live position profit in account currency
    int      slPts;         // current SL distance from entry in points
-   int      tp1Pts;        // TP1 distance in points (25% less than TP2)
-   int      tp2Pts;        // TP2 distance in points (25% less than TP3)
-   int      tp3Pts;        // TP3 distance in points (100% of advised target)
+   int      tp1Pts;        // signed favorable distances from actual fill
+   int      tp2Pts;
+   int      tp3Pts;
    bool     tp1Hit;        // true once TP1 has been reached
    bool     tp2Hit;        // true once TP2 has been reached
    bool     isRange;       // range-fade entry; box rules apply only while pending
@@ -2182,13 +2577,112 @@ string AutoGVKey(int i, string field)
    return(StringFormat("SEA_%d_%s_%d_%s", (int)AccountInfoInteger(ACCOUNT_LOGIN), _Symbol, MagicForTF(i), field));
 }
 
-void SaveAutoSlotState(int i)
+bool PlanHasOpenPosition(int i)
 {
+   return(g_auto[i].active && g_auto[i].isOpen);
+}
+
+bool PlanHasUncertainOrder(int i)
+{
+   return((!g_auto[i].active && (GlobalVariableCheck(AutoGVKey(i, "iv")) ||
+                                 GlobalVariableCheck(AutoGVKey(i, "lv")))) ||
+          (g_auto[i].active && g_auto[i].marketInFlight));
+}
+
+double ExistingPendingVolume(int i, int dir)
+{
+   if(g_auto[i].active && !g_auto[i].isOpen && g_auto[i].dir == dir)
+      return(g_auto[i].curLot);
+   return(0.0);
+}
+
+// The terminal's global variables are doubles; split broker IDs into two
+// 32-bit halves so even a 64-bit ticket can be checked exactly.
+bool SetSlotGV(int i, string field, double value)
+{
+   return(GlobalVariableSet(AutoGVKey(i, field), value) != 0);
+}
+
+void DeleteTargetIntent(int i)
+{
+   string fields[] = {"iv", "id", "ie", "is", "i1", "i2", "i3"};
+   for(int k = 0; k < ArraySize(fields); k++) GlobalVariableDel(AutoGVKey(i, fields[k]));
+}
+
+void DeleteTargetUpdate(int i)
+{
+   string fields[] = {"uv", "ue", "us", "u1", "u2", "u3"};
+   for(int k = 0; k < ArraySize(fields); k++) GlobalVariableDel(AutoGVKey(i, fields[k]));
+}
+
+// Journal before sending, so a restart between broker acceptance and slot
+// persistence can recover absolute targets from the matching broker order.
+bool BeginTargetIntent(int i, int dir, double entry, double sl,
+                       double tp1, double tp2, double tp3)
+{
+   DeleteTargetIntent(i);
+   DeleteTargetUpdate(i);
+   GlobalVariableDel(AutoGVKey(i, "lv"));
+   GlobalVariableDel(AutoGVKey(i, "tp1"));
+   GlobalVariableDel(AutoGVKey(i, "tp2"));
+   GlobalVariableDel(AutoGVKey(i, "cx"));
+   bool ok = true;
+   if(!SetSlotGV(i, "id", (double)dir)) ok = false;
+   if(!SetSlotGV(i, "ie", entry)) ok = false;
+   if(!SetSlotGV(i, "is", sl)) ok = false;
+   if(!SetSlotGV(i, "i1", tp1)) ok = false;
+   if(!SetSlotGV(i, "i2", tp2)) ok = false;
+   if(!SetSlotGV(i, "i3", tp3)) ok = false;
+   if(ok && !SetSlotGV(i, "iv", 1.0)) ok = false; // commit marker last
+   GlobalVariablesFlush();
+   if(!ok) DeleteTargetIntent(i);
+   return(ok);
+}
+
+bool BeginTargetUpdate(int i, double entry, double sl,
+                       double tp1, double tp2, double tp3)
+{
+   DeleteTargetUpdate(i);
+   bool ok = true;
+   if(!SetSlotGV(i, "ue", entry)) ok = false;
+   if(!SetSlotGV(i, "us", sl)) ok = false;
+   if(!SetSlotGV(i, "u1", tp1)) ok = false;
+   if(!SetSlotGV(i, "u2", tp2)) ok = false;
+   if(!SetSlotGV(i, "u3", tp3)) ok = false;
+   if(ok && !SetSlotGV(i, "uv", 1.0)) ok = false;
+   GlobalVariablesFlush();
+   if(!ok) DeleteTargetUpdate(i);
+   return(ok);
+}
+
+bool StoredSlotIdentityMatches(int i)
+{
+   if(!GlobalVariableCheck(AutoGVKey(i, "ik")) ||
+      !GlobalVariableCheck(AutoGVKey(i, "ih")) ||
+      !GlobalVariableCheck(AutoGVKey(i, "il"))) return(false);
+   int kind = (int)GlobalVariableGet(AutoGVKey(i, "ik"));
+   ulong hi = (ulong)GlobalVariableGet(AutoGVKey(i, "ih"));
+   ulong lo = (ulong)GlobalVariableGet(AutoGVKey(i, "il"));
+   ulong id = (hi << 32) | lo;
+   if(id == 0) return(false);
+   if(kind == 2)
+      return(g_auto[i].isOpen && g_auto[i].diaryPositionId == id);
+   if(kind != 1) return(false);
+   if(!g_auto[i].isOpen) return(g_auto[i].ticket == id);
+   // A pending/market order may have filled while the terminal was down.
+   return(g_auto[i].diaryPositionId > 0 && HistoryOrderSelect(id) &&
+          (ulong)HistoryOrderGetInteger(id, ORDER_POSITION_ID) == g_auto[i].diaryPositionId);
+}
+
+bool SaveAutoSlotState(int i)
+{
+   bool ok = true;
+   if(g_auto[i].cancelPending && !SetSlotGV(i, "cx", 1.0)) ok = false;
    if(g_auto[i].isRange)
    {
-      GlobalVariableSet(AutoGVKey(i, "rng"), 1.0);
-      GlobalVariableSet(AutoGVKey(i, "top"), g_auto[i].rngTop);
-      GlobalVariableSet(AutoGVKey(i, "bot"), g_auto[i].rngBot);
+      if(!SetSlotGV(i, "rng", 1.0)) ok = false;
+      if(!SetSlotGV(i, "top", g_auto[i].rngTop)) ok = false;
+      if(!SetSlotGV(i, "bot", g_auto[i].rngBot)) ok = false;
    }
    else
    {
@@ -2196,116 +2690,213 @@ void SaveAutoSlotState(int i)
       GlobalVariableDel(AutoGVKey(i, "top"));
       GlobalVariableDel(AutoGVKey(i, "bot"));
    }
-   if(g_auto[i].entryScore != 0)
-      GlobalVariableSet(AutoGVKey(i, "score"), (double)g_auto[i].entryScore);
-   if(g_auto[i].placedBar > 0)
-      GlobalVariableSet(AutoGVKey(i, "placed"), (double)g_auto[i].placedBar);
-   if(g_auto[i].tp1Hit)
-      GlobalVariableSet(AutoGVKey(i, "tp1"), 1.0);
-   else
-      GlobalVariableDel(AutoGVKey(i, "tp1"));
-   if(g_auto[i].tp2Hit)
-      GlobalVariableSet(AutoGVKey(i, "tp2"), 1.0);
-   else
-      GlobalVariableDel(AutoGVKey(i, "tp2"));
+   if(g_auto[i].entryScore != 0 && !SetSlotGV(i, "score", (double)g_auto[i].entryScore)) ok = false;
+   if(g_auto[i].placedBar > 0 && !SetSlotGV(i, "placed", (double)g_auto[i].placedBar)) ok = false;
+   if(g_auto[i].tp1Hit) { if(!SetSlotGV(i, "tp1", 1.0)) ok = false; }
+   else GlobalVariableDel(AutoGVKey(i, "tp1"));
+   if(g_auto[i].tp2Hit) { if(!SetSlotGV(i, "tp2", 1.0)) ok = false; }
+   else GlobalVariableDel(AutoGVKey(i, "tp2"));
+
+   if(g_auto[i].modernTargets && g_auto[i].tp1Price > 0.0 && g_auto[i].tp2Price > 0.0)
+   {
+      int kind = (g_auto[i].isOpen && g_auto[i].diaryPositionId > 0) ? 2 : 1;
+      ulong id = kind == 2 ? g_auto[i].diaryPositionId : g_auto[i].ticket;
+      if(id == 0) ok = false;
+      if(!SetSlotGV(i, "ik", (double)kind)) ok = false;
+      if(!SetSlotGV(i, "ih", (double)(id >> 32))) ok = false;
+      if(!SetSlotGV(i, "il", (double)(id & (ulong)0xFFFFFFFF))) ok = false;
+      if(!SetSlotGV(i, "ld", (double)g_auto[i].dir)) ok = false;
+      if(!SetSlotGV(i, "le", g_auto[i].entryPrice)) ok = false;
+      if(!SetSlotGV(i, "ls", g_auto[i].slPrice)) ok = false;
+      if(!SetSlotGV(i, "l1", g_auto[i].tp1Price)) ok = false;
+      if(!SetSlotGV(i, "l2", g_auto[i].tp2Price)) ok = false;
+      if(!SetSlotGV(i, "l3", g_auto[i].tpPrice)) ok = false;
+      if(!SetSlotGV(i, "s1", g_auto[i].tp1StartLot)) ok = false;
+      if(!SetSlotGV(i, "g1", g_auto[i].tp1GoalLot)) ok = false;
+      if(!SetSlotGV(i, "c1", g_auto[i].tp1DoneLot)) ok = false;
+      if(!SetSlotGV(i, "s2", g_auto[i].tp2StartLot)) ok = false;
+      if(!SetSlotGV(i, "g2", g_auto[i].tp2GoalLot)) ok = false;
+      if(!SetSlotGV(i, "c2", g_auto[i].tp2DoneLot)) ok = false;
+      if(!SetSlotGV(i, "k1", g_auto[i].tp1Skipped ? 1.0 : 0.0)) ok = false;
+      if(!SetSlotGV(i, "k2", g_auto[i].tp2Skipped ? 1.0 : 0.0)) ok = false;
+      if(!SetSlotGV(i, "x1", g_auto[i].tp1Short ? 1.0 : 0.0)) ok = false;
+      if(!SetSlotGV(i, "x2", g_auto[i].tp2Short ? 1.0 : 0.0)) ok = false;
+      // A false in-flight flag must never overwrite a previously durable
+      // true flag unless all reconciliation fields were saved successfully.
+      if(ok && !SetSlotGV(i, "a1", g_auto[i].tp1Awaiting ? 1.0 : 0.0)) ok = false;
+      if(ok && !SetSlotGV(i, "a2", g_auto[i].tp2Awaiting ? 1.0 : 0.0)) ok = false;
+      if(ok && !g_auto[i].cancelPending && !SetSlotGV(i, "cx", 0.0)) ok = false;
+      if(ok && !SetSlotGV(i, "lv", 2.0)) ok = false; // commit marker
+   }
    if(g_auto[i].diaryRecordId > 0)
    {
-      GlobalVariableSet(AutoGVKey(i, "drec"),   (double)g_auto[i].diaryRecordId);
-      GlobalVariableSet(AutoGVKey(i, "dday"),   (double)g_auto[i].diaryPlacedDayKey);
-      GlobalVariableSet(AutoGVKey(i, "dsl"),    (double)g_auto[i].diaryPlanSlPts);
-      GlobalVariableSet(AutoGVKey(i, "dreg"),   (double)g_auto[i].diaryRegime);
-      GlobalVariableSet(AutoGVKey(i, "dsty"),   (double)g_auto[i].diaryStyle);
-      GlobalVariableSet(AutoGVKey(i, "dat"),    (double)g_auto[i].diaryPlacedAt);
-      GlobalVariableSet(AutoGVKey(i, "dlocal"), (double)g_auto[i].diaryLocalPlaced);
-      GlobalVariableSet(AutoGVKey(i, "dcost"),  g_auto[i].diaryCostTp1Pct);
-      GlobalVariableSet(AutoGVKey(i, "dpeak"),  g_auto[i].diaryPeakTp1Pct);
-   }
-   else
-   {
-      GlobalVariableDel(AutoGVKey(i, "drec"));
-      GlobalVariableDel(AutoGVKey(i, "dday"));
-      GlobalVariableDel(AutoGVKey(i, "dsl"));
-      GlobalVariableDel(AutoGVKey(i, "dreg"));
-      GlobalVariableDel(AutoGVKey(i, "dsty"));
-      GlobalVariableDel(AutoGVKey(i, "dat"));
-      GlobalVariableDel(AutoGVKey(i, "dlocal"));
-      GlobalVariableDel(AutoGVKey(i, "dcost"));
-      GlobalVariableDel(AutoGVKey(i, "dpeak"));
+      if(!SetSlotGV(i, "drec", (double)g_auto[i].diaryRecordId)) ok = false;
+      if(!SetSlotGV(i, "dday", (double)g_auto[i].diaryPlacedDayKey)) ok = false;
+      if(!SetSlotGV(i, "dsl", (double)g_auto[i].diaryPlanSlPts)) ok = false;
+      if(!SetSlotGV(i, "dreg", (double)g_auto[i].diaryRegime)) ok = false;
+      if(!SetSlotGV(i, "dsty", (double)g_auto[i].diaryStyle)) ok = false;
+      if(!SetSlotGV(i, "dat", (double)g_auto[i].diaryPlacedAt)) ok = false;
+      if(!SetSlotGV(i, "dlocal", (double)g_auto[i].diaryLocalPlaced)) ok = false;
+      if(!SetSlotGV(i, "dcost", g_auto[i].diaryCostTp1Pct)) ok = false;
+      if(!SetSlotGV(i, "dpeak", g_auto[i].diaryPeakTp1Pct)) ok = false;
    }
    GlobalVariablesFlush();
+   if(!ok) PrintFormat("SimpleEA: cannot persist %s target state; staged exits need attention.", g_rows[i].tag);
+   return(ok);
 }
 
 void ClearAutoSlotState(int i)
 {
-   GlobalVariableDel(AutoGVKey(i, "rng"));
-   GlobalVariableDel(AutoGVKey(i, "top"));
-   GlobalVariableDel(AutoGVKey(i, "bot"));
-   GlobalVariableDel(AutoGVKey(i, "score"));
-   GlobalVariableDel(AutoGVKey(i, "placed"));
-   GlobalVariableDel(AutoGVKey(i, "tp1"));
-   GlobalVariableDel(AutoGVKey(i, "tp2"));
-   GlobalVariableDel(AutoGVKey(i, "drec"));
-   GlobalVariableDel(AutoGVKey(i, "dday"));
-   GlobalVariableDel(AutoGVKey(i, "dsl"));
-   GlobalVariableDel(AutoGVKey(i, "dreg"));
-   GlobalVariableDel(AutoGVKey(i, "dsty"));
-   GlobalVariableDel(AutoGVKey(i, "dat"));
-   GlobalVariableDel(AutoGVKey(i, "dlocal"));
-   GlobalVariableDel(AutoGVKey(i, "dcost"));
-   GlobalVariableDel(AutoGVKey(i, "dpeak"));
+   string fields[] = {"rng", "top", "bot", "score", "placed", "tp1", "tp2",
+                      "drec", "dday", "dsl", "dreg", "dsty", "dat", "dlocal", "dcost", "dpeak",
+                      "ik", "ih", "il", "lv", "ld", "le", "ls", "l1", "l2", "l3",
+                      "s1", "g1", "c1", "a1", "s2", "g2", "c2", "a2", "k1", "k2", "x1", "x2", "cx"};
+   for(int k = 0; k < ArraySize(fields); k++) GlobalVariableDel(AutoGVKey(i, fields[k]));
+   DeleteTargetIntent(i);
+   DeleteTargetUpdate(i);
    GlobalVariablesFlush();
+}
+
+double SlotGV(int i, string field, double fallback = 0.0)
+{
+   return(GlobalVariableCheck(AutoGVKey(i, field)) ? GlobalVariableGet(AutoGVKey(i, field)) : fallback);
 }
 
 void RestoreAutoSlotState(int i)
 {
-   if(GlobalVariableCheck(AutoGVKey(i, "rng")))
+   // Never attach flags from a different new-format order using the same
+   // magic number. Older installations had no identity field.
+   if(GlobalVariableCheck(AutoGVKey(i, "lv")) && !StoredSlotIdentityMatches(i)) return;
+   g_auto[i].isRange = SlotGV(i, "rng") > 0.5;
+   g_auto[i].rngTop = SlotGV(i, "top");
+   g_auto[i].rngBot = SlotGV(i, "bot");
+   g_auto[i].entryScore = (int)MathRound(SlotGV(i, "score"));
+   g_auto[i].placedBar = (datetime)SlotGV(i, "placed");
+   g_auto[i].tp1Hit = SlotGV(i, "tp1") > 0.5;
+   g_auto[i].tp2Hit = SlotGV(i, "tp2") > 0.5;
+   g_auto[i].diaryRecordId = (long)MathRound(SlotGV(i, "drec"));
+   g_auto[i].diaryPlacedDayKey = (long)MathRound(SlotGV(i, "dday"));
+   g_auto[i].diaryPlanSlPts = (int)MathRound(SlotGV(i, "dsl"));
+   g_auto[i].diaryRegime = (int)MathRound(SlotGV(i, "dreg"));
+   g_auto[i].diaryStyle = (int)MathRound(SlotGV(i, "dsty"));
+   g_auto[i].diaryPlacedAt = (datetime)SlotGV(i, "dat");
+   g_auto[i].diaryLocalPlaced = (datetime)SlotGV(i, "dlocal");
+   g_auto[i].diaryCostTp1Pct = SlotGV(i, "dcost");
+   g_auto[i].diaryPeakTp1Pct = SlotGV(i, "dpeak");
+   if(GlobalVariableCheck(AutoGVKey(i, "lv")))
    {
-      g_auto[i].isRange = (GlobalVariableGet(AutoGVKey(i, "rng")) > 0.5);
-      if(GlobalVariableCheck(AutoGVKey(i, "top")))
-         g_auto[i].rngTop = GlobalVariableGet(AutoGVKey(i, "top"));
-      if(GlobalVariableCheck(AutoGVKey(i, "bot")))
-         g_auto[i].rngBot = GlobalVariableGet(AutoGVKey(i, "bot"));
+      g_auto[i].tp1StartLot = SlotGV(i, "s1");
+      g_auto[i].tp1GoalLot = SlotGV(i, "g1");
+      g_auto[i].tp1DoneLot = SlotGV(i, "c1");
+      g_auto[i].tp1Awaiting = SlotGV(i, "a1") > 0.5;
+      g_auto[i].tp2StartLot = SlotGV(i, "s2");
+      g_auto[i].tp2GoalLot = SlotGV(i, "g2");
+      g_auto[i].tp2DoneLot = SlotGV(i, "c2");
+      g_auto[i].tp2Awaiting = SlotGV(i, "a2") > 0.5;
+      g_auto[i].tp1Skipped = SlotGV(i, "k1") > 0.5;
+      g_auto[i].tp2Skipped = SlotGV(i, "k2") > 0.5;
+      g_auto[i].tp1Short = SlotGV(i, "x1") > 0.5;
+      g_auto[i].tp2Short = SlotGV(i, "x2") > 0.5;
+      g_auto[i].cancelPending = SlotGV(i, "cx") > 0.5;
    }
-   if(GlobalVariableCheck(AutoGVKey(i, "score")))
-      g_auto[i].entryScore = (int)MathRound(GlobalVariableGet(AutoGVKey(i, "score")));
-   if(GlobalVariableCheck(AutoGVKey(i, "placed")))
-      g_auto[i].placedBar = (datetime)GlobalVariableGet(AutoGVKey(i, "placed"));
-   if(GlobalVariableCheck(AutoGVKey(i, "tp1")))
-      g_auto[i].tp1Hit = (GlobalVariableGet(AutoGVKey(i, "tp1")) > 0.5);
-   if(GlobalVariableCheck(AutoGVKey(i, "tp2")))
-      g_auto[i].tp2Hit = (GlobalVariableGet(AutoGVKey(i, "tp2")) > 0.5);
-   if(GlobalVariableCheck(AutoGVKey(i, "drec")))
-      g_auto[i].diaryRecordId = (long)MathRound(GlobalVariableGet(AutoGVKey(i, "drec")));
-   if(GlobalVariableCheck(AutoGVKey(i, "dday")))
-      g_auto[i].diaryPlacedDayKey = (long)MathRound(GlobalVariableGet(AutoGVKey(i, "dday")));
-   if(GlobalVariableCheck(AutoGVKey(i, "dsl")))
-      g_auto[i].diaryPlanSlPts = (int)MathRound(GlobalVariableGet(AutoGVKey(i, "dsl")));
-   if(GlobalVariableCheck(AutoGVKey(i, "dreg")))
-      g_auto[i].diaryRegime = (int)MathRound(GlobalVariableGet(AutoGVKey(i, "dreg")));
-   if(GlobalVariableCheck(AutoGVKey(i, "dsty")))
-      g_auto[i].diaryStyle = (int)MathRound(GlobalVariableGet(AutoGVKey(i, "dsty")));
-   if(GlobalVariableCheck(AutoGVKey(i, "dat")))
-      g_auto[i].diaryPlacedAt = (datetime)GlobalVariableGet(AutoGVKey(i, "dat"));
-   if(GlobalVariableCheck(AutoGVKey(i, "dlocal")))
-      g_auto[i].diaryLocalPlaced = (datetime)GlobalVariableGet(AutoGVKey(i, "dlocal"));
-   if(GlobalVariableCheck(AutoGVKey(i, "dcost")))
-      g_auto[i].diaryCostTp1Pct = GlobalVariableGet(AutoGVKey(i, "dcost"));
-   if(GlobalVariableCheck(AutoGVKey(i, "dpeak")))
-      g_auto[i].diaryPeakTp1Pct = GlobalVariableGet(AutoGVKey(i, "dpeak"));
 }
+
+void RefreshSlotTargetDistances(int i, double point)
+{
+   if(point <= 0.0) return;
+   int dir = g_auto[i].dir;
+   g_auto[i].tp1Pts = g_auto[i].tp1Price > 0.0
+      ? (int)MathMax(0, MathRound((double)dir * (g_auto[i].tp1Price - g_auto[i].entryPrice) / point)) : 0;
+   g_auto[i].tp2Pts = g_auto[i].tp2Price > 0.0
+      ? (int)MathMax(0, MathRound((double)dir * (g_auto[i].tp2Price - g_auto[i].entryPrice) / point)) : 0;
+   g_auto[i].tp3Pts = g_auto[i].tpPrice > 0.0
+      ? (int)MathMax(0, MathRound((double)dir * (g_auto[i].tpPrice - g_auto[i].entryPrice) / point)) : 0;
+}
+
+bool MatchingBrokerLevels(int i, double entry, double sl, double tp, double tolerance)
+{
+   if(MathAbs(g_auto[i].slPrice - sl) > tolerance ||
+      MathAbs(g_auto[i].tpPrice - tp) > tolerance) return(false);
+   return(g_auto[i].isOpen || MathAbs(g_auto[i].entryPrice - entry) <= tolerance);
+}
+
+void RecoverSlotTargets(int i, double point)
+{
+   double tol = 0.5 * point;
+   bool hasVersion = GlobalVariableCheck(AutoGVKey(i, "lv"));
+   bool identity = hasVersion && StoredSlotIdentityMatches(i);
+   bool recovered = false;
+   if(identity && GlobalVariableCheck(AutoGVKey(i, "uv")) &&
+      MatchingBrokerLevels(i, SlotGV(i, "ue"), SlotGV(i, "us"), SlotGV(i, "u3"), tol))
+   {
+      // Modification reached the broker before the terminal stopped.
+      g_auto[i].tp1Price = SlotGV(i, "u1");
+      g_auto[i].tp2Price = SlotGV(i, "u2");
+      recovered = true;
+   }
+   else if(identity && (int)SlotGV(i, "ld") == g_auto[i].dir &&
+           MatchingBrokerLevels(i, SlotGV(i, "le"), SlotGV(i, "ls"), SlotGV(i, "l3"), tol))
+   {
+      g_auto[i].tp1Price = SlotGV(i, "l1");
+      g_auto[i].tp2Price = SlotGV(i, "l2");
+      recovered = true;
+   }
+   else if(!hasVersion && GlobalVariableCheck(AutoGVKey(i, "iv")) &&
+           (int)SlotGV(i, "id") == g_auto[i].dir &&
+           MatchingBrokerLevels(i, SlotGV(i, "ie"), SlotGV(i, "is"), SlotGV(i, "i3"), tol))
+   {
+      g_auto[i].tp1Price = SlotGV(i, "i1");
+      g_auto[i].tp2Price = SlotGV(i, "i2");
+      recovered = true;
+   }
+   else if(!hasVersion && !GlobalVariableCheck(AutoGVKey(i, "iv")) &&
+           g_auto[i].legacyTradeMarker && g_auto[i].isOpen && g_auto[i].tpPrice > 0.0)
+   {
+      // A pre-upgrade trade's diary can retain the exact distances that
+      // were active before recompilation. Only if that row is unavailable
+      // use the OLD restart reconstruction; never apply it to SEA3 orders.
+      if(!LegacyDiaryTargetPrices(i, point, g_auto[i].tp1Price, g_auto[i].tp2Price))
+      {
+         int tp3 = (int)MathMax(1.0, MathRound(MathAbs(g_auto[i].tpPrice - g_auto[i].entryPrice) / point));
+         int tp1 = 1, tp2 = 1;
+         ComputeLegacyTPLevels(tp3, tp1, tp2);
+         g_auto[i].tp1Price = NormPrice(g_auto[i].entryPrice + (double)g_auto[i].dir * tp1 * point);
+         g_auto[i].tp2Price = NormPrice(g_auto[i].entryPrice + (double)g_auto[i].dir * tp2 * point);
+      }
+      g_auto[i].legacyRecovery = true;
+      recovered = true;
+   }
+   if(recovered && g_auto[i].tp1Price > 0.0 && g_auto[i].tp2Price > 0.0 &&
+      (double)g_auto[i].dir * (g_auto[i].tp2Price - g_auto[i].tp1Price) >= -tol &&
+      (double)g_auto[i].dir * (g_auto[i].tpPrice - g_auto[i].tp2Price) >= -tol)
+   {
+      g_auto[i].modernTargets = true;
+      RefreshSlotTargetDistances(i, point);
+      if(SaveAutoSlotState(i)) { DeleteTargetIntent(i); DeleteTargetUpdate(i); }
+      return;
+   }
+   // Unknown identity/state or externally altered broker exits: never
+   // invent new software targets. Broker SL/TP remain untouched.
+   g_auto[i].tp1Price = 0.0;
+   g_auto[i].tp2Price = 0.0;
+   g_auto[i].modernTargets = false;
+   RefreshSlotTargetDistances(i, point);
+   PrintFormat("SimpleEA: %s staged targets unavailable; broker SL/TP3 left unchanged. Review the trade.", g_rows[i].tag);
+}
+
 
 //==================================================================
 //  CALIBRATION-HEALTH DIARY
 //==================================================================
-//  The diary gives the fixed calibration a memory, not a second
-//  brain.  It records one small row for each original order idea
+//  The diary records actual order outcomes separately from the bar-based
+//  planning analogs; it does not modify the plan or place orders.  It records one small row for each original order idea
 //  that SimpleEA actually acted on, then derives Day totals and
 //  per-timeframe health warnings from those rows.  It never changes
 //  a target, a stop, a score rule, a risk setting or a switch.
 //
 //  One row means one original idea:
 //     - a pending that is merely repriced stays the same row;
-//     - a 2/3 pending upgraded to a 3/3 market order stays one row;
+//     - a cancelled pending and any later fresh-bar placement are separate ideas;
 //     - TP1/TP2 partial exits stay inside the original row;
 //     - S is written only after the broker accepted an order.
 //
@@ -2457,21 +3048,10 @@ struct SHealthLane
    string note;
 };
 
-struct SDiaryUpgrade
-{
-   bool     active;
-   long     recordId;
-   long     placedDay;
-   datetime placedAt;
-   datetime localPlaced;
-   int      regime;
-};
-
 SDiaryRecord  g_diary[];
 SDiaryTotals  g_dayTotals;
 SDiaryTotals  g_allTotals;
 SHealthLane   g_health[TF_COUNT];
-SDiaryUpgrade g_diaryUpgrade[TF_COUNT];
 
 int      g_diaryLockHandle     = INVALID_HANDLE;
 bool     g_diaryReady          = false;
@@ -3598,6 +4178,20 @@ int DiaryFindOpenRecordForSlot(int i)
    return(candidates == 1 ? candidate : -1);
 }
 
+// Recover exact legacy staged distances from the actual recorded idea,
+// before falling back to the old pre-diary restart rule.
+bool LegacyDiaryTargetPrices(int i, double point, double &tp1, double &tp2)
+{
+   if(!g_diaryReady || point <= 0.0) return(false);
+   int idx = DiaryFindOpenRecordForSlot(i);
+   if(idx < 0 || g_diary[idx].dir != g_auto[i].dir ||
+      g_diary[idx].entryPrice <= 0.0 || g_diary[idx].tp1Pts <= 0 ||
+      g_diary[idx].tp2Pts < g_diary[idx].tp1Pts) return(false);
+   tp1 = NormPrice(g_diary[idx].entryPrice + (double)g_auto[i].dir * g_diary[idx].tp1Pts * point);
+   tp2 = NormPrice(g_diary[idx].entryPrice + (double)g_auto[i].dir * g_diary[idx].tp2Pts * point);
+   return(true);
+}
+
 //+------------------------------------------------------------------+
 bool DiarySyncSlotRecord(int i, bool saveNow)
 {
@@ -3699,8 +4293,11 @@ void DiaryAttachSlotRecord(int i)
    g_auto[i].diaryLocalPlaced = r.localPlaced;
    g_auto[i].diaryCostTp1Pct  = r.costTp1Pct;
    g_auto[i].diaryPeakTp1Pct  = r.peakTp1Pct;
-   if(r.tp1Hit) g_auto[i].tp1Hit = true;
-   if(r.tp2Hit) g_auto[i].tp2Hit = true;
+   // Old diary hit fields record a price reach, not proof of a successful
+   // partial. They may only preserve the pre-upgrade recovery behavior;
+   // new-format execution flags come exclusively from persisted broker work.
+   if(g_auto[i].legacyRecovery && r.tp1Hit) g_auto[i].tp1Hit = true;
+   if(g_auto[i].legacyRecovery && r.tp2Hit) g_auto[i].tp2Hit = true;
    if(r.lot > 0.0 && g_auto[i].initLot <= 0.0)
       g_auto[i].initLot = r.lot;
    if(r.positionId > 0 && g_auto[i].diaryPositionId == 0)
@@ -3720,6 +4317,23 @@ void DiaryAttachSlotRecord(int i)
    DiarySyncSlotRecord(i, false);
    SaveAutoSlotState(i);
    DiaryAfterChange();
+}
+
+// When a partially-filled entry's remainder is gone, the position's
+// settled volume, not the originally requested volume, defines the idea.
+void DiarySetSettledEntryVolume(int i)
+{
+   if(!g_diaryReady || !g_auto[i].active || !g_auto[i].isOpen ||
+      g_auto[i].tp1Hit || g_auto[i].tp2Hit || g_auto[i].tp1GoalLot > 0.0 ||
+      g_auto[i].tp2GoalLot > 0.0 || g_auto[i].curLot <= 0.0) return;
+   g_auto[i].initLot = g_auto[i].curLot;
+   int idx = DiaryRecordIndexById(g_auto[i].diaryRecordId);
+   if(idx >= 0 && g_diary[idx].status == 0 &&
+      MathAbs(g_diary[idx].lot - g_auto[i].curLot) > 1e-8)
+   {
+      g_diary[idx].lot = g_auto[i].curLot;
+      DiaryAfterChange();
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -4051,103 +4665,6 @@ void DiaryBeginPlacement(int i, bool market, int planSlPts, double spreadPrice)
 }
 
 //+------------------------------------------------------------------+
-//  A pending upgraded to market is the same signal acted on, so it
-//  must remain one S.  The old row is held while the slot resets,
-//  then merged with the market placement (or expired if that market
-//  order could not be sent).
-//+------------------------------------------------------------------+
-void DiaryBeginUpgrade(int i)
-{
-   g_diarySuppress[i] = true;
-   g_diaryUpgrade[i].active      = true;
-   g_diaryUpgrade[i].recordId    = g_auto[i].diaryRecordId;
-   g_diaryUpgrade[i].placedDay   = g_auto[i].diaryPlacedDayKey;
-   g_diaryUpgrade[i].placedAt    = g_auto[i].diaryPlacedAt;
-   g_diaryUpgrade[i].localPlaced = g_auto[i].diaryLocalPlaced;
-   g_diaryUpgrade[i].regime      = g_auto[i].diaryRegime;
-
-   int idx = DiaryRecordIndexById(g_auto[i].diaryRecordId);
-   if(idx >= 0)
-   {
-      g_diaryUpgrade[i].placedDay   = g_diary[idx].placedDay;
-      g_diaryUpgrade[i].placedAt    = g_diary[idx].placedAt;
-      g_diaryUpgrade[i].localPlaced = g_diary[idx].localPlaced;
-      g_diaryUpgrade[i].regime      = g_diary[idx].regime;
-   }
-}
-
-//+------------------------------------------------------------------+
-void DiaryCancelUpgrade(int i)
-{
-   g_diarySuppress[i] = false;
-   g_diaryUpgrade[i].active = false;
-}
-
-//+------------------------------------------------------------------+
-void DiaryFinishUpgrade(int i, bool placed)
-{
-   SDiaryUpgrade up = g_diaryUpgrade[i];
-   g_diarySuppress[i] = false;
-   g_diaryUpgrade[i].active = false;
-   if(!g_diaryReady || !up.active)
-      return;
-
-   int oldIdx = DiaryRecordIndexById(up.recordId);
-   if(placed && g_auto[i].active)
-   {
-      int newIdx = DiaryRecordIndexById(g_auto[i].diaryRecordId);
-      if(oldIdx >= 0 && newIdx >= 0 && oldIdx != newIdx)
-      {
-         SDiaryRecord merged = g_diary[newIdx];
-         merged.id          = g_diary[oldIdx].id;
-         merged.placedDay   = g_diary[oldIdx].placedDay;
-         merged.placedAt    = g_diary[oldIdx].placedAt;
-         merged.localPlaced = g_diary[oldIdx].localPlaced;
-         merged.regime      = g_diary[oldIdx].regime;
-         g_diary[oldIdx] = merged;
-
-         int n = ArraySize(g_diary);
-         for(int k = newIdx; k < n - 1; k++)
-            g_diary[k] = g_diary[k + 1];
-         ArrayResize(g_diary, n - 1);
-
-         g_auto[i].diaryRecordId     = merged.id;
-         g_auto[i].diaryPlacedDayKey = merged.placedDay;
-         g_auto[i].diaryPlacedAt     = merged.placedAt;
-         g_auto[i].diaryLocalPlaced  = merged.localPlaced;
-         g_auto[i].diaryRegime       = merged.regime;
-         SaveAutoSlotState(i);
-      }
-      else if(newIdx >= 0 && up.placedDay > 0)
-      {
-         g_diary[newIdx].placedDay   = up.placedDay;
-         g_diary[newIdx].placedAt    = up.placedAt;
-         g_diary[newIdx].localPlaced = up.localPlaced;
-         g_diary[newIdx].regime      = up.regime;
-         g_auto[i].diaryPlacedDayKey = up.placedDay;
-         g_auto[i].diaryPlacedAt     = up.placedAt;
-         g_auto[i].diaryLocalPlaced  = up.localPlaced;
-         g_auto[i].diaryRegime       = up.regime;
-         SaveAutoSlotState(i);
-      }
-      DiaryAfterChange();
-      return;
-   }
-
-   if(!g_auto[i].active)
-      ClearAutoSlotState(i);
-   if(oldIdx >= 0 && g_diary[oldIdx].status == 0)
-   {
-      g_diary[oldIdx].status      = 2;
-      g_diary[oldIdx].closedAt    = TimeCurrent();
-      g_diary[oldIdx].localClosed = DiaryNowLocal();
-      g_diary[oldIdx].closedDay   = DiaryDayKey(g_diary[oldIdx].localClosed);
-      g_diary[oldIdx].exitReason  = "upgrade-failed";
-      DiaryAfterChange();
-   }
-}
-
-//+------------------------------------------------------------------+
 void DiaryFlushOpenSlots()
 {
    if(!g_diaryReady) return;
@@ -4168,15 +4685,7 @@ void DiaryInit()
    g_diaryStarted = 0;
    g_diaryStartedDay = 0;
    for(int i = 0; i < TF_COUNT; i++)
-   {
       g_diarySuppress[i] = false;
-      g_diaryUpgrade[i].active = false;
-      g_diaryUpgrade[i].recordId = 0;
-      g_diaryUpgrade[i].placedDay = 0;
-      g_diaryUpgrade[i].placedAt = 0;
-      g_diaryUpgrade[i].localPlaced = 0;
-      g_diaryUpgrade[i].regime = 0;
-   }
 
    bool needSave = false;
    if(FileIsExist(g_diaryFile, g_diaryCommonFlag))
@@ -4375,15 +4884,18 @@ void ClearAutoCells(int i)
 void ResetAutoSlot(int i, bool keepSignalBar)
 {
    //  Diary first, while the slot still knows what it was.  This is
-   //  the single exit every terminal path shares; a pending-to-market
-   //  upgrade and an OnInit slot clear are the explicitly suppressed
-   //  exceptions, because neither one ends the original order idea.
+   //  the single exit every terminal path shares; an OnInit or
+   //  identity-change slot clear is explicitly suppressed because it
+   //  does not establish that the broker position has ended.
    DiaryFinalizeSlot(i);
    if(!g_diarySuppress[i])
       ClearAutoSlotState(i);
    datetime sigBar = keepSignalBar ? g_auto[i].lastSignalBar : 0;
    g_auto[i].active        = false;
    g_auto[i].isOpen        = false;
+   g_auto[i].marketInFlight = false;
+   g_auto[i].residualOrder = false;
+   g_auto[i].multiplePositions = false;
    g_auto[i].ticket        = 0;
    g_auto[i].dir           = 0;
    g_auto[i].entryScore    = 0;
@@ -4392,6 +4904,25 @@ void ResetAutoSlot(int i, bool keepSignalBar)
    g_auto[i].entryPrice    = 0.0;
    g_auto[i].slPrice       = 0.0;
    g_auto[i].tpPrice       = 0.0;
+   g_auto[i].tp1Price      = 0.0;
+   g_auto[i].tp2Price      = 0.0;
+   g_auto[i].modernTargets = false;
+   g_auto[i].legacyRecovery = false;
+   g_auto[i].newTradeMarker = false;
+   g_auto[i].legacyTradeMarker = false;
+   g_auto[i].tp1Skipped = false;
+   g_auto[i].tp2Skipped = false;
+   g_auto[i].tp1Short = false;
+   g_auto[i].tp2Short = false;
+   g_auto[i].cancelPending = false;
+   g_auto[i].tp1StartLot = 0.0;
+   g_auto[i].tp1GoalLot = 0.0;
+   g_auto[i].tp1DoneLot = 0.0;
+   g_auto[i].tp1Awaiting = false;
+   g_auto[i].tp2StartLot = 0.0;
+   g_auto[i].tp2GoalLot = 0.0;
+   g_auto[i].tp2DoneLot = 0.0;
+   g_auto[i].tp2Awaiting = false;
    g_auto[i].profitUSD     = 0.0;
    g_auto[i].slPts         = 0;
    g_auto[i].tp1Pts        = 0;
@@ -4664,11 +5195,10 @@ int CancelAllAutoPendings()
    for(int i = 0; i < TF_COUNT; i++)
    {
       if(!g_auto[i].active || g_auto[i].isOpen) continue;
-      if(TradeDeleteOrder(g_auto[i].ticket))
+      if(RequestPendingCancellation(i))
       {
          g_auto[i].lastSignalBar = g_rows[i].lastBar;
-         ResetAutoSlot(i, true);
-         cancelled++;
+         cancelled++; // Sync resolves a possible partial-fill/cancel race
       }
    }
    if(cancelled > 0)
@@ -4747,7 +5277,7 @@ void CheckAutoTimerTransition()
 //  therefore the one honest place to say what is true right now:
 //     Off          the master switch is off (read-only advice)
 //     Timer Pause  the switch is on but the timer/pause blocks placement
-//     On           the switch is on and nothing blocks placement
+//     On           the switch is on and no header-level gate blocks placement
 //  "Timer Pause" rather than "Timer Off": Off already means "the feature
 //  is switched off", and the two must not read as the same thing.
 //+------------------------------------------------------------------+
@@ -4932,10 +5462,7 @@ double FloorLotStep(double lots)
    if(step <= 0.0) step = 0.01;
    double n = MathFloor(lots / step + 1e-8) * step;
    if(n < 0.0) n = 0.0;
-   int digits = 0;
-   double probe = step;
-   while(probe < 1.0 && digits < 8) { probe *= 10.0; digits++; }
-   return(NormalizeDouble(n, digits));
+   return(NormalizeDouble(n, VolumeStepDigits(step)));
 }
 
 //+------------------------------------------------------------------+
@@ -4997,20 +5524,6 @@ bool TrendMatchForTF(int i)
 }
 
 //+------------------------------------------------------------------+
-//  Ensure a pending limit entry price sits on the valid side of the
-//  current market (below Ask for BUY LIMIT, above Bid for SELL LIMIT).
-//+------------------------------------------------------------------+
-double ValidLimitPrice(int dir, double wantPrice, double bid, double ask, double point)
-{
-   double minStop = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
-   double pad     = MathMax(point, minStop);
-   double p       = wantPrice;
-   if(dir > 0 && p >= ask - pad) p = ask - pad;
-   if(dir < 0 && p <= bid + pad) p = bid + pad;
-   return(NormPrice(p));
-}
-
-//+------------------------------------------------------------------+
 //  Has a deal for timeframe `i` already entered on `barTime`?
 //+------------------------------------------------------------------+
 //  A pure question: "has this row already opened a trade on this bar?"
@@ -5048,12 +5561,17 @@ bool HasTradedOnBar(int i, datetime barTime)
 //+------------------------------------------------------------------+
 //  Low-level order wrappers (self-contained MqlTradeRequest calls).
 //+------------------------------------------------------------------+
-bool TradeOpenMarket(int i, int dir, double lot, double sl, double tp, ulong &outTicket)
+// 1 = accepted, 0 = definitive rejection, -1 = transport/async uncertainty.
+int TradeOpenMarket(int i, int dir, double lot, double sl, double tp, ulong &outTicket,
+                    double &outVolume, double &outPrice, bool &inFlight)
 {
    outTicket = 0;
+   outVolume = 0.0;
+   outPrice = 0.0;
+   inFlight = false;
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if(ask <= 0.0 || bid <= 0.0) return(false);
+   if(ask <= 0.0 || bid <= 0.0) return(0);
 
    MqlTradeRequest req;
    MqlTradeResult  res;
@@ -5069,20 +5587,28 @@ bool TradeOpenMarket(int i, int dir, double lot, double sl, double tp, ulong &ou
    req.tp           = (tp > 0.0) ? NormPrice(tp) : 0.0;
    req.deviation    = AutoSlippagePts(false);   // open: live spread based
    req.magic        = MagicForTF(i);
-   req.comment      = "SimpleEA_" + g_rows[i].tag;
+   req.comment      = "SEA3_" + g_rows[i].tag;
    req.type_filling = FillingMode();
 
    bool sent = OrderSend(req, res);
    NoteMarketClosedRetcode(res.retcode);
-   if(!sent) return(false);
-   if(res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_PLACED)
-      return(false);
-   outTicket = (res.order > 0) ? res.order : res.deal;
-   return(true);
+   if(res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL ||
+      res.retcode == TRADE_RETCODE_PLACED)
+   {
+      outTicket = res.order; // a deal ticket is not an order/position identity
+      outVolume = res.volume > 0.0 ? res.volume : lot;
+      outPrice = res.price > 0.0 ? res.price : req.price;
+      inFlight = (res.retcode == TRADE_RETCODE_PLACED); // acceptance is not a confirmed fill
+      return(1);
+   }
+   if((!sent && res.retcode == 0) || res.retcode == TRADE_RETCODE_TIMEOUT ||
+      res.retcode == TRADE_RETCODE_CONNECTION || res.retcode == TRADE_RETCODE_ERROR ||
+      res.retcode == TRADE_RETCODE_LOCKED || res.retcode == TRADE_RETCODE_ORDER_CHANGED) return(-1);
+   return(0);
 }
 
 //+------------------------------------------------------------------+
-bool TradePlaceLimit(int i, int dir, double lot, double price, double sl, double tp,
+int TradePlaceLimit(int i, int dir, double lot, double price, double sl, double tp,
                      ulong &outTicket)
 {
    outTicket = 0;
@@ -5099,103 +5625,126 @@ bool TradePlaceLimit(int i, int dir, double lot, double price, double sl, double
    req.sl           = (sl > 0.0) ? NormPrice(sl) : 0.0;
    req.tp           = (tp > 0.0) ? NormPrice(tp) : 0.0;
    req.magic        = MagicForTF(i);
-   req.comment      = "SimpleEA_" + g_rows[i].tag;
-   req.type_filling = FillingMode();
+   req.comment      = "SEA3_" + g_rows[i].tag;
+   req.type_filling = ORDER_FILLING_RETURN; // pending orders use RETURN
    req.type_time    = ORDER_TIME_GTC;
 
    bool sent = OrderSend(req, res);
    NoteMarketClosedRetcode(res.retcode);
-   if(!sent) return(false);
-   if(res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_PLACED)
-      return(false);
-   outTicket = res.order;
-   return(true);
+   if(res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL ||
+      res.retcode == TRADE_RETCODE_PLACED)
+   {
+      outTicket = res.order;
+      return(1);
+   }
+   if((!sent && res.retcode == 0) || res.retcode == TRADE_RETCODE_TIMEOUT ||
+      res.retcode == TRADE_RETCODE_CONNECTION || res.retcode == TRADE_RETCODE_ERROR ||
+      res.retcode == TRADE_RETCODE_LOCKED || res.retcode == TRADE_RETCODE_ORDER_CHANGED) return(-1);
+   return(0);
 }
 
 //+------------------------------------------------------------------+
-bool TradeClosePosition(ulong posTicket, int dir, double volume, long magic)
+// 1 = accepted/completed, 0 = definitive rejection, -1 = uncertain.
+int TradeClosePosition(ulong posTicket, int dir, double volume, long magic,
+                       double &executed, bool &uncertain)
 {
+   executed = 0.0;
+   uncertain = false;
+   // A zero/stale position ticket must never become an opposite opening
+   // order on a hedging account. Verify identity immediately before send.
+   if(posTicket == 0 || !PositionSelectByTicket(posTicket) ||
+      PositionGetString(POSITION_SYMBOL) != _Symbol ||
+      PositionGetInteger(POSITION_MAGIC) != magic ||
+      (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? 1 : -1) != dir)
+      return(0);
+   double liveVolume = PositionGetDouble(POSITION_VOLUME);
+   if(volume <= 0.0 || liveVolume - volume < SymbolMinLot() - 1e-8) return(0);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if(ask <= 0.0 || bid <= 0.0) return(false);
-
+   if(ask <= 0.0 || bid <= 0.0) return(0);
    MqlTradeRequest req;
-   MqlTradeResult  res;
+   MqlTradeResult res;
    ZeroMemory(req);
    ZeroMemory(res);
-
-   req.action       = TRADE_ACTION_DEAL;
-   req.position     = posTicket;
-   req.symbol       = _Symbol;
-   req.volume       = volume;
-   req.type         = (dir > 0) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
-   req.price        = NormPrice((dir > 0) ? bid : ask);
-   req.deviation    = AutoSlippagePts(true);    // close: slightly looser
-   req.magic        = magic;
+   req.action = TRADE_ACTION_DEAL;
+   req.position = posTicket;
+   req.symbol = _Symbol;
+   req.volume = volume;
+   req.type = (dir > 0) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+   req.price = NormPrice((dir > 0) ? bid : ask);
+   req.deviation = AutoSlippagePts(true);
+   req.magic = magic;
    req.type_filling = FillingMode();
-
    bool sent = OrderSend(req, res);
    NoteMarketClosedRetcode(res.retcode);
-   if(!sent) return(false);
-   return(res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL);
+   if(res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL)
+   {
+      executed = res.volume;
+      uncertain = (res.retcode == TRADE_RETCODE_DONE_PARTIAL &&
+                   req.type_filling == ORDER_FILLING_RETURN);
+      return(1);
+   }
+   if(!sent && res.retcode == 0) return(-1);
+   if(res.retcode == TRADE_RETCODE_TIMEOUT || res.retcode == TRADE_RETCODE_CONNECTION ||
+      res.retcode == TRADE_RETCODE_PLACED || res.retcode == TRADE_RETCODE_ERROR ||
+      res.retcode == TRADE_RETCODE_LOCKED || res.retcode == TRADE_RETCODE_ORDER_CHANGED) return(-1);
+   return(0);
 }
 
 //+------------------------------------------------------------------+
+// A broker-visible exit change lets restart recovery tell an old pending
+// fill from a modified fill. If only the price/software targets differ,
+// preserve the old ladder instead of creating an indistinguishable race.
+bool BrokerExitsDiffer(double oldSL, double oldTP, double newSL, double newTP, double point)
+{
+   return(MathAbs(oldSL - newSL) >= 0.5 * point ||
+          MathAbs(oldTP - newTP) >= 0.5 * point);
+}
+
+bool PendingLevelsMatch(ulong ticket, double price, double sl, double tp, double tolerance)
+{
+   if(!OrderSelect(ticket)) return(false);
+   return(MathAbs(OrderGetDouble(ORDER_PRICE_OPEN) - price) < tolerance &&
+          MathAbs(OrderGetDouble(ORDER_SL) - sl) < tolerance &&
+          MathAbs(OrderGetDouble(ORDER_TP) - tp) < tolerance);
+}
+
 bool TradeModifyOrder(ulong ordTicket, double newPrice, double newSL, double newTP)
 {
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   if(point <= 0.0) point = 0.00001;
-
-   double normP  = NormPrice(newPrice);
+   if(point <= 0.0) return(false);
+   double normP = NormPrice(newPrice);
    double normSL = (newSL > 0.0) ? NormPrice(newSL) : 0.0;
    double normTP = (newTP > 0.0) ? NormPrice(newTP) : 0.0;
-
-   ENUM_ORDER_TYPE_TIME typeTime = ORDER_TIME_GTC;
-   datetime             expTime  = 0;
-   double               stopLim  = 0.0;
-
-   if(OrderSelect(ordTicket))
-   {
-      double curP  = OrderGetDouble(ORDER_PRICE_OPEN);
-      double curSL = OrderGetDouble(ORDER_SL);
-      double curTP = OrderGetDouble(ORDER_TP);
-      if(MathAbs(normP  - curP)  < 0.5 * point &&
-         MathAbs(normSL - curSL) < 0.5 * point &&
-         MathAbs(normTP - curTP) < 0.5 * point)
-         return(true);
-
-      typeTime = (ENUM_ORDER_TYPE_TIME)OrderGetInteger(ORDER_TYPE_TIME);
-      expTime  = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
-      stopLim  = OrderGetDouble(ORDER_PRICE_STOPLIMIT);
-   }
+   if(!OrderSelect(ordTicket)) return(false);
+   ENUM_ORDER_TYPE_TIME typeTime = (ENUM_ORDER_TYPE_TIME)OrderGetInteger(ORDER_TYPE_TIME);
+   datetime expTime = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+   double stopLim = OrderGetDouble(ORDER_PRICE_STOPLIMIT);
+   if(PendingLevelsMatch(ordTicket, normP, normSL, normTP, 0.5 * point)) return(true);
 
    MqlTradeRequest req;
-   MqlTradeResult  res;
+   MqlTradeResult res;
    ZeroMemory(req);
    ZeroMemory(res);
-
-   req.action     = TRADE_ACTION_MODIFY;
-   req.order      = ordTicket;
-   req.symbol     = _Symbol;
-   req.price      = normP;
-   req.sl         = normSL;
-   req.tp         = normTP;
-   req.stoplimit  = stopLim;
-   req.type_time  = typeTime;
+   req.action = TRADE_ACTION_MODIFY;
+   req.order = ordTicket;
+   req.symbol = _Symbol;
+   req.price = normP;
+   req.sl = normSL;
+   req.tp = normTP;
+   req.stoplimit = stopLim;
+   req.type_time = typeTime;
    req.expiration = expTime;
-
-   if(!OrderSend(req, res))
+   bool sent = OrderSend(req, res);
+   NoteMarketClosedRetcode(res.retcode);
+   if((sent && res.retcode == TRADE_RETCODE_DONE) || res.retcode == TRADE_RETCODE_NO_CHANGES)
    {
-      NoteMarketClosedRetcode(res.retcode);
-      if(res.retcode == TRADE_RETCODE_NO_CHANGES) return(true);
-      int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-      PrintFormat("SimpleEA: TradeModifyOrder(#%I64u) failed retcode=%u price=%.*f sl=%.*f tp=%.*f",
-                  ordTicket, res.retcode, dg, normP, dg, normSL, dg, normTP);
-      return(false);
+      // Acceptance alone is not enough: the actual broker order must
+      // show these values before we commit the independent TP1/TP2.
+      if(PendingLevelsMatch(ordTicket, normP, normSL, normTP, 0.5 * point)) return(true);
    }
-   return(res.retcode == TRADE_RETCODE_DONE ||
-          res.retcode == TRADE_RETCODE_PLACED ||
-          res.retcode == TRADE_RETCODE_NO_CHANGES);
+   PrintFormat("SimpleEA: TradeModifyOrder(#%I64u) not confirmed (retcode=%u).", ordTicket, res.retcode);
+   return(false); // includes asynchronous PLACED and unknown outcomes
 }
 
 //+------------------------------------------------------------------+
@@ -5213,6 +5762,125 @@ bool TradeDeleteOrder(ulong ordTicket)
    NoteMarketClosedRetcode(res.retcode);
    if(!sent) return(false);
    return(res.retcode == TRADE_RETCODE_DONE);
+}
+
+// A HOLD remains a cancellation obligation until the broker confirms it.
+// Persist this before requesting deletion, so a rejection/restart can
+// never silently turn the waiting entry back into a fresh plan.
+bool RequestPendingCancellation(int i)
+{
+   if(!g_auto[i].cancelPending)
+   {
+      g_auto[i].cancelPending = true;
+      if(!SaveAutoSlotState(i) && SlotGV(i, "cx") < 0.5)
+      {
+         // If the cancel latch cannot be written, invalidate recovery of
+         // a new/pending ladder so a restart treats it as missing and tries
+         // to cancel rather than silently refreshing it. Filesystem failure
+         // can also prevent deletion; the operator must check the broker.
+         GlobalVariableDel(AutoGVKey(i, "lv"));
+         DeleteTargetIntent(i);
+         DeleteTargetUpdate(i);
+         GlobalVariablesFlush();
+         PrintFormat("SimpleEA: %s cancel latch could not be saved; verify/cancel this broker order manually.", g_rows[i].tag);
+      }
+   }
+   return(TradeDeleteOrder(g_auto[i].ticket));
+}
+
+// A partially filled entry can leave an order at the broker while a
+// position is already open. Stop it from increasing the position later;
+// until the broker confirms cancellation, defer software partial exits.
+bool CancelEntryRemainders(int i)
+{
+   bool found = false, tried = false;
+   ulong nowMs = GetTickCount64();
+   bool canCancel = CanTradeNow() && nowMs - g_lastResidualCancelMs[i] >= 2000;
+   for(int k = OrdersTotal() - 1; k >= 0; k--)
+   {
+      ulong ticket = OrderGetTicket(k);
+      if(ticket == 0 || OrderGetString(ORDER_SYMBOL) != _Symbol ||
+         OrderGetInteger(ORDER_MAGIC) != MagicForTF(i)) continue;
+      ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      bool buyEntry = (type == ORDER_TYPE_BUY || type == ORDER_TYPE_BUY_LIMIT ||
+                       type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_BUY_STOP_LIMIT);
+      bool sellEntry = (type == ORDER_TYPE_SELL || type == ORDER_TYPE_SELL_LIMIT ||
+                        type == ORDER_TYPE_SELL_STOP || type == ORDER_TYPE_SELL_STOP_LIMIT);
+      if((g_auto[i].dir > 0 && !buyEntry) || (g_auto[i].dir < 0 && !sellEntry)) continue;
+      found = true;
+      if(canCancel)
+      {
+         tried = true;
+         if(!TradeDeleteOrder(ticket))
+            PrintFormat("SimpleEA: %s entry remainder #%I64u still needs cancellation.", g_rows[i].tag, ticket);
+      }
+   }
+   if(tried) g_lastResidualCancelMs[i] = nowMs;
+   return(found); // rescan on the next sync before permitting TP1/TP2
+}
+
+// A temporarily empty position/order list during reconnect is not proof
+// of closure. Clear a stored target ladder only when broker history proves
+// the original position was fully closed or the unfilled order ended.
+bool BrokerPositionEnded(ulong positionId)
+{
+   if(positionId == 0 || !TerminalInfoInteger(TERMINAL_CONNECTED) ||
+      !HistorySelectByPosition(positionId)) return(false);
+   double entered = 0.0, exited = 0.0;
+   int n = HistoryDealsTotal();
+   for(int k = 0; k < n; k++)
+   {
+      ulong deal = HistoryDealGetTicket(k);
+      if(deal == 0 || (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID) != positionId) continue;
+      long how = HistoryDealGetInteger(deal, DEAL_ENTRY);
+      double volume = HistoryDealGetDouble(deal, DEAL_VOLUME);
+      if(volume <= 0.0) continue;
+      if(how == DEAL_ENTRY_IN) entered += volume;
+      else if(how == DEAL_ENTRY_OUT || how == DEAL_ENTRY_OUT_BY) exited += volume;
+      else if(how == DEAL_ENTRY_INOUT) return(false); // reversal needs manual review
+   }
+   return(entered > 0.0 && exited + 1e-8 >= entered);
+}
+
+bool BrokerOrderEnded(ulong orderId)
+{
+   if(orderId == 0 || !TerminalInfoInteger(TERMINAL_CONNECTED) || !HistoryOrderSelect(orderId)) return(false);
+   long state = HistoryOrderGetInteger(orderId, ORDER_STATE);
+   if(state != ORDER_STATE_CANCELED && state != ORDER_STATE_EXPIRED &&
+      state != ORDER_STATE_REJECTED && state != ORDER_STATE_FILLED) return(false);
+   ulong positionId = (ulong)HistoryOrderGetInteger(orderId, ORDER_POSITION_ID);
+   if(positionId > 0) return(BrokerPositionEnded(positionId));
+   return(state != ORDER_STATE_FILLED); // a fill with no position id is ambiguous
+}
+
+bool BrokerSlotEnded(int i, bool wasActive)
+{
+   if(wasActive && g_auto[i].isOpen && g_auto[i].diaryPositionId > 0)
+      return(BrokerPositionEnded(g_auto[i].diaryPositionId));
+   if(wasActive && !g_auto[i].isOpen && g_auto[i].ticket > 0)
+      return(BrokerOrderEnded(g_auto[i].ticket));
+   if(!GlobalVariableCheck(AutoGVKey(i, "lv")) ||
+      !GlobalVariableCheck(AutoGVKey(i, "ik")) ||
+      !GlobalVariableCheck(AutoGVKey(i, "ih")) ||
+      !GlobalVariableCheck(AutoGVKey(i, "il"))) return(false);
+   ulong id = ((ulong)SlotGV(i, "ih") << 32) | (ulong)SlotGV(i, "il");
+   int kind = (int)SlotGV(i, "ik");
+   if(kind == 2) return(BrokerPositionEnded(id));
+   if(kind == 1) return(BrokerOrderEnded(id));
+   return(false);
+}
+
+int CountLanePositions(int i)
+{
+   int count = 0;
+   for(int k = 0; k < PositionsTotal(); k++)
+   {
+      ulong ticket = PositionGetTicket(k);
+      if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != MagicForTF(i)) continue;
+      count++;
+   }
+   return(count);
 }
 
 //+------------------------------------------------------------------+
@@ -5233,6 +5901,9 @@ void SyncAutoState()
       bool  wasActive  = g_auto[i].active;
       bool  wasOpen    = (g_auto[i].active && g_auto[i].isOpen);
       bool  wasPending = (g_auto[i].active && !g_auto[i].isOpen);
+      bool  hadResidual = g_auto[i].residualOrder;
+      bool  hadMultiple = g_auto[i].multiplePositions;
+      int   positionCount = CountLanePositions(i);
 
       // ---- 1. Check open positions for this timeframe's magic -------
       int posTotal = PositionsTotal();
@@ -5243,47 +5914,74 @@ void SyncAutoState()
          if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
          if(PositionGetInteger(POSITION_MAGIC) != magic)   continue;
 
+         ulong livePositionId = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+         if(wasOpen && g_auto[i].diaryPositionId > 0 && livePositionId > 0 &&
+            g_auto[i].diaryPositionId != livePositionId)
+         {
+            // Never carry one position's targets/partial flags to another
+            // same-magic position after manual action or multiple fills.
+            g_diarySuppress[i] = true;
+            ResetAutoSlot(i, true);
+            g_diarySuppress[i] = false;
+            wasActive = false; wasOpen = false; wasPending = false;
+            hadResidual = false;
+            PrintFormat("SimpleEA: %s position identity changed; recovering by broker identity.", g_rows[i].tag);
+         }
+         double previousSL = g_auto[i].slPrice;
+         double previousTP = g_auto[i].tpPrice;
          foundPos             = true;
          g_auto[i].active     = true;
          g_auto[i].isOpen     = true;
+         g_auto[i].marketInFlight = false;
+         g_auto[i].multiplePositions = (positionCount > 1);
+         if(g_auto[i].multiplePositions && !hadMultiple)
+            PrintFormat("SimpleEA: %s has multiple same-magic positions; software exits suspended, review manually.", g_rows[i].tag);
          g_auto[i].ticket     = tk;
-         g_auto[i].diaryPositionId = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+         g_auto[i].diaryPositionId = livePositionId;
+         string posComment = PositionGetString(POSITION_COMMENT);
+         g_auto[i].newTradeMarker = (StringFind(posComment, "SEA3_") == 0);
+         g_auto[i].legacyTradeMarker = (StringFind(posComment, "SimpleEA_") == 0);
          g_auto[i].dir        = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
          g_auto[i].curLot     = PositionGetDouble(POSITION_VOLUME);
          g_auto[i].entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
          g_auto[i].slPrice    = PositionGetDouble(POSITION_SL);
          g_auto[i].tpPrice    = PositionGetDouble(POSITION_TP);
          g_auto[i].profitUSD  = PositionGetDouble(POSITION_PROFIT);
+         g_auto[i].residualOrder = CancelEntryRemainders(i);
          if(!wasOpen)
+         {
             g_auto[i].fillBar = g_rows[i].lastBar;   // fill noticed on this bar
+            if(wasPending) g_auto[i].cancelPending = false;
+         }
 
          if(g_auto[i].slPrice > 0.0)
             g_auto[i].slPts = (int)MathRound(MathAbs(g_auto[i].entryPrice - g_auto[i].slPrice) / point);
          else
             g_auto[i].slPts = 0;
+         if(wasOpen)
+         {
+            if(MathAbs(previousSL - g_auto[i].slPrice) > 0.5 * point ||
+               MathAbs(previousTP - g_auto[i].tpPrice) > 0.5 * point)
+               RecoverSlotTargets(i, point); // external SL/TP alteration: do not reuse stale ladder
+            else
+               RefreshSlotTargetDistances(i, point);
+         }
 
          // Recover or transition state when a pending order just filled or EA restarted
          if(!wasOpen)
          {
             if(!wasActive)
                RestoreAutoSlotState(i);
-            if(g_auto[i].initLot <= 0.0)
+            if(wasPending || g_auto[i].initLot <= 0.0)
                g_auto[i].initLot = g_auto[i].curLot;
             if(g_auto[i].entryScore == 0)
                g_auto[i].entryScore = (g_rows[i].direction == g_auto[i].dir && g_rows[i].score != 0)
                                       ? g_rows[i].score : (g_auto[i].dir * (wasPending ? 2 : 3));
 
-            if(g_auto[i].tp3Pts <= 0)
-            {
-               int recTp3 = (g_auto[i].tpPrice > 0.0)
-                  ? (int)MathMax(1.0, MathRound(MathAbs(g_auto[i].tpPrice - g_auto[i].entryPrice) / point))
-                  : (g_plans[i].tp3Pts > 0 ? g_plans[i].tp3Pts : 50);
-               int recTp1 = 1, recTp2 = 1;
-               ComputeTPLevels(recTp3, recTp1, recTp2);
-               g_auto[i].tp1Pts = recTp1;
-               g_auto[i].tp2Pts = recTp2;
-               g_auto[i].tp3Pts = recTp3;
-            }
+            if(!wasActive || GlobalVariableCheck(AutoGVKey(i, "uv")))
+               RecoverSlotTargets(i, point);
+            else
+               RefreshSlotTargetDistances(i, point);
 
             // Fixed exits do not derive TP1/TP2 state from the broker SL.
             // Persisted slot flags and the diary retain partial-close state;
@@ -5292,7 +5990,20 @@ void SyncAutoState()
             if(g_auto[i].lastSignalBar == 0)
                g_auto[i].lastSignalBar = g_rows[i].lastBar;
             DiaryAttachSlotRecord(i);
+            if(g_auto[i].modernTargets && SaveAutoSlotState(i))
+            {
+               DeleteTargetIntent(i);
+               DeleteTargetUpdate(i);
+            }
          }
+         else if(g_auto[i].modernTargets && g_auto[i].diaryPositionId > 0 &&
+                 (int)SlotGV(i, "ik") != 2)
+         {
+            // Promote a market-order/pending identity to its actual position.
+            if(SaveAutoSlotState(i)) { DeleteTargetIntent(i); GlobalVariablesFlush(); }
+         }
+         if(!g_auto[i].residualOrder && (wasPending || hadResidual))
+            DiarySetSettledEntryVolume(i);
          break;
       }
 
@@ -5307,12 +6018,28 @@ void SyncAutoState()
          if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
          if(OrderGetInteger(ORDER_MAGIC) != magic)   continue;
 
+         if(wasOpen || (wasPending && g_auto[i].ticket > 0 && g_auto[i].ticket != tk))
+         {
+            // A different/remainder order must not inherit the old slot.
+            g_diarySuppress[i] = true;
+            ResetAutoSlot(i, true);
+            g_diarySuppress[i] = false;
+            wasActive = false; wasOpen = false; wasPending = false;
+         }
+         double previousEntry = g_auto[i].entryPrice;
+         double previousPendingSL = g_auto[i].slPrice;
+         double previousPendingTP = g_auto[i].tpPrice;
          ENUM_ORDER_TYPE otype = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
          foundOrd             = true;
          g_auto[i].active     = true;
          g_auto[i].isOpen     = false;
+         g_auto[i].marketInFlight = (otype == ORDER_TYPE_BUY || otype == ORDER_TYPE_SELL);
          g_auto[i].ticket     = tk;
-         g_auto[i].dir        = (otype == ORDER_TYPE_BUY_LIMIT || otype == ORDER_TYPE_BUY_STOP) ? 1 : -1;
+         string ordComment = OrderGetString(ORDER_COMMENT);
+         g_auto[i].newTradeMarker = (StringFind(ordComment, "SEA3_") == 0);
+         g_auto[i].legacyTradeMarker = (StringFind(ordComment, "SimpleEA_") == 0);
+         g_auto[i].dir        = (otype == ORDER_TYPE_BUY || otype == ORDER_TYPE_BUY_LIMIT ||
+                                 otype == ORDER_TYPE_BUY_STOP || otype == ORDER_TYPE_BUY_STOP_LIMIT) ? 1 : -1;
          g_auto[i].curLot     = OrderGetDouble(ORDER_VOLUME_CURRENT);
          g_auto[i].entryPrice = OrderGetDouble(ORDER_PRICE_OPEN);
          g_auto[i].slPrice    = OrderGetDouble(ORDER_SL);
@@ -5327,26 +6054,36 @@ void SyncAutoState()
          if(!wasActive)
          {
             RestoreAutoSlotState(i);
-            g_auto[i].initLot    = g_auto[i].curLot;
-            g_auto[i].entryScore = (g_rows[i].direction == g_auto[i].dir && g_rows[i].score != 0)
-                                   ? g_rows[i].score : (g_auto[i].dir * 2);
-            int recTp3 = (g_auto[i].tpPrice > 0.0)
-               ? (int)MathMax(1.0, MathRound(MathAbs(g_auto[i].tpPrice - g_auto[i].entryPrice) / point))
-               : (g_plans[i].tp3Pts > 0 ? g_plans[i].tp3Pts : 50);
-            int recTp1 = 1, recTp2 = 1;
-            ComputeTPLevels(recTp3, recTp1, recTp2);
-            g_auto[i].tp1Pts        = recTp1;
-            g_auto[i].tp2Pts        = recTp2;
-            g_auto[i].tp3Pts        = recTp3;
-            g_auto[i].placedBar     = g_rows[i].lastBar;
+            g_auto[i].initLot = g_auto[i].curLot;
+            if(g_auto[i].entryScore == 0)
+               g_auto[i].entryScore = (g_rows[i].direction == g_auto[i].dir && g_rows[i].score != 0)
+                                      ? g_rows[i].score : (g_auto[i].dir * 2);
+            RecoverSlotTargets(i, point);
+            if(g_auto[i].placedBar == 0) g_auto[i].placedBar = g_rows[i].lastBar;
             g_auto[i].lastSignalBar = g_rows[i].lastBar;
             DiaryAttachSlotRecord(i);
+         }
+         else
+         {
+            if(GlobalVariableCheck(AutoGVKey(i, "uv")) ||
+               MathAbs(previousEntry - g_auto[i].entryPrice) > 0.5 * point ||
+               MathAbs(previousPendingSL - g_auto[i].slPrice) > 0.5 * point ||
+               MathAbs(previousPendingTP - g_auto[i].tpPrice) > 0.5 * point)
+               RecoverSlotTargets(i, point);
+            else
+               RefreshSlotTargetDistances(i, point);
          }
          break;
       }
 
-      if(!foundOrd)
-         ResetAutoSlot(i, true);
+      if(!foundOrd && !GlobalVariableCheck(AutoGVKey(i, "iv")) &&
+         (wasActive || GlobalVariableCheck(AutoGVKey(i, "lv"))) && BrokerSlotEnded(i, wasActive))
+      {
+         if(!wasActive) DiaryReconcileOpenRecords();
+         ResetAutoSlot(i, true); // history proves the slot ended
+      }
+      // Otherwise preserve the identity/journal across disconnect or
+      // delayed history; an unresolved slot blocks new entries.
    }
 }
 
@@ -5355,136 +6092,109 @@ void SyncAutoState()
 //+------------------------------------------------------------------+
 bool PlacePlanOrder(int i)
 {
-   //  THE NEW-BAR PLACEMENT GATE, first key on this door.  A new order
-   //  may only leave the terminal for a row whose own timeframe printed
-   //  a new closed bar in the current CheckNewBars() pass.  Every other
-   //  ManageAutoBar() pass - EA attach/restart, the return to a
-   //  supported chart, a timer/schedule resume, or a pass triggered by
-   //  another timeframe's close - reaches this function with the row
-   //  unmarked and is refused here, so no caller can place mid-bar.
-   //  Managing existing positions/pendings never comes through this
-   //  function and is unaffected.
    if(i < 0 || i >= TF_COUNT || !g_freshBar[i]) return(false);
-   if(!CanPlaceAutoOrders()) return(false);
+   if(!CanPlaceAutoOrders() || g_auto[i].active || PlanHasUncertainOrder(i)) return(false);
+   if(AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING) return(false);
    if(g_plans[i].state != 2 || g_plans[i].dir == 0) return(false);
    if(!TrendMatchForTF(i)) return(false);
-   //  THE CHOPPY PERMISSION GATE, second key.  UpdatePlanRow() may keep
-   //  a state-2 plan alive solely to manage a position that was already
-   //  open when its row turned Choppy; that plan must never be sent as
-   //  a new order.  Choppy Trade Off means no market and no limit order
-   //  leaves the terminal from this row, whatever a caller requests.
-   //  The per-timeframe master switch: a row switched off sends nothing,
-   //  whatever its score or regime.  (An open trade on that row is still
-   //  managed - this function only ever gates NEW orders.)
    if(!AutoTradingAllowed(i)) return(false);
-   //  The regime permission, Choppy and Mixed alike.
-   if(RegimeBlocksEntry(i))   return(false);
-   //  THE SCORE GATE, second key on the same door.  EvaluateRow() already
-   //  refuses to publish a row whose score does not support its
-   //  direction, so this can only fire if that were ever bypassed - but
-   //  the last line before an order leaves the terminal should not rely
-   //  on a caller having checked.  No BUY below InpBuyScore, no SELL
-   //  above InpSellScore, in the trend game or the range game.
+   if(RegimeBlocksEntry(i)) return(false);
    if(!ScoreAllowsTrade(g_plans[i].dir, g_plans[i].score)) return(false);
 
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if(point <= 0.0 || ask <= 0.0 || bid <= 0.0) return(false);
-
-   int    dir    = g_plans[i].dir;
-   int    score  = g_plans[i].score;
-   bool   market = g_plans[i].market;
-   double lot    = g_plans[i].lot;
-   int    slPts  = g_plans[i].slPts;
-   int    tp1Pts = g_plans[i].tp1Pts;
-   int    tp2Pts = g_plans[i].tp2Pts;
-   int    tp3Pts = g_plans[i].tp3Pts;
-   ulong  ticket = 0;
-
-   if(market)
+   double tick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double pv = PointValuePerLot();
+   double minStop = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   int dir = g_plans[i].dir;
+   int score = g_plans[i].score;
+   bool market = g_plans[i].market;
+   double entry = market ? (dir > 0 ? ask : bid) : g_plans[i].entryPrice;
+   double sl = g_plans[i].slPrice;
+   double tp1 = g_plans[i].tp1Price;
+   double tp2 = g_plans[i].tp2Price;
+   double tp3 = g_plans[i].tp3Price;
+   double lot = g_plans[i].lot;
+   if(!PlanPricesValid(dir, market, entry, sl, tp1, tp2, tp3,
+                       bid, ask, point, tick, minStop, pv)) return(false);
+   int slPts = (int)MathRound((double)dir * (entry - sl) / point);
+   if(slPts <= 0 || lot <= 0.0) return(false);
+   if(!InpUseMinLot && InpUseRisk)
    {
-      double execP = (dir > 0) ? ask : bid;
-      double slP   = NormPrice(execP - (double)dir * (double)slPts * point);
-      double tpP   = NormPrice(execP + (double)dir * (double)tp3Pts * point);
-
-      if(!TradeOpenMarket(i, dir, lot, slP, tpP, ticket))
-         return(false);
-
-      g_auto[i].active        = true;
-      g_auto[i].isOpen        = true;
-      g_auto[i].ticket        = ticket;
-      g_auto[i].dir           = dir;
-      g_auto[i].entryScore    = score;
-      g_auto[i].initLot       = lot;
-      g_auto[i].curLot        = lot;
-      g_auto[i].entryPrice    = execP;
-      g_auto[i].slPrice       = slP;
-      g_auto[i].tpPrice       = tpP;
-      g_auto[i].profitUSD     = 0.0;
-      g_auto[i].slPts         = slPts;
-      g_auto[i].tp1Pts        = tp1Pts;
-      g_auto[i].tp2Pts        = tp2Pts;
-      g_auto[i].tp3Pts        = tp3Pts;
-      g_auto[i].tp1Hit        = false;
-      g_auto[i].tp2Hit        = false;
-      g_auto[i].isRange       = false;               // market orders are never range fades
-      g_auto[i].rngTop        = 0.0;
-      g_auto[i].rngBot        = 0.0;
-      g_auto[i].placedBar     = g_rows[i].lastBar;
-      g_auto[i].fillBar       = g_rows[i].lastBar;
-      g_auto[i].lastEvalBar   = g_rows[i].lastBar;
-      g_auto[i].lastSignalBar = g_rows[i].lastBar;
-      SaveAutoSlotState(i);
-      DiaryBeginPlacement(i, true, slPts, ask - bid);
-      return(true);
+      double budget = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPct / 100.0 *
+                      (MathAbs(score) >= 3 ? RISK_SCORE3_X : 1.0);
+      double actualRisk = lot * (double)slPts * pv; // fees not included
+      if(budget <= 0.0 || actualRisk > budget * 1.000001) return(false);
    }
-   else
+
+   // Persist the intended levels BEFORE sending; a failure to journal
+   // cannot be allowed to create an order whose software targets vanish.
+   if(!BeginTargetIntent(i, dir, entry, sl, tp1, tp2, tp3)) return(false);
+   ulong ticket = 0;
+   double filledVolume = lot, filledPrice = entry;
+   bool inFlight = false;
+   int status = market ? TradeOpenMarket(i, dir, lot, sl, tp3, ticket,
+                                         filledVolume, filledPrice, inFlight)
+                       : TradePlaceLimit(i, dir, lot, entry, sl, tp3, ticket);
+   if(status <= 0)
    {
-      double pendP = ValidLimitPrice(dir, g_plans[i].entryPrice, bid, ask, point);
-      double slP   = NormPrice(pendP - (double)dir * (double)slPts * point);
-      double tpP   = NormPrice(pendP + (double)dir * (double)tp3Pts * point);
-
-      if(!TradePlaceLimit(i, dir, lot, pendP, slP, tpP, ticket))
-         return(false);
-
-      g_auto[i].active        = true;
-      g_auto[i].isOpen        = false;
-      g_auto[i].ticket        = ticket;
-      g_auto[i].dir           = dir;
-      g_auto[i].entryScore    = score;
-      g_auto[i].initLot       = lot;
-      g_auto[i].curLot        = lot;
-      g_auto[i].entryPrice    = pendP;
-      g_auto[i].slPrice       = slP;
-      g_auto[i].tpPrice       = tpP;
-      g_auto[i].profitUSD     = 0.0;
-      g_auto[i].slPts         = slPts;
-      g_auto[i].tp1Pts        = tp1Pts;
-      g_auto[i].tp2Pts        = tp2Pts;
-      g_auto[i].tp3Pts        = tp3Pts;
-      g_auto[i].tp1Hit        = false;
-      g_auto[i].tp2Hit        = false;
-      //  A range box is used only to manage this unfilled entry.  Once
-      //  filled, a box break cannot close the position.
-      g_auto[i].isRange       = (g_rows[i].mode == 2);
-      g_auto[i].rngTop        = (g_rows[i].mode == 2) ? g_rows[i].rngTop : 0.0;
-      g_auto[i].rngBot        = (g_rows[i].mode == 2) ? g_rows[i].rngBot : 0.0;
-      g_auto[i].placedBar     = g_rows[i].lastBar;
-      g_auto[i].lastEvalBar   = g_rows[i].lastBar;
-      g_auto[i].lastSignalBar = g_rows[i].lastBar;
-      SaveAutoSlotState(i);
-      DiaryBeginPlacement(i, false, slPts, ask - bid);
-      return(true);
+      if(status == 0) { DeleteTargetIntent(i); GlobalVariablesFlush(); }
+      else PrintFormat("SimpleEA: %s order result uncertain; verify broker state before clearing intent.", g_rows[i].tag);
+      return(false);
    }
+   if(market && !inFlight && filledPrice > 0.0) entry = filledPrice;
+   if(market && !inFlight && filledVolume > 0.0) lot = filledVolume;
+
+   g_auto[i].active = true;
+   g_auto[i].isOpen = market && !inFlight;
+   g_auto[i].marketInFlight = inFlight;
+   g_auto[i].ticket = ticket;
+   g_auto[i].dir = dir;
+   g_auto[i].entryScore = score;
+   g_auto[i].initLot = lot;
+   g_auto[i].curLot = lot;
+   g_auto[i].entryPrice = entry;
+   g_auto[i].slPrice = sl;
+   g_auto[i].tpPrice = tp3;
+   g_auto[i].tp1Price = tp1;
+   g_auto[i].tp2Price = tp2;
+   g_auto[i].modernTargets = true;
+   g_auto[i].legacyRecovery = false;
+   g_auto[i].newTradeMarker = true;
+   g_auto[i].legacyTradeMarker = false;
+   g_auto[i].profitUSD = 0.0;
+   g_auto[i].slPts = slPts;
+   g_auto[i].tp1Hit = false;
+   g_auto[i].tp2Hit = false;
+   g_auto[i].tp1Skipped = false;
+   g_auto[i].tp2Skipped = false;
+   g_auto[i].tp1Short = false;
+   g_auto[i].tp2Short = false;
+   g_auto[i].isRange = (!market && g_rows[i].mode == 2);
+   g_auto[i].rngTop = g_auto[i].isRange ? g_rows[i].rngTop : 0.0;
+   g_auto[i].rngBot = g_auto[i].isRange ? g_rows[i].rngBot : 0.0;
+   g_auto[i].placedBar = g_rows[i].lastBar;
+   g_auto[i].fillBar = market ? g_rows[i].lastBar : 0;
+   g_auto[i].lastEvalBar = g_rows[i].lastBar;
+   g_auto[i].lastSignalBar = g_rows[i].lastBar;
+   RefreshSlotTargetDistances(i, point);
+   if(SaveAutoSlotState(i) && !inFlight)
+   {
+      DeleteTargetIntent(i);
+      GlobalVariablesFlush();
+   }
+   if(!inFlight) DiaryBeginPlacement(i, market, slPts, ask - bid);
+   return(true);
 }
+
 
 //+------------------------------------------------------------------+
 //  Bar-close autotrading logic:
 //    - Open positions keep their original SL/TP and are NOT closed by
 //      direction flips, HOLD, score weakening or range-box breaks.
 //      TP1/TP2/TP3 handling is performed once per tick in ManageAutoTick().
-//    - Waiting pending limits still update, upgrade or cancel as entry
+//    - Waiting pending limits still update or cancel as entry
 //      management.  These rules never apply to an already-filled trade.
 //    - Flat timeframes retain the existing score-to-order mapping.
 //+------------------------------------------------------------------+
@@ -5523,6 +6233,13 @@ void ManageAutoBar()
       if(g_auto[i].active && !g_auto[i].isOpen)
       {
          int  dir     = g_auto[i].dir;
+         if(g_auto[i].cancelPending)
+         {
+            RequestPendingCancellation(i);
+            continue;
+         }
+         if(g_auto[i].marketInFlight)
+            continue; // await broker resolution; it is not a limit to reprice
 
          // A row that may not open anything cannot keep a waiting order:
          // a pending is still an unfilled NEW entry, whether the row was
@@ -5532,11 +6249,8 @@ void ManageAutoBar()
          // handled in CASE A and is untouched by either veto.
          if(!AutoTradingAllowed(i) || RegimeBlocksEntry(i))
          {
-            if(TradeDeleteOrder(g_auto[i].ticket))
-            {
+            if(RequestPendingCancellation(i))
                g_auto[i].lastSignalBar = g_rows[i].lastBar;
-               ResetAutoSlot(i, true);
-            }
             continue;
          }
 
@@ -5545,11 +6259,8 @@ void ManageAutoBar()
          // while new placements are supposed to be paused).
          if(!timerAllowsPlacement)
          {
-            if(TradeDeleteOrder(g_auto[i].ticket))
-            {
+            if(RequestPendingCancellation(i))
                g_auto[i].lastSignalBar = g_rows[i].lastBar;
-               ResetAutoSlot(i, true);
-            }
             continue;
          }
 
@@ -5571,11 +6282,8 @@ void ManageAutoBar()
          if(g_auto[i].isRange && g_rows[i].ok &&
             (g_rows[i].lastClose > g_auto[i].rngTop || g_rows[i].lastClose < g_auto[i].rngBot))
          {
-            if(TradeDeleteOrder(g_auto[i].ticket))
-            {
+            if(RequestPendingCancellation(i))
                g_auto[i].lastSignalBar = g_rows[i].lastBar;
-               ResetAutoSlot(i, true);
-            }
             continue;
          }
 
@@ -5583,62 +6291,72 @@ void ManageAutoBar()
          if(!g_rows[i].ok || g_rows[i].direction != dir || !TrendMatchForTF(i) ||
             expired || g_plans[i].state != 2)
          {
-            if(TradeDeleteOrder(g_auto[i].ticket))
-            {
-               bool flipped = (g_rows[i].ok && g_rows[i].direction != 0 && g_rows[i].direction != dir);
+            if(RequestPendingCancellation(i))
                g_auto[i].lastSignalBar = g_rows[i].lastBar;
-               ResetAutoSlot(i, !flipped);
-               if(flipped && g_plans[i].state == 2 && TrendMatchForTF(i))
-                  PlacePlanOrder(i);
-            }
             continue;
          }
 
-         // 2) Score upgraded from 2/3 (Pending) to 3/3 (Market) in the same direction ->
-         //    delete the pending limit order and open the Market order immediately
+         // 2) A stronger score cancels the old limit, but never sends an
+         // immediate replacement: it could have partially filled during the
+         // delete. A later fresh bar may place after broker reconciliation.
          if(g_plans[i].market)
          {
-            DiaryBeginUpgrade(i);
-            if(TradeDeleteOrder(g_auto[i].ticket))
-            {
-               ResetAutoSlot(i, false);
-               bool upgraded = PlacePlanOrder(i);
-               DiaryFinishUpgrade(i, upgraded);
-            }
-            else
-               DiaryCancelUpgrade(i);
+            if(RequestPendingCancellation(i))
+               g_auto[i].lastSignalBar = g_rows[i].lastBar;
             continue;
          }
 
-         // 3) Closed candle in the same direction (still Pending 2/3) ->
-         //    update Entry, SL and TP1/TP2/TP3 as per SimpleEA's new plan
-         double newEntry = ValidLimitPrice(dir, g_plans[i].entryPrice, bid, ask, point);
-         double newSL    = NormPrice(newEntry - (double)dir * (double)g_plans[i].slPts * point);
-         double newTP    = NormPrice(newEntry + (double)dir * (double)g_plans[i].tp3Pts * point);
-
-         g_auto[i].slPts  = g_plans[i].slPts;
-         g_auto[i].tp1Pts = g_plans[i].tp1Pts;
-         g_auto[i].tp2Pts = g_plans[i].tp2Pts;
-         g_auto[i].tp3Pts = g_plans[i].tp3Pts;
-
-         if(MathAbs(newEntry - g_auto[i].entryPrice) >= 0.5 * point ||
-            MathAbs(newSL    - g_auto[i].slPrice)    >= 0.5 * point ||
-            MathAbs(newTP    - g_auto[i].tpPrice)    >= 0.5 * point)
+         // Refresh a waiting order only after the broker accepts its
+         // Entry/SL/TP3. A write-ahead journal resolves a restart or a
+         // fill that races the modification; the old levels are never
+         // overwritten just because a modification was requested.
+         double newEntry = g_plans[i].entryPrice;
+         double newSL = g_plans[i].slPrice;
+         double newTP1 = g_plans[i].tp1Price;
+         double newTP2 = g_plans[i].tp2Price;
+         double newTP3 = g_plans[i].tp3Price;
+         double tick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+         double minStop = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+         double pv = PointValuePerLot();
+         if(!PlanPricesValid(dir, false, newEntry, newSL, newTP1, newTP2, newTP3,
+                             bid, ask, point, tick, minStop, pv))
          {
-            if(TradeModifyOrder(g_auto[i].ticket, newEntry, newSL, newTP))
-            {
-               g_auto[i].entryPrice  = newEntry;
-               g_auto[i].slPrice     = newSL;
-               g_auto[i].tpPrice     = newTP;
-               g_auto[i].lastEvalBar = g_rows[i].lastBar;
-            }
+            RequestPendingCancellation(i);
+            continue;
+         }
+         if(!BrokerExitsDiffer(g_auto[i].slPrice, g_auto[i].tpPrice, newSL, newTP3, point))
+            continue; // no broker-observable distinction after a fill; keep the old plan
+         if(!BeginTargetUpdate(i, newEntry, newSL, newTP1, newTP2, newTP3))
+         {
+            RequestPendingCancellation(i);
+            continue;
+         }
+         if(TradeModifyOrder(g_auto[i].ticket, newEntry, newSL, newTP3))
+         {
+            g_auto[i].entryPrice = newEntry;
+            g_auto[i].slPrice = newSL;
+            g_auto[i].tpPrice = newTP3;
+            g_auto[i].tp1Price = newTP1;
+            g_auto[i].tp2Price = newTP2;
+            g_auto[i].modernTargets = true;
+            g_auto[i].slPts = g_plans[i].slPts;
+            g_auto[i].isRange = (g_rows[i].mode == 2);
+            g_auto[i].rngTop = g_auto[i].isRange ? g_rows[i].rngTop : 0.0;
+            g_auto[i].rngBot = g_auto[i].isRange ? g_rows[i].rngBot : 0.0;
+            g_auto[i].lastEvalBar = g_rows[i].lastBar;
+            g_auto[i].diaryPlanSlPts = g_plans[i].slPts;
+            RefreshSlotTargetDistances(i, point);
+            if(SaveAutoSlotState(i)) { DeleteTargetUpdate(i); GlobalVariablesFlush(); }
+            DiarySyncSlotRecord(i, true);
          }
          else
          {
-            g_auto[i].lastEvalBar = g_rows[i].lastBar;
+            // On uncertainty keep the journal. If cancellation is also
+            // rejected the next broker sync reconciles whichever levels
+            // actually exist, rather than asserting the new ones did.
+            PrintFormat("SimpleEA: %s pending modification not confirmed; cancelling if possible.", g_rows[i].tag);
+            RequestPendingCancellation(i);
          }
-         g_auto[i].diaryPlanSlPts = g_plans[i].slPts;
-         DiarySyncSlotRecord(i, true);
          continue;
       }
 
@@ -5659,13 +6377,141 @@ void ManageAutoBar()
    UpdatePlan();
 }
 
+// A milestone is journaled before a close request. An explicit broker
+// rejection leaves it retryable; an uncertain/async result is left in
+// REVIEW rather than risking a duplicate close. Actual volume reduction
+// also reconciles a crash between the broker fill and our persistence.
+void StoreMilestone(int i, int stage, double start, double goal, double done, bool awaiting)
+{
+   if(stage == 1)
+   {
+      g_auto[i].tp1StartLot = start; g_auto[i].tp1GoalLot = goal;
+      g_auto[i].tp1DoneLot = done; g_auto[i].tp1Awaiting = awaiting;
+   }
+   else
+   {
+      g_auto[i].tp2StartLot = start; g_auto[i].tp2GoalLot = goal;
+      g_auto[i].tp2DoneLot = done; g_auto[i].tp2Awaiting = awaiting;
+   }
+}
+
+bool ManageMilestone(int i, int stage, bool reached)
+{
+   if(g_auto[i].ticket == 0 || !PositionSelectByTicket(g_auto[i].ticket)) return(false);
+   double liveVolume = PositionGetDouble(POSITION_VOLUME);
+   if(liveVolume <= 0.0) return(false);
+   g_auto[i].curLot = liveVolume;
+   bool hit = stage == 1 ? g_auto[i].tp1Hit : g_auto[i].tp2Hit;
+   if(hit) return(false);
+   double start = stage == 1 ? g_auto[i].tp1StartLot : g_auto[i].tp2StartLot;
+   double goal = stage == 1 ? g_auto[i].tp1GoalLot : g_auto[i].tp2GoalLot;
+   double done = stage == 1 ? g_auto[i].tp1DoneLot : g_auto[i].tp2DoneLot;
+   bool awaiting = stage == 1 ? g_auto[i].tp1Awaiting : g_auto[i].tp2Awaiting;
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0.0) step = 0.01;
+   double tol = step * 0.25;
+
+   if(goal <= 0.0)
+   {
+      if(!reached) return(false);
+      // Never base TP2 on a stale broker volume after TP1's accepted fill.
+      if(stage == 2 && g_auto[i].tp1GoalLot > 0.0 &&
+         g_auto[i].curLot > g_auto[i].tp1StartLot - g_auto[i].tp1DoneLot + tol)
+         return(false);
+      start = g_auto[i].curLot;
+      goal = stage == 1 ? CalcTP1CloseLot(start) : CalcTP2CloseLot(start);
+      done = 0.0;
+      if(goal <= 0.0)
+      {
+         // There is no valid partial on the broker's lot grid. The level
+         // was reached, but no close was claimed or sent.
+         if(stage == 1) g_auto[i].tp1Hit = true;
+         else g_auto[i].tp2Hit = true;
+         SaveAutoSlotState(i);
+         return(true);
+      }
+      StoreMilestone(i, stage, start, goal, done, false);
+      if(!SaveAutoSlotState(i)) return(false);
+   }
+   double observed = MathMax(0.0, start - g_auto[i].curLot);
+   done = MathMax(done, observed);
+   if(done + tol >= goal)
+   {
+      StoreMilestone(i, stage, start, goal, done, false);
+      if(stage == 1) g_auto[i].tp1Hit = true;
+      else g_auto[i].tp2Hit = true;
+      SaveAutoSlotState(i);
+      return(true);
+   }
+   if(awaiting || !reached)
+   {
+      StoreMilestone(i, stage, start, goal, done, awaiting);
+      return(false);
+   }
+   double remaining = FloorLotStep(goal - done);
+   double minLot = SymbolMinLot();
+   double maximum = FloorLotStep(g_auto[i].curLot - minLot);
+   remaining = MathMin(remaining, maximum);
+   if(remaining < minLot - tol)
+   {
+      if(done > tol)
+      {
+         // A broker partial can leave less than one minimum lot to close.
+         // Do not over-close: expose the shortfall and advance the ladder.
+         if(stage == 1) { g_auto[i].tp1Short = true; g_auto[i].tp1Hit = true; }
+         else { g_auto[i].tp2Short = true; g_auto[i].tp2Hit = true; }
+         StoreMilestone(i, stage, start, goal, done, false);
+         SaveAutoSlotState(i);
+         PrintFormat("SimpleEA: %s TP%d has an uncloseable residual below the broker minimum.",
+                     g_rows[i].tag, stage);
+         return(true);
+      }
+      return(false);
+   }
+
+   // Persist an in-flight marker first: a crash after the send cannot
+   // automatically submit the same close twice.
+   StoreMilestone(i, stage, start, goal, done, true);
+   if(!SaveAutoSlotState(i)) return(false);
+   double executed = 0.0;
+   bool uncertain = false;
+   int status = TradeClosePosition(g_auto[i].ticket, g_auto[i].dir, remaining,
+                                   MagicForTF(i), executed, uncertain);
+   if(status == 0) // confirmed rejection: retry when the target is reached
+   {
+      StoreMilestone(i, stage, start, goal, done, false);
+      SaveAutoSlotState(i);
+      return(false);
+   }
+   if(status < 0) // ambiguous transport/async response: wait for review
+   {
+      PrintFormat("SimpleEA: %s TP%d close result is uncertain; review before retrying.", g_rows[i].tag, stage);
+      return(true);
+   }
+   if(executed > 0.0) done = MathMin(goal, done + executed);
+   if(PositionSelectByTicket(g_auto[i].ticket))
+   {
+      g_auto[i].curLot = PositionGetDouble(POSITION_VOLUME);
+      done = MathMax(done, MathMax(0.0, start - g_auto[i].curLot));
+   }
+   bool wait = uncertain || executed <= 0.0;
+   StoreMilestone(i, stage, start, goal, done, wait);
+   if(done + tol >= goal)
+   {
+      if(stage == 1) g_auto[i].tp1Hit = true;
+      else g_auto[i].tp2Hit = true;
+      StoreMilestone(i, stage, start, goal, done, false);
+   }
+   SaveAutoSlotState(i);
+   return(true);
+}
+
+
 //+------------------------------------------------------------------+
 //  Tick-level fixed-exit management.
 //
-//  TP1 closes 70% when that leaves a valid remainder; TP2 reduces the
-//  remainder to the broker minimum lot when possible; TP3 closes all.
-//  These are the only software-initiated open-position closes.  SL is
-//  placed with the order and is never modified by this function.
+// TP1/TP2 submit staged partial closes on executable Bid/Ask only.
+// The original SL and TP3 remain at the broker and are never moved here.
 //+------------------------------------------------------------------+
 void ManageAutoTick()
 {
@@ -5697,53 +6543,95 @@ void ManageAutoTick()
    {
       for(int i = 0; i < TF_COUNT; i++)
       {
-         if(!g_auto[i].active || !g_auto[i].isOpen) continue;
-
-         int    dir    = g_auto[i].dir;
-         double exitP  = (dir > 0) ? bid : ask;
-         double favPts = (dir > 0) ? (exitP - g_auto[i].entryPrice) / point
-                                   : (g_auto[i].entryPrice - exitP) / point;
-         DiaryUpdateOpenSlot(i, favPts, false);
-
-         // A tick can cross several levels.  Handle them in order so a
-         // small position cannot be reduced to an invalid non-minimum lot.
-         if(g_auto[i].tp3Pts > 0 && favPts >= (double)g_auto[i].tp3Pts - 1e-6)
+         if(!g_auto[i].active) continue;
+         int dir = g_auto[i].dir;
+         if(!g_auto[i].isOpen)
          {
-            if(TradeClosePosition(g_auto[i].ticket, dir, g_auto[i].curLot, MagicForTF(i)))
+            if(g_auto[i].marketInFlight)
             {
-               ResetAutoSlot(i, true);
-               stateChanged = true;
+               // An accepted market request is not a limit to reprice.
+               // Only a genuine entry veto asks the broker to cancel it.
+               bool veto = (!AutoTradingAllowed(i) ||
+                            RegimeBlocksEntry(i) || !AutoTimerAllowsPlacement() ||
+                            !g_rows[i].ok || g_rows[i].direction != dir || !TrendMatchForTF(i));
+               ulong nowMs = GetTickCount64();
+               if((veto || g_auto[i].cancelPending) && nowMs - g_lastSafetyCancelMs[i] >= 2000)
+               {
+                  g_lastSafetyCancelMs[i] = nowMs;
+                  if(RequestPendingCancellation(i)) stateChanged = true;
+               }
+               continue;
+            }
+            // A spread spike can invalidate an unfilled scalp before the
+            // next bar. Cancel, never silently move its structure level.
+            bool missingLevels = (g_auto[i].slPrice <= 0.0 || g_auto[i].tpPrice <= 0.0 ||
+                                  g_auto[i].tp1Price <= 0.0 || g_auto[i].tp2Price <= 0.0 ||
+                                  (double)dir * (g_auto[i].tp2Price - g_auto[i].tp1Price) < -0.5 * point ||
+                                  (double)dir * (g_auto[i].tpPrice - g_auto[i].tp2Price) < -0.5 * point);
+            bool planBlocked = (!g_rows[i].ok || g_rows[i].direction != dir ||
+                                !AutoTradingAllowed(i) || RegimeBlocksEntry(i) ||
+                                !AutoTimerAllowsPlacement() || !TrendMatchForTF(i) ||
+                                g_plans[i].state != 2 || g_plans[i].dir != dir);
+            if(g_auto[i].cancelPending || missingLevels || planBlocked ||
+               (double)dir * (g_auto[i].tp1Price - g_auto[i].entryPrice) <= ask - bid)
+            {
+               ulong nowMs = GetTickCount64();
+               if(nowMs - g_lastSafetyCancelMs[i] >= 2000)
+               {
+                  g_lastSafetyCancelMs[i] = nowMs;
+                  if(RequestPendingCancellation(i)) stateChanged = true;
+               }
             }
             continue;
          }
 
-         double grossPts = (dir > 0) ? (ask - g_auto[i].entryPrice) / point
-                                     : (g_auto[i].entryPrice - bid) / point;
-         if(!g_auto[i].tp1Hit && g_auto[i].tp1Pts > 0 &&
-            (favPts >= (double)g_auto[i].tp1Pts - 1e-6 ||
-             (grossPts >= (double)g_auto[i].tp1Pts - 1e-6 && favPts > 0.0)))
+         double exitP = (dir > 0) ? bid : ask; // executable close side
+         double favPts = (double)dir * (exitP - g_auto[i].entryPrice) / point;
+         DiaryUpdateOpenSlot(i, favPts, false);
+
+         if(g_auto[i].multiplePositions) continue; // single-slot state is ambiguous
+
+         // TP3 is broker-side. When it is crossed, do not manufacture
+         // lower partials while that broker exit is being processed.
+         if(g_auto[i].tpPrice > 0.0 &&
+            (double)dir * (exitP - g_auto[i].tpPrice) >= -0.5 * point) continue;
+
+         bool ordered = (g_auto[i].tp1Price > 0.0 && g_auto[i].tp2Price > 0.0 &&
+                         g_auto[i].tpPrice > 0.0 &&
+                         (double)dir * (g_auto[i].tp2Price - g_auto[i].tp1Price) >= -0.5 * point &&
+                         (double)dir * (g_auto[i].tpPrice - g_auto[i].tp2Price) >= -0.5 * point);
+         if(!ordered || g_auto[i].residualOrder) continue; // wait for entry remainder cancellation
+
+         if(!g_auto[i].tp1Hit && !g_auto[i].tp1Skipped &&
+            (double)dir * (g_auto[i].tp1Price - g_auto[i].entryPrice) <= 0.0)
          {
-            g_auto[i].tp1Hit = true;
+            g_auto[i].tp1Skipped = true;
             SaveAutoSlotState(i);
             stateChanged = true;
-
-            double close70 = CalcTP1CloseLot(g_auto[i].curLot);
-            if(close70 > 0.0 &&
-               TradeClosePosition(g_auto[i].ticket, dir, close70, MagicForTF(i)))
-               g_auto[i].curLot = FloorLotStep(g_auto[i].curLot - close70);
+            PrintFormat("SimpleEA: %s TP1 skipped because the actual fill was at/beyond it.", g_rows[i].tag);
          }
-
-         if(g_auto[i].tp1Hit && !g_auto[i].tp2Hit && g_auto[i].tp2Pts > 0 &&
-            favPts >= (double)g_auto[i].tp2Pts - 1e-6)
+         if(!g_auto[i].tp2Hit && !g_auto[i].tp2Skipped &&
+            (double)dir * (g_auto[i].tp2Price - g_auto[i].entryPrice) <= 0.0)
          {
-            g_auto[i].tp2Hit = true;
+            g_auto[i].tp2Skipped = true;
             SaveAutoSlotState(i);
             stateChanged = true;
-
-            double closeToMin = CalcTP2CloseLot(g_auto[i].curLot);
-            if(closeToMin > 0.0 &&
-               TradeClosePosition(g_auto[i].ticket, dir, closeToMin, MagicForTF(i)))
-               g_auto[i].curLot = SymbolMinLot();
+            PrintFormat("SimpleEA: %s TP2 skipped because the actual fill was at/beyond it.", g_rows[i].tag);
+         }
+         if(!g_auto[i].tp1Skipped && !g_auto[i].tp1Hit)
+         {
+            bool reached = ((double)dir * (exitP - g_auto[i].tp1Price) >= -0.5 * point);
+            if(ManageMilestone(i, 1, reached))
+            {
+               stateChanged = true;
+               continue; // wait for a fresh broker volume before TP2
+            }
+         }
+         if((g_auto[i].tp1Hit || g_auto[i].tp1Skipped) &&
+            !g_auto[i].tp2Skipped && !g_auto[i].tp2Hit)
+         {
+            bool reached = ((double)dir * (exitP - g_auto[i].tp2Price) >= -0.5 * point);
+            if(ManageMilestone(i, 2, reached)) stateChanged = true;
          }
       }
       SyncAutoState();
@@ -5795,8 +6683,11 @@ void UpdateAutoPanel()
 
       string kindTxt = g_auto[i].isOpen
                        ? ((dir > 0) ? "OPEN BUY"  : "OPEN SELL")
-                       : ((dir > 0) ? "BUY LIMIT" : "SELL LIMIT");
+                       : (g_auto[i].marketInFlight ? "MARKET PENDING" :
+                          ((dir > 0) ? "BUY LIMIT" : "SELL LIMIT"));
 
+      if(g_auto[i].residualOrder) kindTxt += " + ENTRY REMAINDER";
+      if(g_auto[i].multiplePositions) kindTxt += " + MULTIPLE: REVIEW";
       g_auto[i].head    = StringFormat("%-3s | %s", g_rows[i].tag, kindTxt);
       g_auto[i].headClr = dirC;
 
@@ -5813,34 +6704,26 @@ void UpdateAutoPanel()
       g_auto[i].val[0][2] = (liveP > 0.0) ? DoubleToString(liveP, dg) : "--";
       g_auto[i].clr[0][2] = clrSilver;
 
-      // ---- Line 1: TP1 & TP2 in price and account currency ----------
-      double tp1Price = NormPrice(g_auto[i].entryPrice + (double)dir * (double)g_auto[i].tp1Pts * point);
-      double tp2Price = NormPrice(g_auto[i].entryPrice + (double)dir * (double)g_auto[i].tp2Pts * point);
-      double tp3Price = (g_auto[i].tpPrice > 0.0)
-                        ? g_auto[i].tpPrice
-                        : NormPrice(g_auto[i].entryPrice + (double)dir * (double)g_auto[i].tp3Pts * point);
-
-      double tp1USD = (pv > 0.0) ? lot * (double)g_auto[i].tp1Pts * pv : 0.0;
-      double tp2USD = (pv > 0.0) ? lot * (double)g_auto[i].tp2Pts * pv : 0.0;
-      double tp3USD = (pv > 0.0) ? lot * (double)g_auto[i].tp3Pts * pv : 0.0;
-
+      // TP1/TP2 are the frozen absolute software levels, not a
+      // reconstruction from TP3 or the potentially slipped fill price.
+      double tp1Price = g_auto[i].tp1Price;
+      double tp2Price = g_auto[i].tp2Price;
+      double tp3Price = g_auto[i].tpPrice;
+      string state1 = g_auto[i].tp1Skipped ? " [SKIP]" :
+                      (g_auto[i].tp1Short ? " [PART]" :
+                       (g_auto[i].tp1Hit ? " [HIT]" : (g_auto[i].tp1Awaiting ? " [REVIEW]" : "")));
+      string state2 = g_auto[i].tp2Skipped ? " [SKIP]" :
+                      (g_auto[i].tp2Short ? " [PART]" :
+                       (g_auto[i].tp2Hit ? " [HIT]" : (g_auto[i].tp2Awaiting ? " [REVIEW]" : "")));
       g_auto[i].lbl[1][0] = "TP1:";
-      g_auto[i].val[1][0] = StringFormat("%s (%s %s)%s",
-                                         DoubleToString(tp1Price, dg), DoubleToString(tp1USD, 2), cur,
-                                         g_auto[i].tp1Hit ? " [HIT]" : "");
-      g_auto[i].clr[1][0] = InpBuyColor;
-
+      g_auto[i].val[1][0] = (tp1Price > 0.0) ? DoubleToString(tp1Price, dg) + state1 : "-- (unavailable)";
+      g_auto[i].clr[1][0] = tp1Price > 0.0 ? InpBuyColor : InpSellColor;
       g_auto[i].lbl[1][1] = "TP2:";
-      g_auto[i].val[1][1] = StringFormat("%s (%s %s)%s",
-                                         DoubleToString(tp2Price, dg), DoubleToString(tp2USD, 2), cur,
-                                         g_auto[i].tp2Hit ? " [HIT]" : "");
-      g_auto[i].clr[1][1] = InpBuyColor;
-
-      // ---- Line 2: TP3 & SL in price (or realtime Ask/Bid when SL is blank)
+      g_auto[i].val[1][1] = (tp2Price > 0.0) ? DoubleToString(tp2Price, dg) + state2 : "-- (unavailable)";
+      g_auto[i].clr[1][1] = tp2Price > 0.0 ? InpBuyColor : InpSellColor;
       g_auto[i].lbl[2][0] = "TP3:";
-      g_auto[i].val[2][0] = StringFormat("%s (%s %s)",
-                                         DoubleToString(tp3Price, dg), DoubleToString(tp3USD, 2), cur);
-      g_auto[i].clr[2][0] = InpBuyColor;
+      g_auto[i].val[2][0] = (tp3Price > 0.0) ? DoubleToString(tp3Price, dg) : "-- (missing)";
+      g_auto[i].clr[2][0] = tp3Price > 0.0 ? InpBuyColor : InpSellColor;
 
       g_auto[i].lbl[2][1] = "SL:";
       if(g_auto[i].slPrice > 0.0 && point > 0.0)
@@ -5849,7 +6732,7 @@ void UpdateAutoPanel()
          double slUSD       = (pv > 0.0) ? lot * (double)slPtsNow * pv : 0.0;
          bool   slProtected = (g_auto[i].isOpen &&
                                ((double)dir * (g_auto[i].slPrice - g_auto[i].entryPrice) >= -0.5 * point));
-         g_auto[i].val[2][1] = StringFormat("%s (%s %s)",
+         g_auto[i].val[2][1] = StringFormat("%s (%s %s est)",
                                             DoubleToString(g_auto[i].slPrice, dg), DoubleToString(slUSD, 2), cur);
          g_auto[i].clr[2][1] = slProtected ? InpBuyColor : InpSellColor;
       }
@@ -5865,9 +6748,10 @@ void UpdateAutoPanel()
       //  The Distance cell counts down in realtime: how far the live
       //  close-side price still is from the next target (TP1 -> TP2 ->
       //  TP3 as each one is hit), not the frozen entry->TP distance.
-      string nextTpTag   = !g_auto[i].tp1Hit ? "TP1" : (!g_auto[i].tp2Hit ? "TP2" : "TP3");
-      double nextTpPrice = !g_auto[i].tp1Hit ? tp1Price
-                           : (!g_auto[i].tp2Hit ? tp2Price : tp3Price);
+      bool next1 = !g_auto[i].tp1Hit && !g_auto[i].tp1Skipped && tp1Price > 0.0;
+      bool next2 = !g_auto[i].tp2Hit && !g_auto[i].tp2Skipped && tp2Price > 0.0;
+      string nextTpTag = next1 ? "TP1" : (next2 ? "TP2" : "TP3");
+      double nextTpPrice = next1 ? tp1Price : (next2 ? tp2Price : tp3Price);
 
       if(g_auto[i].isOpen)
       {
@@ -5886,15 +6770,15 @@ void UpdateAutoPanel()
       }
 
       g_auto[i].lbl[3][1] = "Distance:";
-      int gapPts = (point > 0.0 && liveP > 0.0)
-                   ? (int)MathRound(MathAbs(nextTpPrice - liveP) / point)
-                   : 0;
-      g_auto[i].val[3][1] = StringFormat("to %s %d pts", nextTpTag, gapPts);
+      int gapPts = (point > 0.0 && liveP > 0.0 && nextTpPrice > 0.0)
+                   ? (int)MathRound(MathAbs(nextTpPrice - liveP) / point) : 0;
+      g_auto[i].val[3][1] = nextTpPrice > 0.0
+                            ? StringFormat("to %s %d pts", nextTpTag, gapPts) : "-- (missing)";
       g_auto[i].clr[3][1] = InpBuyColor;
 
-      // ---- fixed exit policy ----------------------------------------
+      // ---- fixed exit policy and cost-estimate disclosure ------------
       g_auto[i].lbl[3][2] = "Exit:";
-      g_auto[i].val[3][2] = "TP/SL";
+      g_auto[i].val[3][2] = "TP/SL; fees excluded";
       g_auto[i].clr[3][2] = clrSilver;
    }
 }
@@ -6568,9 +7452,9 @@ void PlanColumns(int &cA, int &vA, int &cB, int &vB, int &cC, int &vC)
 }
 
 //+------------------------------------------------------------------+
-//  How many lines the second group needs: 3 per active timeframe, 1 for
-//  a HOLD or waiting one.  The panel height follows this, so the block
-//  is never taller than it has content for.
+//  Full plans and indicative held prices use four lines; a HOLD without
+//  a displayable structure or a waiting block uses one. The panel height
+//  follows the content.
 //+------------------------------------------------------------------+
 int TotalPlanLines()
 {
@@ -6625,20 +7509,8 @@ int PlanWidthNeed()
 }
 
 //+------------------------------------------------------------------+
-//  Draw the second group: one block per timeframe, separated from the
-//  first group by a single line.  There is no heading line - the
-//  timeframe tag at the start of each block says what it is.
-//
-//    M5   market -3/3   Entry: 4285.70        Lot: 0.28
-//                       Stop: 4285.98 28pts   Target: 4285.45 25pts  Reach: ~1 bar
-//                       Risk: 7.84 USD        Reward: 7.00 USD   Valid: 3/3 bars
-//    M15  range fade    Entry: 4279.10 (limit at the band)           Lot: 0.28
-//                       Stop: 4271.10 80pts   Target: 4287.10 80pts  Reach: ~2 bars
-//    M30  pending -2/3  Entry: 4286.55        Lot: 0.01
-//                       Stop: 4289.10 255pts   Target: 4281.45 510pts  Reach: ~9 bars
-//    (a row stands aside only for a dead market or a score under the gate:
-//     HOLD  score +1/3 - under the +2/-2 gate)
-//
+// Draw the per-timeframe entry, targets, observation count, estimated
+// staged reward and risk. A HOLD can show indicative non-tradable prices.
 //+------------------------------------------------------------------+
 void DrawPlanBlock(int x, int y)
 {
@@ -6691,7 +7563,7 @@ void DrawPlanBlock(int x, int y)
       else
          DeleteObject(stName);
 
-      // ---- one-liner for a HOLD or waiting block -------------------
+      // ---- one-liner for a HOLD without a preview or waiting block ---
       string nn = "planNote" + sfx;
       if(g_plans[i].lines == 1 && g_plans[i].note != "")
          MakeLabel(nn, x + cA, ry, g_plans[i].note, clrDimGray, InpFontSize, false);
