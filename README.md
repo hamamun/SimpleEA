@@ -26,7 +26,8 @@ The previous non-range distances could be widened to meet the broker's minimum. 
 ## Structure and historical trade plans
 
 - A market entry uses the executable quote; a limit uses a confirmed support/resistance swing, or an eligible 20-bar box band. The stop lies beyond a separate confirmed invalidation swing. If valid structure or broker distances are unavailable, the lane holds rather than inventing a level.
-- TP1, TP2, and TP3 come from separate quantiles of **completed historical bar-level analogs** for the same symbol, timeframe, direction, score, regime, and entry style. Follow-through is measured before the first observed stop. Current opposing swings can cap targets.
+- TP1, TP2, and TP3 come from separate quantiles of **completed historical bar-level analogs** for the same symbol, timeframe, direction, score, regime, and entry style. Follow-through is measured before the first observed stop. Current opposing swings can cap targets. The existing confirmed-swing rule is retained; a nearby swing is not ignored just to make a target larger.
+- Bid-bar resistance is already on the BUY exit side. For SELL, Bid support is converted to an **estimated Ask** using the spread at evaluation, then rounded conservatively. If a confirmed opposing swing is inside the entry spread, the plan holds rather than silently trading past it. The actual future spread may differ.
 - At least **30** qualifying, nonoverlapping hypothetical fills/touches are required. Pending touches are not proof of fills. Bar OHLC and spread proxies cannot recover true tick order, slippage, or historical Ask; ambiguous stop bars are treated conservatively. These statistics are not confidence, win probability, or proof of an edge.
 - M5's shorter observation window is intended for faster scalps; M15/M30 use longer horizons. Actual distances depend on the market and need not be ordered by timeframe. Each lane is checked against its own spread and risk—M5 is not rejected for being smaller than another lane.
 - The screen checks **spread only**, not commission, swap, or slippage. Planned risk, lot sizing, and staged reward **exclude unknown fees**, so actual costs and losses can be higher; the panel displays `Fees: not included`. The diary's settled net results may include broker-reported commissions and swap.
@@ -46,7 +47,18 @@ M5 market +3/3  Entry: <price>   Lot: <lot>       Data: <filled>/<eligible> anal
                 Valid: <bars>    Window: 4 bars    Fees: not included
 ```
 
-If the data are insufficient but confirmed swing barriers are available, a held plan can instead show `Entry`, `Stop`, `TP1~`, `TP2~`, `TP3~`, `Basis: swing-only`, `Action: NO ORDER`, and the reason. These are indicative swing barriers, **not a validated target plan**. If a barrier or stop cannot be determined, it is shown as `--`; the EA does not invent a price. A plan that fails another check may show `Basis: observed` with indicative target candidates. A permission-vetoed otherwise-valid plan shows HOLD and its `Block` reason. Some unavailable-data cases show only a one-line HOLD or `waiting`.
+If the data are insufficient but confirmed swing barriers are available, a held plan can instead show `Entry`, `Stop`, `TP1~`, `TP2~`, `TP3~`, `Basis: swing-only`, `Action: NO ORDER`, and the reason. These are indicative swing barriers, **not a validated target plan**. If a barrier or stop cannot be determined, it is shown as `--`; the EA does not invent a price. A plan that fails another check may show observed candidate targets. A permission-vetoed otherwise-valid plan shows HOLD and its `Block` reason. Some unavailable-data cases show only a one-line HOLD or `waiting`.
+
+### Diagnosing a trading HOLD
+
+When the values are available, a held preview also shows:
+
+- **`Reason`**: the first applicable displayed check, such as `TP1 order/tick`, `TP3 broker minimum`, `TP1 <= spread`, or `swing in spread`. A nearby swing is checked before the remaining price checks; data and history checks can appear first. Resolving one reason does not prove the remaining checks will pass.
+- **`TP1~`**: indicative TP1 price and its directional distance from entry in points. **`Spread`** is the quote spread at plan evaluation, also in points. For example, a TP1 distance of 3 points does not pass a 4-point spread screen. This screen is an extra conservative filter, not a second deduction of spread.
+- **`RawTP1`**: the observed TP1 distance *before* the swing cap and tick rounding. `Basis: observed + swing` means that cap reduced TP1; `Basis: observed` means it did not (TP2/TP3 may still be capped). If an opposing swing is inside the spread, `Swing` shows that barrier instead of `RawTP1`.
+- **`Broker`**: the advertised minimum stops distance and tick size, in points, at evaluation. These are preflight values, not a guarantee the broker will accept the order. Check the MT5 **Experts** log for a changed-quote preflight failure or an unconfirmed order request and its broker return code/comment.
+
+Values are snapshot estimates and point distances are rounded for display; a later quote or broker rule can differ. A **Steady** regime alone does not override price, spread, risk, or permission checks. BUY/SELL remains visible while the plan is HOLD.
 
 When an order or position exists, the separate Autotrading panel shows its broker entry and SL, frozen TP1/TP2/TP3, live quote, and status. It marks the SL money amount as an estimate and displays `fees excluded`. `[HIT]`, `[SKIP]`, `[PART]`, and `[REVIEW]` describe the software partial stages. The main header's `On` describes the master and timer only; it does not mean every account, broker, or plan gate is satisfied.
 

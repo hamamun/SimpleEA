@@ -13,6 +13,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "SimpleAdvisor.mq5").read_text(encoding="utf-8")
+STRUCTURE_ISSUES = re.search(r"enum ENUM_STRUCTURE_ISSUE\s*\{[^}]+\};", SOURCE).group(0)
 
 
 def function_text(name):
@@ -52,7 +53,8 @@ class SourceContracts(unittest.TestCase):
         for obsolete in ("SL_ATR_M5", "SL_ATR_M15", "SL_ATR_M30", "TP_ATR_M5",
                          "TP_ATR_M15", "TP_ATR_M30", "PEND_ATR", "RANGE_SL_ATR", "RANGE_MIN_ATR"):
             self.assertNotIn(obsolete, SOURCE)
-        for name in ("StructureGeometry", "ReplayObservation", "PlanPricesValid", "UpdatePlanRow", "PlacePlanOrder"):
+        for name in ("StructureGeometry",
+                     "ReplayObservation", "PlanPriceIssue", "PlanPricesValid", "UpdatePlanRow", "PlacePlanOrder"):
             body = function_text(name)
             self.assertNotIn("ATRClosed(", body, name)
             self.assertNotIn("signalAtr", body, name)
@@ -92,9 +94,16 @@ class SourceContracts(unittest.TestCase):
         self.assertIn('"--"', preview)
 
     def test_spread_only_screen_and_fee_disclosure(self):
-        prices = function_text("PlanPricesValid")
+        prices = function_text("PlanPriceIssue")
         self.assertIn("(ask - bid) + eps", prices)
         self.assertNotIn("commissionPrice", prices)
+        self.assertIn("PlanPriceIssue(", function_text("PlanPricesValid"))
+        self.assertIn('"TP1 <= spread"', prices)
+        self.assertIn('"TP3 broker minimum"', prices)
+        self.assertIn('"TP2 order/tick"', prices)
+        detail = function_text("ShowPlanPriceDetails")
+        for label in ('"Spread:"', '"RawTP1:"', '"Broker:"', '"Swing:"'):
+            self.assertIn(label, detail)
         plan = function_text("UpdatePlanRow")
         self.assertIn('g_plans[i].lbl[3][2] = "Fees:"', plan)
         self.assertIn('g_plans[i].val[3][2] = "not included"', plan)
@@ -118,14 +127,22 @@ class SourceContracts(unittest.TestCase):
         self.assertIn("pastRegime != obs.regime", observe)
         self.assertIn("pastMarket != market", observe)
         self.assertIn("pastRange != range", observe)
+        self.assertIn("ObservationSpread(bars[t], point, currentSpread)", observe)
+        self.assertNotIn("ObservationSpread(bars[t + 1], point, currentSpread)", observe)
+        self.assertLess(observe.index("geometry.nearBarrier > 0.0"), observe.index("obs.eligible++"))
         self.assertNotIn('"Reach:"', SOURCE)
 
     def test_execution_journals_and_executable_quote(self):
         place = function_text("PlacePlanOrder")
         self.assertLess(place.index("BeginTargetIntent("), place.index("TradeOpenMarket("))
+        self.assertLess(place.index("UpdatePlanRow(i)"), place.index("g_plans[i].state != 2"))
+        self.assertLess(place.index("PlanPricesValid("), place.index("TradeOpenMarket("))
+        self.assertIn("entry preflight HOLD", place)
         self.assertIn("g_plans[i].tp1Price", place)
         bar = function_text("ManageAutoBar")
         pending = bar.split("// ---- CASE B:", 1)[1].split("// ---- CASE C:", 1)[0]
+        self.assertLess(pending.index("UpdatePlanRow(i)"), pending.index("g_plans[i].state != 2"))
+        self.assertLess(pending.index("PlanPricesValid("), pending.index("TradeModifyOrder("))
         self.assertLess(pending.index("BeginTargetUpdate("), pending.index("TradeModifyOrder("))
         self.assertGreater(pending.index("g_auto[i].tp1Price = newTP1"), pending.index("if(TradeModifyOrder("))
         self.assertLess(pending.index("BrokerExitsDiffer("), pending.index("BeginTargetUpdate("))
@@ -143,6 +160,8 @@ class SourceContracts(unittest.TestCase):
         self.assertNotRegex(pending, re.compile(r"RequestPendingCancellation\(i\).*?ResetAutoSlot", re.S))
         self.assertIn("g_auto[i].residualOrder) continue", tick)
         self.assertIn("g_auto[i].multiplePositions) continue", tick)
+        self.assertIn("market request not confirmed", function_text("TradeOpenMarket"))
+        self.assertIn("pending request not confirmed", function_text("TradePlaceLimit"))
         self.assertIn("TRADE_RETCODE_DONE_PARTIAL", function_text("TradeOpenMarket"))
         self.assertIn("inFlight = (res.retcode == TRADE_RETCODE_PLACED)", function_text("TradeOpenMarket"))
         self.assertIn("ORDER_FILLING_RETURN", function_text("TradePlaceLimit"))
@@ -176,8 +195,9 @@ class ExtractedFunctionTests(unittest.TestCase):
     def test_structure_replay_restart_and_milestones(self):
         names = [
             "StructureWindow", "ObservationHorizon", "PriceDown", "PriceUp",
-            "ConfirmedSwingLow", "ConfirmedSwingHigh", "BoxAt", "InsertStructureCap",
-            "StructureGeometry", "ObservationSpread", "ReplayObservation", "PlanPricesValid",
+            "ConfirmedSwingLow", "ConfirmedSwingHigh",
+            "BoxAt", "InsertStructureCap", "StructureGeometry", "ObservationSpread", "ReplayObservation",
+            "PlanPriceIssue", "PlanPricesValid",
             "HurstExponent", "ObservationReturnPrefix", "ObservationHurst",
             "ComputeLegacyTPLevels", "SymbolMinLot", "VolumeStepDigits", "NormalizeLots", "FloorLotStep",
             "CalcTP1CloseLot", "CalcTP2CloseLot", "SetSlotGV", "DeleteTargetIntent", "DeleteTargetUpdate",
@@ -187,7 +207,7 @@ class ExtractedFunctionTests(unittest.TestCase):
             "BrokerPositionEnded", "BrokerOrderEnded", "BrokerSlotEnded",
             "StoreMilestone", "ManageMilestone",
         ]
-        code = "\n\n".join(function_text(name) for name in names)
+        code = STRUCTURE_ISSUES + "\n\n" + "\n\n".join(function_text(name) for name in names)
         # Adapt only MQL's array-reference syntax to std::vector / a C array;
         # the production calculations and branching are otherwise unchanged.
         code = code.replace("const MqlRates &bars[]", "const std::vector<MqlRates> &bars")
@@ -210,9 +230,9 @@ class ExtractedFunctionTests(unittest.TestCase):
 
 
     def test_plan_defaults_and_held_display(self):
-        names = ["ClearPlanRow", "HoldPlan", "ShowHeldPlan", "PlanPricesValid",
-                 "UpdatePlanRow", "CanPlaceAutoOrders"]
-        code = "\n\n".join(function_text(name) for name in names)
+        names = ["ClearPlanRow", "HoldPlan", "ShowHeldPlan", "ShowPlanPriceDetails", "StructureIssueText",
+                 "PlanPriceIssue", "PlanPricesValid", "UpdatePlanRow", "CanPlaceAutoOrders"]
+        code = STRUCTURE_ISSUES + "\n\n" + "\n\n".join(function_text(name) for name in names)
         code = code.replace("MqlRates bars[];", "std::vector<MqlRates> bars;")
         with tempfile.TemporaryDirectory(prefix="simpleea-plan-") as directory:
             d = Path(directory)
@@ -229,11 +249,14 @@ class ExtractedFunctionTests(unittest.TestCase):
     def test_full_observation_pipeline(self):
         names = ["HighPass3", "EfficiencyRatio", "StructureVote", "ScoreAllowsTrade",
                  "StructureWindow", "ObservationHorizon", "PriceDown", "PriceUp",
-                 "ConfirmedSwingLow", "ConfirmedSwingHigh", "BoxAt", "InsertStructureCap",
-                 "StructureGeometry", "ObservationCycleAt", "ObservationTrends",
+                 "ConfirmedSwingLow", "ConfirmedSwingHigh",
+                 "BoxAt", "InsertStructureCap", "StructureGeometry", "ObservationCycleAt", "ObservationTrends",
                  "ObservationSignalATR", "ObservationVolumeOK", "ObservationReturnPrefix",
-                 "ObservationHurst", "ObservationSourceIndex", "ObservationSpread", "ReplayObservation", "PlanPricesValid", "ObserveLane"]
-        code = "\n\n".join(function_text(name) for name in names)
+                 "ObservationHurst", "ObservationSourceIndex", "ObservationSpread", "ReplayObservation", "PlanPriceIssue", "PlanPricesValid", "ObserveLane"]
+        code = STRUCTURE_ISSUES + "\n\n" + "\n\n".join(function_text(name) for name in names)
+        veto = "if(geometry.nearBarrier > 0.0) continue;"
+        self.assertIn(veto, code)
+        code = code.replace(veto, "if(geometry.nearBarrier > 0.0) { nearBarrierRejected++; continue; }")
         code = re.sub(r"const double &(\w+)\[\]", r"const std::vector<double> &\1", code)
         code = re.sub(r"double &(\w+)\[\]", r"std::vector<double> &\1", code)
         code = re.sub(r"const MqlRates &(\w+)\[\]", r"const std::vector<MqlRates> &\1", code)
